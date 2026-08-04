@@ -1,0 +1,19 @@
+.git
+.github
+**/.DS_Store
+**/*.log
+
+# Local secrets & data
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+data/
+uploads/
+
+# Build artifacts
+truerp
+billbook
+*.exe
+*.test

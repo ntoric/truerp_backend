@@ -1,17 +1,14 @@
 # TruERP cloud API
 #
-# From repo root:
-#   cp backend/.env.example backend/.env   # edit secrets
-#   docker compose -f backend/docker-compose.yml up --build
-#
-# Or from backend/:
+# From this repo:
+#   cp .env.example .env   # edit secrets
 #   docker compose up --build
 
 services:
   api:
     build:
-      context: ..
-      dockerfile: backend/Dockerfile
+      context: .
+      dockerfile: Dockerfile
     image: truerp-api:latest
     container_name: truerp-api
     ports:

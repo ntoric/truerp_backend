@@ -1,6 +1,6 @@
-# Build from repo root:
-#   docker build -f backend/Dockerfile -t truerp-api .
-# Or: docker compose -f backend/docker-compose.yml up --build
+# Build from this repo root:
+#   docker build -t truerp-api .
+# Or: docker compose up --build
 
 FROM golang:1.25-bookworm AS builder
 
@@ -10,10 +10,10 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends gcc libc6-dev \
   && rm -rf /var/lib/apt/lists/*
 
-COPY backend/go.mod backend/go.sum ./
+COPY go.mod go.sum ./
 RUN go mod download
 
-COPY backend/ ./
+COPY . ./
 
 # mattn/go-sqlite3 requires CGO
 ENV CGO_ENABLED=1
