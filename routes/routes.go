@@ -239,7 +239,10 @@ func SetupRoutes(r *gin.Engine) {
 		// Stock Entries
 		inventory.GET("/entries", controllers.GetStockEntries)
 		inventory.POST("/entries", controllers.CreateStockEntry)
+		inventory.POST("/entries/approve-all", controllers.ApproveAllPendingStockEntries)
 		inventory.PUT("/entries/:id", controllers.UpdateStockEntry)
+		inventory.POST("/entries/:id/approve", controllers.ApproveStockEntry)
+		inventory.POST("/entries/:id/reject", controllers.RejectStockEntry)
 
 		// Stock Transfers
 		inventory.GET("/transfers", controllers.GetStockTransfers)

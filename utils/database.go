@@ -186,7 +186,247 @@ func runRawMigrations(db *gorm.DB) {
 
 	migrateInvoicesDropLegacyCustomerID(db)
 	migrateBarcodeColumnsToItemCode(db)
+	migratePayrollLabels(db)
 	backfillExpenseCategories(db)
+	migrateWarehouseCodeUnique(db)
+}
+
+// migrateWarehouseCodeUnique drops the legacy global unique index on
+// warehouses.code so codes can be reused across tenants. Uniqueness is now
+// enforced per user via idx_warehouses_user_code.
+func migrateWarehouseCodeUnique(db *gorm.DB) {
+	legacyIndexes := []string{"idx_warehouses_code", "uni_warehouses_code"}
+	for _, name := range legacyIndexes {
+		if !db.Migrator().HasIndex(&models.Warehouse{}, name) {
+			continue
+		}
+		if err := db.Migrator().DropIndex(&models.Warehouse{}, name); err != nil {
+			log.Printf("migrateWarehouseCodeUnique: drop index %s failed: %v", name, err)
+		} else {
+			log.Printf("migrateWarehouseCodeUnique: dropped legacy index %s", name)
+		}
+	}
+
+	// SQLite may still hold an anonymous unique index created from the old
+	// gorm:"uniqueIndex" tag. Rebuild if needed by checking table indexes.
+	var indexNames []string
+	rows, err := db.Raw(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'warehouses'`).Rows()
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			if scanErr := rows.Scan(&name); scanErr == nil {
+				indexNames = append(indexNames, name)
+			}
+		}
+	}
+	for _, name := range indexNames {
+		// Drop any leftover single-column unique index on code only.
+		if name == "idx_warehouses_user_code" || strings.HasPrefix(name, "sqlite_autoindex_") {
+			continue
+		}
+		var sql string
+		if err := db.Raw(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&sql).Error; err != nil {
+			continue
+		}
+		lower := strings.ToLower(sql)
+		if strings.Contains(lower, "unique") &&
+			strings.Contains(lower, "code") &&
+			!strings.Contains(lower, "user_id") {
+			if err := db.Exec(`DROP INDEX IF EXISTS "` + strings.ReplaceAll(name, `"`, `""`) + `"`).Error; err != nil {
+				log.Printf("migrateWarehouseCodeUnique: drop leftover index %s failed: %v", name, err)
+			} else {
+				log.Printf("migrateWarehouseCodeUnique: dropped leftover index %s", name)
+			}
+		}
+	}
+
+	if !db.Migrator().HasIndex(&models.Warehouse{}, "idx_warehouses_user_code") {
+		if err := db.Migrator().CreateIndex(&models.Warehouse{}, "idx_warehouses_user_code"); err != nil {
+			log.Printf("migrateWarehouseCodeUnique: create idx_warehouses_user_code failed: %v", err)
+		}
+	}
+}
+
+// migratePayrollLabels relabels historical payroll rows so reports and cash-bank
+// show "Payroll" instead of "Salary" / "General Expenses" / generic "reduce".
+func migratePayrollLabels(db *gorm.DB) {
+	if err := db.Exec(`
+		UPDATE expenses
+		SET category = 'Payroll'
+		WHERE category = 'Salary'
+		  AND id IN (SELECT expense_id FROM payrolls WHERE expense_id IS NOT NULL)
+	`).Error; err != nil {
+		log.Printf("migratePayrollLabels: expense category update failed: %v", err)
+	}
+
+	if err := db.Exec(`
+		UPDATE cash_transactions
+		SET transaction_type = 'payroll'
+		WHERE is_linked = 1
+		  AND transaction_type = 'reduce'
+		  AND reference LIKE 'PAY-%'
+	`).Error; err != nil {
+		log.Printf("migratePayrollLabels: cash transaction type update failed: %v", err)
+	}
+
+	if err := db.Exec(`
+		UPDATE expenses
+		SET description = REPLACE(description, 'Salary payment', 'Payroll payment')
+		WHERE id IN (SELECT expense_id FROM payrolls WHERE expense_id IS NOT NULL)
+		  AND description LIKE 'Salary payment%'
+	`).Error; err != nil {
+		log.Printf("migratePayrollLabels: expense description update failed: %v", err)
+	}
+
+	if err := db.Exec(`
+		UPDATE expense_items
+		SET description = REPLACE(description, 'Salary payment', 'Payroll payment')
+		WHERE expense_id IN (SELECT expense_id FROM payrolls WHERE expense_id IS NOT NULL)
+		  AND description LIKE 'Salary payment%'
+	`).Error; err != nil {
+		log.Printf("migratePayrollLabels: expense item description update failed: %v", err)
+	}
+
+	if err := db.Exec(`
+		UPDATE cash_transactions
+		SET description = REPLACE(description, 'Salary payment', 'Payroll payment')
+		WHERE transaction_type = 'payroll'
+		  AND description LIKE 'Salary payment%'
+	`).Error; err != nil {
+		log.Printf("migratePayrollLabels: cash description update failed: %v", err)
+	}
+
+	reclassifyPayrollGLAccounts(db)
+}
+
+// reclassifyPayrollGLAccounts moves payroll ledger/journal debit lines from
+// General Expenses (5200) onto a dedicated Payroll (5300) account.
+func reclassifyPayrollGLAccounts(db *gorm.DB) {
+	const (
+		generalExpenseCode = "5200"
+		payrollCode        = "5300"
+	)
+
+	var userIDs []uuid.UUID
+	if err := db.Model(&models.Ledger{}).
+		Where("transaction_type = ?", "payroll").
+		Distinct("user_id").
+		Pluck("user_id", &userIDs).Error; err != nil {
+		log.Printf("migratePayrollLabels: list payroll users failed: %v", err)
+		return
+	}
+	if len(userIDs) == 0 {
+		// Still ensure the Payroll COA account exists for users who already have books.
+		var allUsers []uuid.UUID
+		if err := db.Model(&models.Account{}).Distinct("user_id").Pluck("user_id", &allUsers).Error; err != nil {
+			return
+		}
+		for _, userID := range allUsers {
+			ensurePayrollAccount(db, userID, payrollCode)
+		}
+		return
+	}
+
+	for _, userID := range userIDs {
+		payrollAccount, err := ensurePayrollAccount(db, userID, payrollCode)
+		if err != nil {
+			log.Printf("migratePayrollLabels: ensure payroll account for %s failed: %v", userID, err)
+			continue
+		}
+
+		var generalExpense models.Account
+		if err := db.Where("user_id = ? AND code = ?", userID, generalExpenseCode).First(&generalExpense).Error; err != nil {
+			continue
+		}
+		if generalExpense.ID == payrollAccount.ID {
+			continue
+		}
+
+		var ledgerRows []models.Ledger
+		if err := db.Where(
+			"user_id = ? AND transaction_type = ? AND account_id = ? AND debit > 0",
+			userID, "payroll", generalExpense.ID,
+		).Find(&ledgerRows).Error; err != nil {
+			log.Printf("migratePayrollLabels: load ledger for %s failed: %v", userID, err)
+			continue
+		}
+		if len(ledgerRows) == 0 {
+			continue
+		}
+
+		var moved float64
+		for _, row := range ledgerRows {
+			if err := db.Model(&row).Update("account_id", payrollAccount.ID).Error; err != nil {
+				log.Printf("migratePayrollLabels: move ledger %s failed: %v", row.ID, err)
+				continue
+			}
+			moved += row.Debit
+		}
+		if moved == 0 {
+			continue
+		}
+
+		if err := db.Exec(`
+			UPDATE journal_entry_lines
+			SET account_id = ?
+			WHERE id IN (
+				SELECT jel.id
+				FROM journal_entry_lines jel
+				INNER JOIN journal_entries je ON je.id = jel.entry_id
+				WHERE je.user_id = ?
+				  AND jel.account_id = ?
+				  AND jel.debit > 0
+				  AND (
+					je.description LIKE 'Salary payment%'
+					OR je.description LIKE 'Payroll payment%'
+					OR je.description LIKE 'Salary PAY-%'
+					OR je.description LIKE 'Payroll %'
+				  )
+			)
+		`, payrollAccount.ID, userID, generalExpense.ID).Error; err != nil {
+			log.Printf("migratePayrollLabels: move journal lines for %s failed: %v", userID, err)
+		}
+
+		if err := db.Exec(`
+			UPDATE ledgers
+			SET description = REPLACE(description, 'Salary payment', 'Payroll payment')
+			WHERE user_id = ? AND transaction_type = 'payroll' AND description LIKE 'Salary payment%'
+		`, userID).Error; err != nil {
+			log.Printf("migratePayrollLabels: ledger description update failed: %v", err)
+		}
+
+		if err := db.Model(&generalExpense).Update("balance", generalExpense.Balance-moved).Error; err != nil {
+			log.Printf("migratePayrollLabels: decrease general expense balance failed: %v", err)
+		}
+		if err := db.Model(&payrollAccount).Update("balance", payrollAccount.Balance+moved).Error; err != nil {
+			log.Printf("migratePayrollLabels: increase payroll balance failed: %v", err)
+		}
+	}
+}
+
+func ensurePayrollAccount(db *gorm.DB, userID uuid.UUID, code string) (models.Account, error) {
+	var account models.Account
+	err := db.Where("user_id = ? AND code = ?", userID, code).First(&account).Error
+	if err == nil {
+		return account, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return account, err
+	}
+	account = models.Account{
+		ID:          uuid.New(),
+		UserID:      userID,
+		Code:        code,
+		Name:        "Payroll",
+		AccountType: "expense",
+		IsDefault:   true,
+		IsActive:    true,
+	}
+	if err := db.Create(&account).Error; err != nil {
+		return account, err
+	}
+	return account, nil
 }
 
 // backfillExpenseCategories copies distinct expense.category strings into

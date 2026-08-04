@@ -72,7 +72,7 @@ func recordPurchasePaymentOut(tx *gorm.DB, userID uuid.UUID, accountID *uuid.UUI
 }
 
 // recordPayrollCashOut deducts net salary from a bank account or cash in-hand
-// and writes a linked cash-bank transaction (no AP journal — salary uses expense GL).
+// and writes a linked cash-bank transaction typed as payroll.
 func recordPayrollCashOut(tx *gorm.DB, userID uuid.UUID, accountID *uuid.UUID, amount float64, date time.Time, reference, description string) error {
 	if amount <= 0 {
 		return nil
@@ -91,7 +91,7 @@ func recordPayrollCashOut(tx *gorm.DB, userID uuid.UUID, accountID *uuid.UUID, a
 		ID:              uuid.New(),
 		UserID:          userID,
 		AccountID:       accountID,
-		TransactionType: "reduce",
+		TransactionType: "payroll",
 		Amount:          amount,
 		Date:            date,
 		Description:     description,
@@ -107,9 +107,10 @@ func reversePayrollCashOut(tx *gorm.DB, userID uuid.UUID, reference string) erro
 		return nil
 	}
 	var transactions []models.CashTransaction
+	// Include legacy "reduce" rows created before payroll had its own transaction type.
 	if err := tx.Where(
-		"user_id = ? AND reference = ? AND transaction_type = ? AND is_linked = ?",
-		userID, reference, "reduce", true,
+		"user_id = ? AND reference = ? AND is_linked = ? AND transaction_type IN ?",
+		userID, reference, true, []string{"payroll", "reduce"},
 	).Find(&transactions).Error; err != nil {
 		return err
 	}

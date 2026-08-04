@@ -1,9 +1,15 @@
 package controllers
 
 import (
+	"bytes"
+	"encoding/base64"
 	"fmt"
 	"html"
+	"image/png"
 	"strings"
+
+	"github.com/boombuler/barcode"
+	"github.com/boombuler/barcode/code128"
 )
 
 // BarcodeLabelSize describes a thermal barcode label roll preset.
@@ -63,10 +69,10 @@ func getBarcodeLabelSize(size string) BarcodeLabelSize {
 }
 
 type productLabelData struct {
-	Name     string
-	SKU      string
-	ItemCode string
-	Category string
+	Name      string
+	SKU       string
+	ItemCode  string
+	Category  string
 	SalePrice float64
 	MRP       float64
 }
@@ -80,6 +86,63 @@ func barcodeValueForProduct(p productLabelData) string {
 		code = "0000000000"
 	}
 	return code
+}
+
+// code128PNGDataURI renders a Code128 barcode as a PNG data URI (no CDN / JS needed).
+func code128PNGDataURI(value string, moduleWidth float64, heightPx int) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = "0000000000"
+	}
+	if heightPx < 16 {
+		heightPx = 16
+	}
+
+	bc, err := code128.Encode(value)
+	if err != nil {
+		// Some characters can fail Code128; fall back to a safe payload.
+		bc, err = code128.Encode("0000000000")
+		if err != nil {
+			return ""
+		}
+		value = "0000000000"
+	}
+
+	scale := int(moduleWidth * 2)
+	if scale < 1 {
+		scale = 1
+	}
+	width := bc.Bounds().Dx() * scale
+	if width < 40 {
+		width = bc.Bounds().Dx() * 2
+		if width < 40 {
+			width = 40
+		}
+	}
+
+	scaled, err := barcode.Scale(bc, width, heightPx)
+	if err != nil {
+		return ""
+	}
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, scaled); err != nil {
+		return ""
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
+}
+
+func barcodeImageHTML(value string, moduleWidth float64, heightPx int, fontPx float64) string {
+	dataURI := code128PNGDataURI(value, moduleWidth, heightPx)
+	display := html.EscapeString(strings.TrimSpace(value))
+	if dataURI == "" {
+		return fmt.Sprintf(`<div class="product-barcode-fallback">%s</div>`, display)
+	}
+	return fmt.Sprintf(
+		`<img class="barcode-img" src="%s" alt="%s" />
+	<div class="barcode-text" style="font-size:%.0fpx">%s</div>`,
+		dataURI, display, fontPx, display,
+	)
 }
 
 func buildProductLabelHTML(p productLabelData, size BarcodeLabelSize, compact bool) string {
@@ -96,18 +159,10 @@ func buildProductLabelHTML(p productLabelData, size BarcodeLabelSize, compact bo
 	}
 
 	parts = append(parts, fmt.Sprintf(`	<div class="product-barcode">
-		<svg class="barcode"
-			jsbarcode-format="code128"
-			jsbarcode-value="%s"
-			jsbarcode-width="%.2f"
-			jsbarcode-height="%d"
-			jsbarcode-fontsize="%.0f"
-			jsbarcode-margin="0"
-			jsbarcode-displayvalue="true">
-		</svg>
+		%s
 	</div>
 	<div class="product-price">₹%.2f</div>`,
-		html.EscapeString(code), size.BarcodeW, size.BarcodeH, size.MetaFontPx, p.SalePrice))
+		barcodeImageHTML(code, size.BarcodeW, size.BarcodeH, size.MetaFontPx), p.SalePrice))
 
 	if !compact && p.MRP > 0 {
 		parts = append(parts, fmt.Sprintf(`	<div class="product-mrp">MRP: ₹%.2f</div>`, p.MRP))
@@ -127,6 +182,10 @@ func barcodeLabelPageCSS(size BarcodeLabelSize) string {
 	margin: 0;
 }
 * { box-sizing: border-box; }
+html, body {
+	width: %.2fmm;
+	height: %.2fmm;
+}
 body {
 	font-family: Arial, Helvetica, sans-serif;
 	margin: 0;
@@ -145,6 +204,12 @@ body {
 	justify-content: center;
 	overflow: hidden;
 	border: none;
+	page-break-after: always;
+	break-after: page;
+}
+.label:last-child {
+	page-break-after: auto;
+	break-after: auto;
 }
 .product-name {
 	font-size: %.1fpx;
@@ -164,12 +229,22 @@ body {
 }
 .product-barcode {
 	width: 100%%;
-	line-height: 0;
+	line-height: 1;
 	margin: 1px 0;
 }
-.product-barcode svg {
+.product-barcode .barcode-img {
 	max-width: 100%%;
 	height: auto;
+	display: block;
+	margin: 0 auto;
+}
+.product-barcode .barcode-text,
+.product-barcode-fallback {
+	font-family: "Courier New", Courier, monospace;
+	font-size: %.1fpx;
+	line-height: 1.1;
+	margin-top: 1px;
+	letter-spacing: 0.5px;
 }
 .product-price {
 	font-size: %.1fpx;
@@ -182,15 +257,19 @@ body {
 	color: #555;
 	line-height: 1.1;
 }
-.label + .label { page-break-before: always; }
 @media print {
+	html, body { width: %.2fmm; height: auto; }
 	.label { border: none; }
 }
-`, size.WidthMM, size.HeightMM, size.WidthMM, size.HeightMM, size.PaddingMM,
-		size.NameFontPx, size.SkuFontPx, size.PriceFontPx, size.MetaFontPx)
+`, size.WidthMM, size.HeightMM, size.WidthMM, size.HeightMM,
+		size.WidthMM, size.HeightMM, size.PaddingMM,
+		size.NameFontPx, size.SkuFontPx, size.MetaFontPx, size.PriceFontPx, size.MetaFontPx,
+		size.WidthMM)
 }
 
 func wrapBarcodeLabelDocument(title, css, bodyHTML string) string {
+	// Printing is triggered by the frontend printHtmlDocument helper (in-app iframe).
+	// Avoid embedding window.print() here so desktop/Tauri never depends on popup windows.
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
@@ -200,27 +279,6 @@ func wrapBarcodeLabelDocument(title, css, bodyHTML string) string {
 </head>
 <body>
 %s
-<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
-<script>
-(function() {
-	function render() {
-		try {
-			if (window.JsBarcode) {
-				JsBarcode(".barcode").init();
-			}
-		} catch (e) {}
-	}
-	function doPrint() {
-		render();
-		setTimeout(function() { window.print(); }, 120);
-	}
-	if (document.readyState === "complete") {
-		doPrint();
-	} else {
-		window.onload = doPrint;
-	}
-})();
-</script>
 </body>
 </html>`, html.EscapeString(title), css, bodyHTML)
 }
@@ -234,23 +292,6 @@ func wrapBarcodePreviewDocument(css, bodyHTML string) string {
 </head>
 <body>
 %s
-<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
-<script>
-(function() {
-	function render() {
-		try {
-			if (window.JsBarcode) {
-				JsBarcode(".barcode").init();
-			}
-		} catch (e) {}
-	}
-	if (document.readyState === "complete") {
-		render();
-	} else {
-		window.onload = render;
-	}
-})();
-</script>
 </body>
 </html>`, css, bodyHTML)
 }

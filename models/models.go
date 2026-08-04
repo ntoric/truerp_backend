@@ -394,6 +394,9 @@ type StockEntry struct {
 	ReferenceID uuid.UUID      `json:"reference_id" gorm:"type:uuid"` // invoice_id, po_id, etc.
 	ReferenceType string        `json:"reference_type"` // invoice, purchase_order, etc.
 	Notes       string         `json:"notes"`
+	ApprovalStatus string      `json:"approval_status" gorm:"default:'approved';index"` // pending, approved, rejected
+	ApprovedBy     *uuid.UUID  `json:"approved_by,omitempty" gorm:"type:uuid"`
+	ApprovedAt     *time.Time  `json:"approved_at,omitempty"`
 	EntryDate   time.Time      `json:"entry_date"`
 	CreatedAt   time.Time      `json:"created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"`
@@ -524,6 +527,8 @@ type PurchaseBill struct {
 	BillDate        time.Time      `json:"bill_date" gorm:"not null"`
 	DueDate         *time.Time     `json:"due_date,omitempty"`
 	Status          string         `json:"status" gorm:"default:'unpaid'"` // unpaid, paid, partial
+	WarehouseID     *uuid.UUID     `json:"warehouse_id,omitempty" gorm:"type:uuid;index"`
+	StockStatus     string         `json:"stock_status" gorm:"default:'none'"` // none, pending, approved, rejected, partial
 	SubTotal        float64        `json:"sub_total" gorm:"default:0"`
 	TaxTotal        float64        `json:"tax_total" gorm:"default:0"`
 	TotalAmount     float64        `json:"total_amount" gorm:"default:0"`
@@ -867,7 +872,7 @@ type CashTransaction struct {
 	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
 	AccountID       *uuid.UUID     `json:"account_id,omitempty" gorm:"type:uuid"`
 	Account         *BankAccount   `json:"account,omitempty" gorm:"foreignKey:AccountID"`
-	TransactionType string         `json:"transaction_type" gorm:"not null"` // add, reduce, transfer_in, transfer_out
+	TransactionType string         `json:"transaction_type" gorm:"not null"` // add, reduce, transfer_in, transfer_out, payroll
 	Amount          float64        `json:"amount" gorm:"not null"`
 	Date            time.Time      `json:"date" gorm:"not null"`
 	Description     string         `json:"description"`
@@ -1268,9 +1273,9 @@ type SerialNumber struct {
 
 type Warehouse struct {
 	ID              uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index;uniqueIndex:idx_warehouses_user_code"`
 	Name            string         `json:"name" gorm:"not null"`
-	Code            string         `json:"code" gorm:"uniqueIndex"`
+	Code            string         `json:"code" gorm:"not null;uniqueIndex:idx_warehouses_user_code"`
 	Address         string         `json:"address"`
 	City            string         `json:"city"`
 	State           string         `json:"state"`

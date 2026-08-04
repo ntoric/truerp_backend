@@ -82,6 +82,7 @@ func GetStockEntries(c *gin.Context) {
 	productID := c.Query("product_id")
 	entryType := c.Query("entry_type")
 	outletID := c.Query("outlet_id")
+	approvalStatus := c.Query("approval_status")
 	fromDate := c.Query("from_date")
 	toDate := c.Query("to_date")
 
@@ -100,6 +101,14 @@ func GetStockEntries(c *gin.Context) {
 
 	if outletID != "" {
 		query = query.Where("outlet_id = ?", outletID)
+	}
+
+	if approvalStatus != "" {
+		if approvalStatus == "approved" {
+			query = query.Where("approval_status = ? OR approval_status = ? OR approval_status IS NULL", "approved", "")
+		} else {
+			query = query.Where("approval_status = ?", approvalStatus)
+		}
 	}
 
 	if fromDate != "" {
@@ -184,24 +193,28 @@ func CreateStockEntry(c *gin.Context) {
 		}
 	}
 
+	now := time.Now()
 	entry := models.StockEntry{
-		ID:            uuid.New(),
-		UserID:        userID,
-		ItemName:      input.ItemName,
-		ProductID:     input.ProductID,
-		OutletID:      input.OutletID,
-		EntryType:     input.EntryType,
-		Quantity:      input.Quantity,
-		BalanceQty:    0,
-		CostPrice:     input.CostPrice,
-		BatchNo:       input.BatchNo,
-		ItemCode:      input.ItemCode,
-		MfgDate:       input.MfgDate,
-		ExpDate:       input.ExpDate,
-		ReferenceID:   input.ReferenceID,
-		ReferenceType: input.ReferenceType,
-		Notes:         input.Notes,
-		EntryDate:     time.Now(),
+		ID:             uuid.New(),
+		UserID:         userID,
+		ItemName:       input.ItemName,
+		ProductID:      input.ProductID,
+		OutletID:       input.OutletID,
+		EntryType:      input.EntryType,
+		Quantity:       input.Quantity,
+		BalanceQty:     0,
+		CostPrice:      input.CostPrice,
+		BatchNo:        input.BatchNo,
+		ItemCode:       input.ItemCode,
+		MfgDate:        input.MfgDate,
+		ExpDate:        input.ExpDate,
+		ReferenceID:    input.ReferenceID,
+		ReferenceType:  input.ReferenceType,
+		Notes:          input.Notes,
+		ApprovalStatus: "approved",
+		ApprovedBy:     &userID,
+		ApprovedAt:     &now,
+		EntryDate:      now,
 	}
 
 	if err := utils.DB.Create(&entry).Error; err != nil {
@@ -288,14 +301,305 @@ func UpdateStockEntry(c *gin.Context) {
 		return
 	}
 
-	// Update inventory stock if product is linked
-	if entry.ProductID != nil {
-		// Adjust the inventory stock by the difference
+	// Only adjust available stock for already-approved entries
+	if entry.ProductID != nil && stockEntryIsApproved(entry.ApprovalStatus) {
 		updateInventoryStock(userID, *entry.ProductID, entry.OutletID, "adjustment", quantityDiff, input.CostPrice)
 	}
 
 	fmt.Printf("[DEBUG] UpdateStockEntry - Entry updated successfully: %s\n", entry.ID)
 	c.JSON(http.StatusOK, entry)
+}
+
+func stockEntryIsApproved(status string) bool {
+	return status == "" || status == "approved"
+}
+
+func resolveDefaultWarehouseID(userID uuid.UUID) uuid.UUID {
+	var defaultWarehouse models.Warehouse
+	if err := utils.DB.Where("user_id = ? AND is_default = ?", userID, true).First(&defaultWarehouse).Error; err == nil {
+		return defaultWarehouse.ID
+	}
+
+	defaultWarehouse = models.Warehouse{
+		ID:        uuid.New(),
+		UserID:    userID,
+		Name:      "Default Warehouse",
+		Code:      "DEFAULT",
+		IsDefault: true,
+		IsActive:  true,
+	}
+	if err := utils.DB.Create(&defaultWarehouse).Error; err != nil {
+		var fallback models.Warehouse
+		if err := utils.DB.Where("user_id = ?", userID).Order("created_at ASC").First(&fallback).Error; err == nil {
+			return fallback.ID
+		}
+		return uuid.Nil
+	}
+	return defaultWarehouse.ID
+}
+
+func createPendingPurchaseStockEntries(userID uuid.UUID, bill *models.PurchaseBill) error {
+	if bill == nil || bill.Status == "draft" {
+		bill.StockStatus = "none"
+		return utils.DB.Model(bill).Update("stock_status", "none").Error
+	}
+
+	warehouseID := uuid.Nil
+	if bill.WarehouseID != nil {
+		warehouseID = *bill.WarehouseID
+	}
+	if warehouseID == uuid.Nil {
+		warehouseID = resolveDefaultWarehouseID(userID)
+		if warehouseID != uuid.Nil {
+			bill.WarehouseID = &warehouseID
+			utils.DB.Model(bill).Update("warehouse_id", warehouseID)
+		}
+	}
+	if warehouseID == uuid.Nil {
+		bill.StockStatus = "none"
+		return utils.DB.Model(bill).Update("stock_status", "none").Error
+	}
+
+	created := 0
+	for _, item := range bill.Items {
+		if item.ProductID == nil || item.Quantity <= 0 {
+			continue
+		}
+
+		entry := models.StockEntry{
+			ID:             uuid.New(),
+			UserID:         userID,
+			ItemName:       item.Description,
+			ProductID:      item.ProductID,
+			OutletID:       warehouseID,
+			EntryType:      "purchase",
+			Quantity:       item.Quantity,
+			CostPrice:      item.UnitPrice,
+			BatchNo:        item.BatchNo,
+			ItemCode:       item.ItemCode,
+			MfgDate:        item.MfgDate,
+			ExpDate:        item.ExpDate,
+			ReferenceID:    bill.ID,
+			ReferenceType:  "purchase_bill",
+			Notes:          fmt.Sprintf("Pending approval from purchase bill %s", bill.BillNumber),
+			ApprovalStatus: "pending",
+			EntryDate:      bill.BillDate,
+		}
+		if err := utils.DB.Create(&entry).Error; err != nil {
+			return err
+		}
+		created++
+	}
+
+	stockStatus := "none"
+	if created > 0 {
+		stockStatus = "pending"
+	}
+	bill.StockStatus = stockStatus
+	return utils.DB.Model(bill).Update("stock_status", stockStatus).Error
+}
+
+func removePurchaseStockEntries(userID, billID uuid.UUID) error {
+	var entries []models.StockEntry
+	if err := utils.DB.Where("user_id = ? AND reference_id = ? AND reference_type = ?", userID, billID, "purchase_bill").Find(&entries).Error; err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if stockEntryIsApproved(entry.ApprovalStatus) && entry.ProductID != nil {
+			// Reverse previously applied stock
+			updateInventoryStock(userID, *entry.ProductID, entry.OutletID, "adjustment", -entry.Quantity, entry.CostPrice)
+		}
+		if err := utils.DB.Delete(&entry).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func syncPurchaseBillStockStatus(userID, billID uuid.UUID) {
+	var entries []models.StockEntry
+	if err := utils.DB.Where("user_id = ? AND reference_id = ? AND reference_type = ?", userID, billID, "purchase_bill").Find(&entries).Error; err != nil {
+		return
+	}
+
+	status := "none"
+	if len(entries) > 0 {
+		pending, approved, rejected := 0, 0, 0
+		for _, e := range entries {
+			switch e.ApprovalStatus {
+			case "pending":
+				pending++
+			case "rejected":
+				rejected++
+			default:
+				approved++
+			}
+		}
+		switch {
+		case pending > 0 && (approved > 0 || rejected > 0):
+			status = "partial"
+		case pending > 0:
+			status = "pending"
+		case approved > 0 && rejected > 0:
+			status = "partial"
+		case approved > 0:
+			status = "approved"
+		case rejected > 0:
+			status = "rejected"
+		}
+	}
+
+	utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ? AND id = ?", userID, billID).Update("stock_status", status)
+}
+
+func ApproveStockEntry(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	id := c.Param("id")
+
+	var entry models.StockEntry
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).First(&entry).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Stock entry not found"})
+		return
+	}
+
+	if stockEntryIsApproved(entry.ApprovalStatus) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Stock entry is already approved"})
+		return
+	}
+	if entry.ApprovalStatus == "rejected" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Rejected stock entry cannot be approved"})
+		return
+	}
+
+	now := time.Now()
+	updates := map[string]interface{}{
+		"approval_status": "approved",
+		"approved_by":     userID,
+		"approved_at":     now,
+	}
+	if strings.HasPrefix(entry.Notes, "Pending approval from purchase bill ") {
+		updates["notes"] = "From " + strings.TrimPrefix(entry.Notes, "Pending approval from ")
+	}
+	if err := utils.DB.Model(&entry).Updates(updates).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to approve stock entry"})
+		return
+	}
+
+	if entry.ProductID != nil {
+		updateInventoryStock(userID, *entry.ProductID, entry.OutletID, entry.EntryType, entry.Quantity, entry.CostPrice)
+	}
+
+	if entry.ReferenceType == "purchase_bill" && entry.ReferenceID != uuid.Nil {
+		syncPurchaseBillStockStatus(userID, entry.ReferenceID)
+	}
+
+	entry.ApprovalStatus = "approved"
+	entry.ApprovedBy = &userID
+	entry.ApprovedAt = &now
+	c.JSON(http.StatusOK, entry)
+}
+
+func RejectStockEntry(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	id := c.Param("id")
+
+	var entry models.StockEntry
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).First(&entry).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Stock entry not found"})
+		return
+	}
+
+	if stockEntryIsApproved(entry.ApprovalStatus) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Approved stock entry cannot be rejected"})
+		return
+	}
+	if entry.ApprovalStatus == "rejected" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Stock entry is already rejected"})
+		return
+	}
+
+	var input struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.ShouldBindJSON(&input)
+
+	notes := entry.Notes
+	if input.Reason != "" {
+		notes = "Rejected: " + input.Reason
+	} else if !strings.HasPrefix(notes, "Rejected:") {
+		notes = "Rejected"
+	}
+
+	if err := utils.DB.Model(&entry).Updates(map[string]interface{}{
+		"approval_status": "rejected",
+		"notes":           notes,
+	}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reject stock entry"})
+		return
+	}
+
+	if entry.ReferenceType == "purchase_bill" && entry.ReferenceID != uuid.Nil {
+		syncPurchaseBillStockStatus(userID, entry.ReferenceID)
+	}
+
+	entry.ApprovalStatus = "rejected"
+	entry.Notes = notes
+	c.JSON(http.StatusOK, entry)
+}
+
+func ApproveAllPendingStockEntries(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	var input struct {
+		ReferenceID   string `json:"reference_id"`
+		ReferenceType string `json:"reference_type"`
+	}
+	_ = c.ShouldBindJSON(&input)
+
+	query := utils.DB.Where("user_id = ? AND approval_status = ?", userID, "pending")
+	if input.ReferenceID != "" {
+		query = query.Where("reference_id = ?", input.ReferenceID)
+	}
+	if input.ReferenceType != "" {
+		query = query.Where("reference_type = ?", input.ReferenceType)
+	}
+
+	var entries []models.StockEntry
+	if err := query.Find(&entries).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch pending entries"})
+		return
+	}
+
+	now := time.Now()
+	approvedCount := 0
+	billIDs := map[uuid.UUID]bool{}
+
+	for _, entry := range entries {
+		if err := utils.DB.Model(&entry).Updates(map[string]interface{}{
+			"approval_status": "approved",
+			"approved_by":     userID,
+			"approved_at":     now,
+		}).Error; err != nil {
+			continue
+		}
+		if entry.ProductID != nil {
+			updateInventoryStock(userID, *entry.ProductID, entry.OutletID, entry.EntryType, entry.Quantity, entry.CostPrice)
+		}
+		if entry.ReferenceType == "purchase_bill" && entry.ReferenceID != uuid.Nil {
+			billIDs[entry.ReferenceID] = true
+		}
+		approvedCount++
+	}
+
+	for billID := range billIDs {
+		syncPurchaseBillStockStatus(userID, billID)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":        "Pending stock entries approved",
+		"approved_count": approvedCount,
+	})
 }
 
 func updateInventoryStock(userID, productID, outletID uuid.UUID, entryType string, quantity, costPrice float64) {

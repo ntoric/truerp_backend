@@ -39,7 +39,7 @@ func nextExpenseNumber(tx *gorm.DB, userID uuid.UUID) string {
 	return fmt.Sprintf("EXP-%04d", count+1)
 }
 
-// applyPayrollPayment creates a Salary expense, deducts cash/bank, and posts GL.
+// applyPayrollPayment creates a Payroll expense, deducts cash/bank, and posts GL.
 func applyPayrollPayment(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll, staffName string) error {
 	if payroll.Status != "paid" || payroll.NetSalary <= 0 {
 		return nil
@@ -48,12 +48,12 @@ func applyPayrollPayment(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll,
 		return nil
 	}
 
-	desc := fmt.Sprintf("Salary payment %s — %s", payroll.PaymentNumber, staffName)
+	desc := fmt.Sprintf("Payroll payment %s — %s", payroll.PaymentNumber, staffName)
 	expense := models.Expense{
 		ID:            uuid.New(),
 		UserID:        userID,
 		ExpenseNumber: nextExpenseNumber(tx, userID),
-		Category:      "Salary",
+		Category:      "Payroll",
 		Description:   desc,
 		Amount:        payroll.NetSalary,
 		SubTotal:      payroll.NetSalary,
@@ -94,7 +94,7 @@ func applyPayrollPayment(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll,
 	return tx.Model(payroll).Update("expense_id", expenseID).Error
 }
 
-// reversePayrollPayment restores cash/bank and removes the linked salary expense.
+// reversePayrollPayment restores cash/bank and removes the linked payroll expense.
 func reversePayrollPayment(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll) error {
 	if err := reversePayrollCashOut(tx, userID, payroll.PaymentNumber); err != nil {
 		return err

@@ -1,9 +1,10 @@
 package controllers
 
 import (
-	"truerp/models"
+	"errors"
 	"fmt"
 	"time"
+	"truerp/models"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -18,6 +19,7 @@ const (
 	acCodeSales    = "4100"
 	acCodePurchase = "5100"
 	acCodeExpense  = "5200"
+	acCodePayroll  = "5300"
 )
 
 type glLine struct {
@@ -28,25 +30,27 @@ type glLine struct {
 }
 
 func EnsureDefaultChartOfAccounts(tx *gorm.DB, userID uuid.UUID) error {
-	var count int64
-	if err := tx.Model(&models.Account{}).Where("user_id = ?", userID).Count(&count).Error; err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
-
 	defaults := []models.Account{
-		{ID: uuid.New(), UserID: userID, Code: acCodeCash, Name: "Cash in Hand", AccountType: "asset", SubType: "current_asset", IsDefault: true, IsActive: true},
-		{ID: uuid.New(), UserID: userID, Code: acCodeBank, Name: "Bank", AccountType: "asset", SubType: "current_asset", IsDefault: true, IsActive: true},
-		{ID: uuid.New(), UserID: userID, Code: acCodeAR, Name: "Accounts Receivable", AccountType: "asset", SubType: "current_asset", IsDefault: true, IsActive: true},
-		{ID: uuid.New(), UserID: userID, Code: acCodeAP, Name: "Accounts Payable", AccountType: "liability", SubType: "current_liability", IsDefault: true, IsActive: true},
-		{ID: uuid.New(), UserID: userID, Code: acCodeEquity, Name: "Owner's Equity", AccountType: "equity", SubType: "equity", IsDefault: true, IsActive: true},
-		{ID: uuid.New(), UserID: userID, Code: acCodeSales, Name: "Sales", AccountType: "income", IsDefault: true, IsActive: true},
-		{ID: uuid.New(), UserID: userID, Code: acCodePurchase, Name: "Purchases", AccountType: "expense", IsDefault: true, IsActive: true},
-		{ID: uuid.New(), UserID: userID, Code: acCodeExpense, Name: "General Expenses", AccountType: "expense", IsDefault: true, IsActive: true},
+		{UserID: userID, Code: acCodeCash, Name: "Cash in Hand", AccountType: "asset", SubType: "current_asset", IsDefault: true, IsActive: true},
+		{UserID: userID, Code: acCodeBank, Name: "Bank", AccountType: "asset", SubType: "current_asset", IsDefault: true, IsActive: true},
+		{UserID: userID, Code: acCodeAR, Name: "Accounts Receivable", AccountType: "asset", SubType: "current_asset", IsDefault: true, IsActive: true},
+		{UserID: userID, Code: acCodeAP, Name: "Accounts Payable", AccountType: "liability", SubType: "current_liability", IsDefault: true, IsActive: true},
+		{UserID: userID, Code: acCodeEquity, Name: "Owner's Equity", AccountType: "equity", SubType: "equity", IsDefault: true, IsActive: true},
+		{UserID: userID, Code: acCodeSales, Name: "Sales", AccountType: "income", IsDefault: true, IsActive: true},
+		{UserID: userID, Code: acCodePurchase, Name: "Purchases", AccountType: "expense", IsDefault: true, IsActive: true},
+		{UserID: userID, Code: acCodeExpense, Name: "General Expenses", AccountType: "expense", IsDefault: true, IsActive: true},
+		{UserID: userID, Code: acCodePayroll, Name: "Payroll", AccountType: "expense", IsDefault: true, IsActive: true},
 	}
 	for i := range defaults {
+		var existing models.Account
+		err := tx.Where("user_id = ? AND code = ?", userID, defaults[i].Code).First(&existing).Error
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		defaults[i].ID = uuid.New()
 		if err := tx.Create(&defaults[i]).Error; err != nil {
 			return err
 		}
@@ -275,7 +279,7 @@ func postExpenseAccounting(tx *gorm.DB, userID uuid.UUID, expense *models.Expens
 	})
 }
 
-// postPayrollSalaryAccounting posts salary expense against cash/bank, keyed by payroll ID
+// postPayrollSalaryAccounting posts payroll expense against cash/bank, keyed by payroll ID
 // so reverse/re-apply is idempotent for the general ledger.
 func postPayrollSalaryAccounting(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll, expense *models.Expense) error {
 	if payroll.NetSalary <= 0 {
@@ -283,14 +287,14 @@ func postPayrollSalaryAccounting(tx *gorm.DB, userID uuid.UUID, payroll *models.
 	}
 	desc := expense.Description
 	if desc == "" {
-		desc = fmt.Sprintf("Salary %s", payroll.PaymentNumber)
+		desc = fmt.Sprintf("Payroll %s", payroll.PaymentNumber)
 	}
 	assetCode := acCodeCash
 	if payroll.BankAccountID != nil {
 		assetCode = acCodeBank
 	}
 	return postAutoJournal(tx, userID, payroll.PaymentDate, desc, "payroll", payroll.ID, payroll.PaymentNumber, []glLine{
-		{AccountCode: acCodeExpense, Debit: payroll.NetSalary, Description: desc},
+		{AccountCode: acCodePayroll, Debit: payroll.NetSalary, Description: desc},
 		{AccountCode: assetCode, Credit: payroll.NetSalary, Description: desc},
 	})
 }

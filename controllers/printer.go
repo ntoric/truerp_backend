@@ -48,22 +48,78 @@ func isWideThermal(printSize string) bool {
 	return normalizeThermalPrintSize(printSize) == "3inch"
 }
 
-func thermalDescLen(printSize string) int {
+// thermalCols returns monospace character columns for each roll width (matches ESC/POS).
+func thermalCols(printSize string) int {
 	switch normalizeThermalPrintSize(printSize) {
 	case "1inch":
-		return 12
-	case "1.5inch":
 		return 16
+	case "1.5inch":
+		return 24
 	case "3inch":
-		return 30
+		return 48
 	default:
-		return 20
+		return 32
 	}
 }
 
+func thermalDescLen(printSize string) int {
+	cols := thermalCols(printSize)
+	switch normalizeThermalPrintSize(printSize) {
+	case "3inch":
+		return 28
+	case "1inch":
+		return cols
+	default:
+		return cols
+	}
+}
+
+func thermalSep(cols int, ch rune) string {
+	if cols < 8 {
+		cols = 8
+	}
+	return strings.Repeat(string(ch), cols)
+}
+
+func padRightRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) >= n {
+		return string(r[:n])
+	}
+	return s + strings.Repeat(" ", n-len(r))
+}
+
+func padLeftRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) >= n {
+		return string(r[:n])
+	}
+	return strings.Repeat(" ", n-len(r)) + s
+}
+
+func formatLabelValue(label, value string, cols int) string {
+	label = strings.TrimSpace(label)
+	value = strings.TrimSpace(value)
+	space := cols - runeLen(label) - runeLen(value)
+	if space < 1 {
+		maxLabel := cols - runeLen(value) - 1
+		if maxLabel < 4 {
+			return truncateString(label+" "+value, cols)
+		}
+		return truncateString(label, maxLabel) + " " + value
+	}
+	return label + strings.Repeat(" ", space) + value
+}
+
+func runeLen(s string) int {
+	return len([]rune(s))
+}
+
 type ThermalPrintResponse struct {
-	Content string `json:"content"`
-	Width   int    `json:"width"` // in mm
+	Content    string `json:"content"`
+	Width      int    `json:"width"` // in mm
+	LogoURL    string `json:"logo_url,omitempty"`
+	LogoBase64 string `json:"logo_base64,omitempty"` // data URL for print (avoids CORS)
 }
 
 type DocumentPrintRequest struct {
@@ -81,40 +137,40 @@ type DocumentPrintResponse struct {
 	Width       int    `json:"width,omitempty"`
 	PrinterName string `json:"printer_name,omitempty"`
 	Title       string `json:"title"`
+	LogoURL     string `json:"logo_url,omitempty"`
+	LogoBase64  string `json:"logo_base64,omitempty"` // data URL for print (avoids CORS)
 }
 
-// 2-inch (58mm) template
-const template2Inch = `{{.Header}}
-================================
+// Narrow / stacked item layout (1", 1.5", 2")
+const templateNarrow = `{{.Header}}
+{{.SepStrong}}
 {{.DocumentInfo}}
---------------------------------
+{{.SepWeak}}
 {{.PartyInfo}}
---------------------------------
+{{.SepWeak}}
 {{range .Items}}{{.Description}}
-  {{.Qty}} x {{.Rate}} = {{.Total}}
-{{end}}
---------------------------------
+{{.ItemLine}}
+{{end}}{{.SepWeak}}
 {{.Totals}}
 {{.Footer}}
-================================
+{{.SepStrong}}
 {{.Terms}}
 `
 
-// 3-inch (80mm) template
-const template3Inch = `{{.Header}}
-========================================
+// Wide column layout (3" / 80mm)
+const templateWide = `{{.Header}}
+{{.SepStrong}}
 {{.DocumentInfo}}
-----------------------------------------
+{{.SepWeak}}
 {{.PartyInfo}}
-----------------------------------------
+{{.SepWeak}}
 {{.ItemsHeader}}
 {{range .Items}}{{.ItemLine}}
-{{end}}
-----------------------------------------
+{{end}}{{.SepWeak}}
 {{.Totals}}
 {{.TaxDetails}}
 {{.Footer}}
-========================================
+{{.SepStrong}}
 {{.Terms}}
 `
 
@@ -129,20 +185,23 @@ func GenerateThermalPrint(c *gin.Context) {
 
 	var content string
 	var width int
+	var logoURL string
 
 	switch req.DocumentType {
 	case "invoice":
-		content, width = generateInvoiceThermal(userID, req.DocumentID, req.PrintSize)
+		content, width, logoURL = generateInvoiceThermal(userID, req.DocumentID, req.PrintSize)
 	case "expense":
-		content, width = generateExpenseThermal(userID, req.DocumentID, req.PrintSize)
+		content, width, logoURL = generateExpenseThermal(userID, req.DocumentID, req.PrintSize)
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid document type"})
 		return
 	}
 
 	c.JSON(http.StatusOK, ThermalPrintResponse{
-		Content: content,
-		Width:   width,
+		Content:    content,
+		Width:      width,
+		LogoURL:    logoURL,
+		LogoBase64: thermalLogoDataURL(logoURL),
 	})
 }
 
@@ -185,12 +244,12 @@ func GenerateDocumentPrint(c *gin.Context) {
 		_ = utils.DB.Where("user_id = ?", userID).First(&business)
 
 		if mode == "thermal" {
-			content, width := generateInvoiceThermal(userID, req.DocumentID, printSize)
+			content, width, logoURL := generateInvoiceThermal(userID, req.DocumentID, printSize)
 			if content == "" {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate thermal print"})
 				return
 			}
-			pdfBytes, err := buildThermalReceiptPDF(content, width)
+			pdfBytes, err := buildThermalReceiptPDF(content, width, logoURL)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to build thermal PDF page"})
 				return
@@ -203,6 +262,8 @@ func GenerateDocumentPrint(c *gin.Context) {
 				Width:       width,
 				PrinterName: settings.ThermalPrinterName,
 				Title:       title,
+				LogoURL:     logoURL,
+				LogoBase64:  thermalLogoDataURL(logoURL),
 			})
 			return
 		}
@@ -227,12 +288,12 @@ func GenerateDocumentPrint(c *gin.Context) {
 			return
 		}
 		title := "Expense " + expense.ExpenseNumber
-		content, width := generateExpenseThermal(userID, req.DocumentID, printSize)
+		content, width, logoURL := generateExpenseThermal(userID, req.DocumentID, printSize)
 		if content == "" {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate thermal print"})
 			return
 		}
-		pdfBytes, err := buildThermalReceiptPDF(content, width)
+		pdfBytes, err := buildThermalReceiptPDF(content, width, logoURL)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to build expense PDF page"})
 			return
@@ -249,6 +310,8 @@ func GenerateDocumentPrint(c *gin.Context) {
 			Width:       width,
 			PrinterName: printerName,
 			Title:       title,
+			LogoURL:     logoURL,
+			LogoBase64:  thermalLogoDataURL(logoURL),
 		})
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid document type"})
@@ -259,15 +322,17 @@ func GetThermalPrintPreview(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 	printSize := normalizeThermalPrintSize(c.DefaultQuery("print_size", "2inch"))
 
-	content, width := generateSampleInvoiceThermal(userID, printSize)
+	content, width, logoURL := generateSampleInvoiceThermal(userID, printSize)
 	if content == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate preview"})
 		return
 	}
 
 	c.JSON(http.StatusOK, ThermalPrintResponse{
-		Content: content,
-		Width:   width,
+		Content:    content,
+		Width:      width,
+		LogoURL:    logoURL,
+		LogoBase64: thermalLogoDataURL(logoURL),
 	})
 }
 
@@ -292,7 +357,7 @@ func GetBarcodePrintPreview(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"html": pageHTML, "label_size": size})
 }
 
-func generateSampleInvoiceThermal(userID uuid.UUID, printSize string) (string, int) {
+func generateSampleInvoiceThermal(userID uuid.UUID, printSize string) (string, int, string) {
 	var business models.Business
 	utils.DB.Where("user_id = ?", userID).First(&business)
 	if business.Name == "" {
@@ -330,25 +395,8 @@ func generateSampleInvoiceThermal(userID uuid.UUID, printSize string) (string, i
 
 	printSize = normalizeThermalPrintSize(printSize)
 	width := thermalWidthMM(printSize)
-
-	data := prepareInvoiceData(sample, business, printSize)
-
-	tmplStr := template2Inch
-	if isWideThermal(printSize) {
-		tmplStr = template3Inch
-	}
-
-	tmpl, err := template.New("thermal-preview").Parse(tmplStr)
-	if err != nil {
-		return "", 0
-	}
-
-	var builder strings.Builder
-	if err := tmpl.Execute(&builder, data); err != nil {
-		return "", 0
-	}
-
-	return builder.String(), width
+	content := renderInvoiceThermal(sample, business, printSize)
+	return content, width, thermalLogoURL(userID, business, printSize)
 }
 
 func buildBarcodePreviewHTML(userID uuid.UUID, mode string, labelSizeKey string) string {
@@ -470,81 +518,73 @@ body { font-family: Arial, sans-serif; margin: 0; padding: 8px; background: #f3f
 	return wrapBarcodePreviewDocument(css, body)
 }
 
-func generateInvoiceThermal(userID uuid.UUID, invoiceID uuid.UUID, printSize string) (string, int) {
+func generateInvoiceThermal(userID uuid.UUID, invoiceID uuid.UUID, printSize string) (string, int, string) {
 	var invoice models.Invoice
 	if err := utils.DB.Where("user_id = ? AND id = ?", userID, invoiceID).
 		Preload("Party").
 		Preload("Items").
 		First(&invoice).Error; err != nil {
-		return "", 0
+		return "", 0, ""
 	}
 
-	// Get business info
 	var business models.Business
 	utils.DB.Where("user_id = ?", userID).First(&business)
 
 	printSize = normalizeThermalPrintSize(printSize)
 	width := thermalWidthMM(printSize)
-
-	data := prepareInvoiceData(invoice, business, printSize)
-
-	tmplStr := template2Inch
-	if isWideThermal(printSize) {
-		tmplStr = template3Inch
-	}
-
-	tmpl, err := template.New("thermal").Parse(tmplStr)
-	if err != nil {
-		return "", 0
-	}
-
-	var builder strings.Builder
-	err = tmpl.Execute(&builder, data)
-	if err != nil {
-		return "", 0
-	}
-
-	return builder.String(), width
+	content := renderInvoiceThermal(invoice, business, printSize)
+	return content, width, thermalLogoURL(userID, business, printSize)
 }
 
-func generateExpenseThermal(userID uuid.UUID, expenseID uuid.UUID, printSize string) (string, int) {
+func generateExpenseThermal(userID uuid.UUID, expenseID uuid.UUID, printSize string) (string, int, string) {
 	var expense models.Expense
 	if err := utils.DB.Where("user_id = ? AND id = ?", userID, expenseID).
 		Preload("Items").
 		First(&expense).Error; err != nil {
-		return "", 0
+		return "", 0, ""
 	}
 
-	// Get business info
 	var business models.Business
 	utils.DB.Where("user_id = ?", userID).First(&business)
 
 	printSize = normalizeThermalPrintSize(printSize)
 	width := thermalWidthMM(printSize)
+	content := renderExpenseThermal(expense, business, printSize)
+	return content, width, thermalLogoURL(userID, business, printSize)
+}
 
-	data := prepareExpenseData(expense, business, printSize)
-
-	tmplStr := template2Inch
-	if isWideThermal(printSize) {
-		tmplStr = template3Inch
+func thermalLogoURL(userID uuid.UUID, business models.Business, printSize string) string {
+	// Very narrow rolls can't show a useful logo.
+	size := normalizeThermalPrintSize(printSize)
+	if size == "1inch" || size == "1.5inch" {
+		return ""
 	}
-
-	tmpl, err := template.New("thermal").Parse(tmplStr)
-	if err != nil {
-		return "", 0
+	settings := loadInvoiceSettings(userID)
+	if !settings.ShowLogo {
+		return ""
 	}
+	return strings.TrimSpace(business.LogoURL)
+}
 
-	var builder strings.Builder
-	err = tmpl.Execute(&builder, data)
-	if err != nil {
-		return "", 0
+func thermalLogoDataURL(logoURL string) string {
+	data, kind := fetchThermalLogoBytes(logoURL)
+	if len(data) == 0 || kind == "" {
+		return ""
 	}
-
-	return builder.String(), width
+	mime := "image/png"
+	switch kind {
+	case "JPG":
+		mime = "image/jpeg"
+	case "GIF":
+		mime = "image/gif"
+	}
+	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data)
 }
 
 type InvoiceTemplateData struct {
 	Header       string
+	SepStrong    string
+	SepWeak      string
 	DocumentInfo string
 	PartyInfo    string
 	Items        []ItemTemplateData
@@ -557,6 +597,8 @@ type InvoiceTemplateData struct {
 
 type ExpenseTemplateData struct {
 	Header       string
+	SepStrong    string
+	SepWeak      string
 	DocumentInfo string
 	PartyInfo    string
 	Items        []ItemTemplateData
@@ -575,108 +617,253 @@ type ItemTemplateData struct {
 	ItemLine    string
 }
 
+func buildThermalBusinessHeader(business models.Business, cols int, title string) string {
+	var lines []string
+	if t := strings.TrimSpace(title); t != "" {
+		lines = append(lines, "@C@@B@"+truncateString(t, cols))
+	}
+	name := strings.TrimSpace(business.Name)
+	if name != "" {
+		// @C@ = center, @B@ = bold (interpreted by ESC/POS / HTML printers)
+		lines = append(lines, "@C@@B@"+truncateString(strings.ToUpper(name), cols))
+	}
+	addr := strings.TrimSpace(business.Address)
+	if city := strings.TrimSpace(business.City); city != "" {
+		if addr != "" {
+			addr += ", " + city
+		} else {
+			addr = city
+		}
+	}
+	if state := strings.TrimSpace(business.State); state != "" {
+		if addr != "" {
+			addr += ", " + state
+		} else {
+			addr = state
+		}
+	}
+	if pin := strings.TrimSpace(business.Pincode); pin != "" {
+		if addr != "" {
+			addr += " - " + pin
+		} else {
+			addr = pin
+		}
+	}
+	for _, part := range wrapThermalText(addr, cols) {
+		lines = append(lines, "@C@"+part)
+	}
+	if phone := strings.TrimSpace(business.Phone); phone != "" {
+		lines = append(lines, "@C@"+truncateString("Ph: "+phone, cols))
+	}
+	if gstin := strings.TrimSpace(business.GSTIN); gstin != "" {
+		lines = append(lines, "@C@"+truncateString("GSTIN: "+gstin, cols))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func wrapThermalText(s string, cols int) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	if cols < 8 {
+		cols = 8
+	}
+	words := strings.Fields(s)
+	var lines []string
+	var cur string
+	for _, w := range words {
+		if cur == "" {
+			cur = w
+			continue
+		}
+		if runeLen(cur)+1+runeLen(w) <= cols {
+			cur += " " + w
+			continue
+		}
+		lines = append(lines, truncateString(cur, cols))
+		cur = w
+	}
+	if cur != "" {
+		lines = append(lines, truncateString(cur, cols))
+	}
+	return lines
+}
+
+func formatStackedItemLine(qty, rate, total string, cols int) string {
+	body := fmt.Sprintf("%s x %s = %s", qty, rate, total)
+	if runeLen(body)+2 <= cols {
+		return "  " + body
+	}
+	return truncateString(body, cols)
+}
+
+func formatWideItemLine(desc, qty, rate, total string, cols int) string {
+	// Item (flex) | Qty 4 | Rate 8 | Total 8  (+ spaces)
+	qtyW, rateW, totalW := 4, 8, 8
+	fixed := qtyW + rateW + totalW + 3
+	descW := cols - fixed
+	if descW < 8 {
+		descW = 8
+	}
+	return padRightRunes(truncateString(desc, descW), descW) + " " +
+		padLeftRunes(qty, qtyW) + " " +
+		padLeftRunes(rate, rateW) + " " +
+		padLeftRunes(total, totalW)
+}
+
+func formatWideItemsHeader(cols int) string {
+	qtyW, rateW, totalW := 4, 8, 8
+	fixed := qtyW + rateW + totalW + 3
+	descW := cols - fixed
+	if descW < 8 {
+		descW = 8
+	}
+	return padRightRunes("Item", descW) + " " +
+		padLeftRunes("Qty", qtyW) + " " +
+		padLeftRunes("Rate", rateW) + " " +
+		padLeftRunes("Total", totalW)
+}
+
+func renderInvoiceThermal(invoice models.Invoice, business models.Business, printSize string) string {
+	printSize = normalizeThermalPrintSize(printSize)
+	data := prepareInvoiceData(invoice, business, printSize)
+
+	tmplStr := templateNarrow
+	if isWideThermal(printSize) {
+		tmplStr = templateWide
+	}
+	tmpl, err := template.New("thermal").Parse(tmplStr)
+	if err != nil {
+		return ""
+	}
+	var builder strings.Builder
+	if err := tmpl.Execute(&builder, data); err != nil {
+		return ""
+	}
+	return strings.TrimRight(builder.String(), "\n") + "\n"
+}
+
+func renderExpenseThermal(expense models.Expense, business models.Business, printSize string) string {
+	printSize = normalizeThermalPrintSize(printSize)
+	data := prepareExpenseData(expense, business, printSize)
+
+	tmplStr := templateNarrow
+	if isWideThermal(printSize) {
+		tmplStr = templateWide
+	}
+	tmpl, err := template.New("thermal").Parse(tmplStr)
+	if err != nil {
+		return ""
+	}
+	var builder strings.Builder
+	if err := tmpl.Execute(&builder, data); err != nil {
+		return ""
+	}
+	return strings.TrimRight(builder.String(), "\n") + "\n"
+}
+
 func prepareInvoiceData(invoice models.Invoice, business models.Business, printSize string) InvoiceTemplateData {
-	// Header
-	header := fmt.Sprintf("%s", business.Name)
-	if business.Address != "" {
-		header += fmt.Sprintf("\n%s", business.Address)
-	}
-	if business.Phone != "" {
-		header += fmt.Sprintf("\nPh: %s", business.Phone)
-	}
-	if business.GSTIN != "" {
-		header += fmt.Sprintf("\nGSTIN: %s", business.GSTIN)
-	}
+	cols := thermalCols(printSize)
+	wide := isWideThermal(printSize)
+	sepStrong := thermalSep(cols, '=')
+	sepWeak := thermalSep(cols, '-')
 
-	// Document Info
-	docInfo := fmt.Sprintf("TAX INVOICE: %s", invoice.InvoiceNumber)
-	docInfo += fmt.Sprintf("\nDate: %s", invoice.Date.Format("02-01-2006"))
+	header := buildThermalBusinessHeader(business, cols, "TAX INVOICE")
+
+	docInfo := formatLabelValue("Invoice", invoice.InvoiceNumber, cols)
+	docInfo += "\n" + formatLabelValue("Date", invoice.Date.Format("02-01-2006"), cols)
 	if invoice.DueDate != nil {
-		docInfo += fmt.Sprintf("\nDue: %s", invoice.DueDate.Format("02-01-2006"))
+		docInfo += "\n" + formatLabelValue("Due", invoice.DueDate.Format("02-01-2006"), cols)
 	}
 
-	// Party Info
-	partyInfo := fmt.Sprintf("Bill To: %s", invoice.Party.Name)
+	partyInfo := "Bill To: " + truncateString(invoice.Party.Name, cols-9)
 	if invoice.Party.Address != "" {
-		partyInfo += fmt.Sprintf("\n%s", invoice.Party.Address)
+		for _, line := range wrapThermalText(invoice.Party.Address, cols) {
+			partyInfo += "\n" + line
+		}
 	}
 	if invoice.Party.Phone != "" {
-		partyInfo += fmt.Sprintf("\nPh: %s", invoice.Party.Phone)
+		partyInfo += "\n" + truncateString("Ph: "+invoice.Party.Phone, cols)
 	}
 	if invoice.Party.GSTIN != "" {
-		partyInfo += fmt.Sprintf("\nGSTIN: %s", invoice.Party.GSTIN)
+		partyInfo += "\n" + truncateString("GSTIN: "+invoice.Party.GSTIN, cols)
 	}
 
-	// Items
 	items := make([]ItemTemplateData, len(invoice.Items))
 	maxDescLen := thermalDescLen(printSize)
-	wide := isWideThermal(printSize)
 	for i, item := range invoice.Items {
-		items[i] = ItemTemplateData{
-			Description: truncateString(item.Description, maxDescLen),
-			Qty:         fmt.Sprintf("%.0f", item.Quantity),
-			Rate:        fmt.Sprintf("%.2f", item.UnitPrice),
-			Total:       fmt.Sprintf("%.2f", item.Total),
+		qty := fmt.Sprintf("%.0f", item.Quantity)
+		rate := fmt.Sprintf("%.2f", item.UnitPrice)
+		total := fmt.Sprintf("%.2f", item.Total)
+		desc := truncateString(item.Description, maxDescLen)
+		entry := ItemTemplateData{
+			Description: desc,
+			Qty:         qty,
+			Rate:        rate,
+			Total:       total,
 		}
 		if wide {
-			items[i].ItemLine = fmt.Sprintf("%-30s %5s x %8s = %8s",
-				truncateString(item.Description, 30),
-				fmt.Sprintf("%.0f", item.Quantity),
-				fmt.Sprintf("%.2f", item.UnitPrice),
-				fmt.Sprintf("%.2f", item.Total))
+			entry.ItemLine = formatWideItemLine(item.Description, qty, rate, total, cols)
+		} else {
+			entry.ItemLine = formatStackedItemLine(qty, rate, total, cols)
 		}
+		items[i] = entry
 	}
 
-	// Items Header (3-inch only)
 	itemsHeader := ""
 	if wide {
-		itemsHeader = fmt.Sprintf("%-30s %5s %8s %8s", "Item", "Qty", "Rate", "Total")
+		itemsHeader = formatWideItemsHeader(cols)
 	}
 
-	// Totals
-	totals := fmt.Sprintf("Sub Total: %.2f", invoice.SubTotal)
+	var totalLines []string
+	totalLines = append(totalLines, formatLabelValue("Sub Total", fmt.Sprintf("%.2f", invoice.SubTotal), cols))
 	if invoice.DiscountTotal > 0 {
-		totals += fmt.Sprintf("\nDiscount: -%.2f", invoice.DiscountTotal)
+		totalLines = append(totalLines, formatLabelValue("Discount", fmt.Sprintf("-%.2f", invoice.DiscountTotal), cols))
 	}
 	if invoice.InvoiceDiscount > 0 {
-		totals += fmt.Sprintf("\nInv Disc: -%.2f", invoice.InvoiceDiscount)
+		totalLines = append(totalLines, formatLabelValue("Inv Disc", fmt.Sprintf("-%.2f", invoice.InvoiceDiscount), cols))
 	}
 	if invoice.IsInterState {
-		totals += fmt.Sprintf("\nIGST: %.2f", invoice.IGSTTotal)
+		totalLines = append(totalLines, formatLabelValue("IGST", fmt.Sprintf("%.2f", invoice.IGSTTotal), cols))
 	} else {
-		totals += fmt.Sprintf("\nCGST: %.2f", invoice.CGSTTotal)
-		totals += fmt.Sprintf("\nSGST: %.2f", invoice.SGSTTotal)
-	}
-	if invoice.AdditionalCharges > 0 {
-		totals += fmt.Sprintf("\nAddl Charges: %.2f", invoice.AdditionalCharges)
-	}
-	totals += fmt.Sprintf("\n----------------")
-	totals += fmt.Sprintf("\nTOTAL: %.2f", invoice.TotalAmount)
-	if invoice.AmountPaid > 0 {
-		totals += fmt.Sprintf("\nPaid: %.2f", invoice.AmountPaid)
-		balance := invoice.TotalAmount - invoice.AmountPaid
-		if balance > 0 {
-			totals += fmt.Sprintf("\nBalance: %.2f", balance)
+		if invoice.CGSTTotal > 0 {
+			totalLines = append(totalLines, formatLabelValue("CGST", fmt.Sprintf("%.2f", invoice.CGSTTotal), cols))
+		}
+		if invoice.SGSTTotal > 0 {
+			totalLines = append(totalLines, formatLabelValue("SGST", fmt.Sprintf("%.2f", invoice.SGSTTotal), cols))
 		}
 	}
+	if invoice.AdditionalCharges > 0 {
+		totalLines = append(totalLines, formatLabelValue("Addl Charges", fmt.Sprintf("%.2f", invoice.AdditionalCharges), cols))
+	}
+	totalLines = append(totalLines, sepWeak)
+	totalLines = append(totalLines, formatLabelValue("TOTAL", fmt.Sprintf("%.2f", invoice.TotalAmount), cols))
+	if invoice.AmountPaid > 0 {
+		totalLines = append(totalLines, formatLabelValue("Paid", fmt.Sprintf("%.2f", invoice.AmountPaid), cols))
+		balance := invoice.TotalAmount - invoice.AmountPaid
+		if balance > 0.009 {
+			totalLines = append(totalLines, formatLabelValue("Balance", fmt.Sprintf("%.2f", balance), cols))
+		}
+	}
+	totals := strings.Join(totalLines, "\n")
 
-	// Tax Details (3-inch only)
 	taxDetails := ""
-	if wide {
-		taxDetails = fmt.Sprintf("Payment Mode: %s", invoice.PaymentMode)
+	if wide && invoice.PaymentMode != "" {
+		taxDetails = formatLabelValue("Payment", invoice.PaymentMode, cols)
 	}
 
-	// Footer
-	footer := fmt.Sprintf("Status: %s", strings.ToUpper(invoice.Status))
-
-	// Terms
+	footer := formatLabelValue("Status", strings.ToUpper(invoice.Status), cols)
 	terms := invoice.Terms
 	if terms == "" {
 		terms = "Thank you for your business!"
 	}
+	terms = strings.Join(wrapThermalText(terms, cols), "\n")
 
 	return InvoiceTemplateData{
 		Header:       header,
+		SepStrong:    sepStrong,
+		SepWeak:      sepWeak,
 		DocumentInfo: docInfo,
 		PartyInfo:    partyInfo,
 		Items:        items,
@@ -689,76 +876,68 @@ func prepareInvoiceData(invoice models.Invoice, business models.Business, printS
 }
 
 func prepareExpenseData(expense models.Expense, business models.Business, printSize string) ExpenseTemplateData {
-	// Header
-	header := fmt.Sprintf("%s", business.Name)
-	if business.Address != "" {
-		header += fmt.Sprintf("\n%s", business.Address)
-	}
-	if business.Phone != "" {
-		header += fmt.Sprintf("\nPh: %s", business.Phone)
-	}
+	cols := thermalCols(printSize)
+	wide := isWideThermal(printSize)
+	sepStrong := thermalSep(cols, '=')
+	sepWeak := thermalSep(cols, '-')
 
-	// Document Info
-	docInfo := fmt.Sprintf("EXPENSE: %s", expense.ExpenseNumber)
-	docInfo += fmt.Sprintf("\nDate: %s", expense.Date.Format("02-01-2006"))
-	docInfo += fmt.Sprintf("\nCategory: %s", expense.Category)
+	header := buildThermalBusinessHeader(business, cols, "EXPENSE")
 
-	// Party Info
-	partyInfo := fmt.Sprintf("Vendor: %s", expense.Vendor)
+	docInfo := formatLabelValue("No.", expense.ExpenseNumber, cols)
+	docInfo += "\n" + formatLabelValue("Date", expense.Date.Format("02-01-2006"), cols)
+	docInfo += "\n" + formatLabelValue("Category", truncateString(expense.Category, cols/2), cols)
+
+	partyInfo := "Vendor: " + truncateString(expense.Vendor, cols-8)
 	if expense.PaymentMode != "" {
-		partyInfo += fmt.Sprintf("\nPayment: %s", expense.PaymentMode)
+		partyInfo += "\n" + formatLabelValue("Payment", expense.PaymentMode, cols)
 	}
 
-	// Items
 	items := make([]ItemTemplateData, len(expense.Items))
 	maxDescLen := thermalDescLen(printSize)
-	wide := isWideThermal(printSize)
 	for i, item := range expense.Items {
-		items[i] = ItemTemplateData{
+		qty := fmt.Sprintf("%.0f", item.Quantity)
+		rate := fmt.Sprintf("%.2f", item.UnitPrice)
+		total := fmt.Sprintf("%.2f", item.Total)
+		entry := ItemTemplateData{
 			Description: truncateString(item.Description, maxDescLen),
-			Qty:         fmt.Sprintf("%.0f", item.Quantity),
-			Rate:        fmt.Sprintf("%.2f", item.UnitPrice),
-			Total:       fmt.Sprintf("%.2f", item.Total),
+			Qty:         qty,
+			Rate:        rate,
+			Total:       total,
 		}
 		if wide {
-			items[i].ItemLine = fmt.Sprintf("%-30s %5s x %8s = %8s",
-				truncateString(item.Description, 30),
-				fmt.Sprintf("%.0f", item.Quantity),
-				fmt.Sprintf("%.2f", item.UnitPrice),
-				fmt.Sprintf("%.2f", item.Total))
+			entry.ItemLine = formatWideItemLine(item.Description, qty, rate, total, cols)
+		} else {
+			entry.ItemLine = formatStackedItemLine(qty, rate, total, cols)
 		}
+		items[i] = entry
 	}
 
-	// Items Header (3-inch only)
 	itemsHeader := ""
 	if wide {
-		itemsHeader = fmt.Sprintf("%-30s %5s %8s %8s", "Item", "Qty", "Rate", "Total")
+		itemsHeader = formatWideItemsHeader(cols)
 	}
 
-	// Totals
-	totals := fmt.Sprintf("Sub Total: %.2f", expense.SubTotal)
+	var totalLines []string
+	totalLines = append(totalLines, formatLabelValue("Sub Total", fmt.Sprintf("%.2f", expense.SubTotal), cols))
 	if expense.WithGST {
-		totals += fmt.Sprintf("\nTax (%.0f%%): %.2f", expense.TaxRate, expense.TaxTotal)
+		totalLines = append(totalLines, formatLabelValue(fmt.Sprintf("Tax (%.0f%%)", expense.TaxRate), fmt.Sprintf("%.2f", expense.TaxTotal), cols))
 	}
-	totals += fmt.Sprintf("\n----------------")
-	totals += fmt.Sprintf("\nTOTAL: %.2f", expense.Amount)
+	totalLines = append(totalLines, sepWeak)
+	totalLines = append(totalLines, formatLabelValue("TOTAL", fmt.Sprintf("%.2f", expense.Amount), cols))
+	totals := strings.Join(totalLines, "\n")
 
-	// Tax Details (3-inch only)
 	taxDetails := ""
-	if wide {
-		if expense.Notes != "" {
-			taxDetails = fmt.Sprintf("Notes: %s", expense.Notes)
-		}
+	if wide && expense.Notes != "" {
+		taxDetails = strings.Join(wrapThermalText("Notes: "+expense.Notes, cols), "\n")
 	}
 
-	// Footer
-	footer := "EXPENSE RECEIPT"
-
-	// Terms
-	terms := "Thank you for your business!"
+	footer := "@C@EXPENSE RECEIPT"
+	terms := strings.Join(wrapThermalText("Thank you for your business!", cols), "\n")
 
 	return ExpenseTemplateData{
 		Header:       header,
+		SepStrong:    sepStrong,
+		SepWeak:      sepWeak,
 		DocumentInfo: docInfo,
 		PartyInfo:    partyInfo,
 		Items:        items,
@@ -771,8 +950,15 @@ func prepareExpenseData(expense models.Expense, business models.Business, printS
 }
 
 func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	if maxLen <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= maxLen {
 		return s
 	}
-	return s[:maxLen]
+	if maxLen <= 1 {
+		return string(r[:maxLen])
+	}
+	return string(r[:maxLen-1]) + "."
 }

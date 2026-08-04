@@ -382,6 +382,7 @@ func CreatePurchaseBill(c *gin.Context) {
 		BillNumber         string     `json:"bill_number" binding:"required"`
 		BillDate           time.Time  `json:"bill_date" binding:"required"`
 		DueDate            *time.Time `json:"due_date"`
+		WarehouseID        *uuid.UUID `json:"warehouse_id"`
 		TotalAmount        float64    `json:"total_amount" binding:"required"`
 		PaidAmount         float64    `json:"paid_amount"`
 		BalanceDue         float64    `json:"balance_due"`
@@ -423,6 +424,20 @@ func CreatePurchaseBill(c *gin.Context) {
 		return
 	}
 
+	warehouseID := input.WarehouseID
+	if warehouseID == nil || *warehouseID == uuid.Nil {
+		defaultWH := resolveDefaultWarehouseID(userID)
+		if defaultWH != uuid.Nil {
+			warehouseID = &defaultWH
+		}
+	} else {
+		var warehouse models.Warehouse
+		if err := utils.DB.Where("user_id = ? AND id = ?", userID, *warehouseID).First(&warehouse).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid warehouse"})
+			return
+		}
+	}
+
 	bill := models.PurchaseBill{
 		ID:                uuid.New(),
 		UserID:            userID,
@@ -432,6 +447,8 @@ func CreatePurchaseBill(c *gin.Context) {
 		BillNumber:        input.BillNumber,
 		BillDate:          input.BillDate,
 		DueDate:           input.DueDate,
+		WarehouseID:       warehouseID,
+		StockStatus:       "none",
 		Status:            func() string { if input.Status != "" { return input.Status }; return "unpaid" }(),
 		TotalAmount:       input.TotalAmount,
 		PaidAmount:        input.PaidAmount,
@@ -510,6 +527,11 @@ func CreatePurchaseBill(c *gin.Context) {
 		}
 	}
 
+	if err := createPendingPurchaseStockEntries(userID, &bill); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill saved but failed to create pending stock entries"})
+		return
+	}
+
 	c.JSON(http.StatusCreated, bill)
 }
 
@@ -541,6 +563,7 @@ func UpdatePurchaseBill(c *gin.Context) {
 		BillNumber      string    `json:"bill_number"`
 		BillDate        time.Time `json:"bill_date"`
 		DueDate         *time.Time `json:"due_date"`
+		WarehouseID     *uuid.UUID `json:"warehouse_id"`
 		TotalAmount     float64   `json:"total_amount"`
 		PaidAmount      float64    `json:"paid_amount"`
 		BalanceDue      float64    `json:"balance_due"`
@@ -609,12 +632,31 @@ func UpdatePurchaseBill(c *gin.Context) {
 
 	previousPaidAmount := bill.PaidAmount
 
+	warehouseID := input.WarehouseID
+	if warehouseID == nil || *warehouseID == uuid.Nil {
+		if bill.WarehouseID != nil {
+			warehouseID = bill.WarehouseID
+		} else {
+			defaultWH := resolveDefaultWarehouseID(userID)
+			if defaultWH != uuid.Nil {
+				warehouseID = &defaultWH
+			}
+		}
+	} else {
+		var warehouse models.Warehouse
+		if err := utils.DB.Where("user_id = ? AND id = ?", userID, *warehouseID).First(&warehouse).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid warehouse"})
+			return
+		}
+	}
+
 	// Update bill fields
 	bill.PartyID = input.PartyID
 	bill.VendorID = &input.PartyID
 	bill.BillNumber = input.BillNumber
 	bill.BillDate = input.BillDate
 	bill.DueDate = input.DueDate
+	bill.WarehouseID = warehouseID
 	bill.TotalAmount = input.TotalAmount
 	bill.PaidAmount = input.PaidAmount
 	if due := input.TotalAmount - input.PaidAmount; due > 0 {
@@ -676,6 +718,12 @@ func UpdatePurchaseBill(c *gin.Context) {
 	bill.SubTotal = subTotal
 	bill.TaxTotal = taxTotal
 
+	// Reset linked stock entries so edits re-enter pending approval
+	if err := removePurchaseStockEntries(userID, bill.ID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset stock entries for bill"})
+		return
+	}
+
 	if err := utils.DB.Save(&bill).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update bill"})
 		return
@@ -687,6 +735,11 @@ func UpdatePurchaseBill(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to update cash account"})
 			return
 		}
+	}
+
+	if err := createPendingPurchaseStockEntries(userID, &bill); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to create pending stock entries"})
+		return
 	}
 
 	c.JSON(http.StatusOK, bill)
@@ -704,6 +757,11 @@ func DeletePurchaseBill(c *gin.Context) {
 
 	if bill.Status == "paid" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot delete paid bill"})
+		return
+	}
+
+	if err := removePurchaseStockEntries(userID, bill.ID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove linked stock entries"})
 		return
 	}
 
@@ -1090,9 +1148,9 @@ func isThermalLabelPaperSize(size string) bool {
 }
 
 type LabelRequest struct {
-	BillID      string       `json:"bill_id" binding:"required"`
-	ItemQuantities map[string]int `json:"item_quantities"` // item_id -> quantity (default to invoice quantity if not provided)
-	Config      LabelConfig  `json:"config"`
+	BillID         string             `json:"bill_id" binding:"required"`
+	ItemQuantities map[string]float64 `json:"item_quantities"` // item_id -> quantity (default to invoice quantity if not provided)
+	Config         LabelConfig        `json:"config"`
 }
 
 func PrintPurchaseBillLabels(c *gin.Context) {
@@ -1180,6 +1238,12 @@ func PrintPurchaseBillLabels(c *gin.Context) {
 		}
 	}
 
+	items := collectPurchaseLabelItems(bill, req.ItemQuantities)
+	if len(items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No items available to print labels"})
+		return
+	}
+
 	// Generate labels HTML
 	html := generateLabelsHTML(bill, req.ItemQuantities, config)
 
@@ -1187,12 +1251,19 @@ func PrintPurchaseBillLabels(c *gin.Context) {
 	c.String(http.StatusOK, html)
 }
 
-func collectPurchaseLabelItems(bill models.PurchaseBill, itemQuantities map[string]int) []models.PurchaseBillItem {
+func collectPurchaseLabelItems(bill models.PurchaseBill, itemQuantities map[string]float64) []models.PurchaseBillItem {
 	var items []models.PurchaseBillItem
 	for _, item := range bill.Items {
-		quantity := itemQuantities[item.ID.String()]
-		if quantity == 0 {
-			quantity = int(item.Quantity)
+		qtyFloat, ok := itemQuantities[item.ID.String()]
+		if !ok || qtyFloat == 0 {
+			qtyFloat = item.Quantity
+		}
+		quantity := int(qtyFloat + 0.5) // round
+		if quantity < 1 {
+			quantity = 1
+		}
+		if quantity > 500 {
+			quantity = 500
 		}
 		for i := 0; i < quantity; i++ {
 			items = append(items, item)
@@ -1201,7 +1272,7 @@ func collectPurchaseLabelItems(bill models.PurchaseBill, itemQuantities map[stri
 	return items
 }
 
-func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]int, config LabelConfig) string {
+func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]float64, config LabelConfig) string {
 	items := collectPurchaseLabelItems(bill, itemQuantities)
 	if isThermalLabelPaperSize(config.PaperSize) {
 		return generateThermalPurchaseLabelsHTML(bill.BillNumber, items, config.PaperSize)
@@ -1280,9 +1351,17 @@ func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]int,
 			width: 100%;
 			line-height: 1.1;
 		}
-		.label-barcode svg {
+		.label-barcode .barcode-img {
 			width: 100%;
+			max-width: 100%;
 			height: auto;
+			display: block;
+			margin: 0 auto;
+		}
+		.label-barcode .barcode-text {
+			font-family: "Courier New", Courier, monospace;
+			font-size: 8px;
+			text-align: center;
 		}
 		.label-qty {
 			font-size: 8px;
@@ -1311,7 +1390,6 @@ func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]int,
 			}
 		}
 	</style>
-	<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
 </head>
 <body>
 	<div class="labels-container">
@@ -1322,12 +1400,6 @@ func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]int,
 	}
 
 	html += `	</div>
-	<script>
-		window.onload = function() {
-			JsBarcode(".barcode").init();
-			setTimeout(function() { window.print(); }, 300);
-		};
-	</script>
 </body>
 </html>`
 
@@ -1369,18 +1441,10 @@ func generateThermalPurchaseLabel(item models.PurchaseBillItem, size BarcodeLabe
 	<div class="product-name">%s</div>`, name)}
 
 	parts = append(parts, fmt.Sprintf(`	<div class="product-barcode">
-		<svg class="barcode"
-			jsbarcode-format="code128"
-			jsbarcode-value="%s"
-			jsbarcode-width="%.2f"
-			jsbarcode-height="%d"
-			jsbarcode-fontsize="%.0f"
-			jsbarcode-margin="0"
-			jsbarcode-displayvalue="true">
-		</svg>
+		%s
 	</div>
 	<div class="product-price">₹%.2f</div>`,
-		html.EscapeString(barcodeVal), size.BarcodeW, size.BarcodeH, size.MetaFontPx, salePrice))
+		barcodeImageHTML(barcodeVal, size.BarcodeW, size.BarcodeH, size.MetaFontPx), salePrice))
 
 	if !compact && mrp > 0 && mrp != salePrice {
 		parts = append(parts, fmt.Sprintf(`	<div class="product-mrp">MRP: ₹%.2f</div>`, mrp))
@@ -1424,14 +1488,7 @@ func generateSingleLabel(item models.PurchaseBillItem, billNumber string) string
 
 	labelHTML += `
 			<div class="label-barcode">
-				<svg class="barcode"
-					jsbarcode-format="code128"
-					jsbarcode-value="` + html.EscapeString(barcodeVal) + `"
-					jsbarcode-width="1"
-					jsbarcode-height="20"
-					jsbarcode-fontsize="8"
-					jsbarcode-margin="0">
-				</svg>
+				` + barcodeImageHTML(barcodeVal, 1.2, 28, 8) + `
 			</div>`
 
 	if showQty {

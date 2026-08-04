@@ -1,12 +1,14 @@
 package controllers
 
 import (
+	"net/http"
+	"strings"
 	"truerp/models"
 	"truerp/utils"
-	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 func GetWarehouses(c *gin.Context) {
@@ -44,23 +46,45 @@ func CreateWarehouse(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		Name          string  `json:"name" binding:"required"`
-		Code          string  `json:"code" binding:"required"`
-		Address       string  `json:"address"`
-		City          string  `json:"city"`
-		State         string  `json:"state"`
-		Pincode       string  `json:"pincode"`
-		ContactPerson string  `json:"contact_person"`
-		ContactPhone  string  `json:"contact_phone"`
-		ContactEmail  string  `json:"contact_email"`
-		IsDefault     bool    `json:"is_default"`
-		Notes         string  `json:"notes"`
+		Name          string `json:"name" binding:"required"`
+		Code          string `json:"code" binding:"required"`
+		Address       string `json:"address"`
+		City          string `json:"city"`
+		State         string `json:"state"`
+		Pincode       string `json:"pincode"`
+		ContactPerson string `json:"contact_person"`
+		ContactPhone  string `json:"contact_phone"`
+		ContactEmail  string `json:"contact_email"`
+		IsDefault     bool   `json:"is_default"`
+		Notes         string `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	name := strings.TrimSpace(input.Name)
+	code := strings.ToUpper(strings.TrimSpace(input.Code))
+	if name == "" || code == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Warehouse name and code are required"})
+		return
+	}
+
+	var existing models.Warehouse
+	if err := utils.DB.Where("user_id = ? AND code = ?", userID, code).First(&existing).Error; err == nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "A warehouse with this code already exists"})
+		return
+	} else if err != gorm.ErrRecordNotFound {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create warehouse"})
+		return
+	}
+
+	// Soft-deleted rows still occupy the unique (user_id, code) slot — purge them
+	// so the same code can be reused after delete.
+	utils.DB.Unscoped().
+		Where("user_id = ? AND code = ? AND deleted_at IS NOT NULL", userID, code).
+		Delete(&models.Warehouse{})
 
 	// If setting as default, remove default from other warehouses
 	if input.IsDefault {
@@ -70,21 +94,25 @@ func CreateWarehouse(c *gin.Context) {
 	warehouse := models.Warehouse{
 		ID:            uuid.New(),
 		UserID:        userID,
-		Name:          input.Name,
-		Code:          input.Code,
-		Address:       input.Address,
-		City:          input.City,
-		State:         input.State,
-		Pincode:       input.Pincode,
-		ContactPerson: input.ContactPerson,
-		ContactPhone:  input.ContactPhone,
-		ContactEmail:  input.ContactEmail,
+		Name:          name,
+		Code:          code,
+		Address:       strings.TrimSpace(input.Address),
+		City:          strings.TrimSpace(input.City),
+		State:         strings.TrimSpace(input.State),
+		Pincode:       strings.TrimSpace(input.Pincode),
+		ContactPerson: strings.TrimSpace(input.ContactPerson),
+		ContactPhone:  strings.TrimSpace(input.ContactPhone),
+		ContactEmail:  strings.TrimSpace(input.ContactEmail),
 		IsActive:      true,
 		IsDefault:     input.IsDefault,
-		Notes:         input.Notes,
+		Notes:         strings.TrimSpace(input.Notes),
 	}
 
 	if err := utils.DB.Create(&warehouse).Error; err != nil {
+		if isUniqueConstraintError(err) {
+			c.JSON(http.StatusConflict, gin.H{"error": "A warehouse with this code already exists"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create warehouse"})
 		return
 	}
@@ -97,18 +125,18 @@ func UpdateWarehouse(c *gin.Context) {
 	id := c.Param("id")
 
 	var input struct {
-		Name          string  `json:"name"`
-		Code          string  `json:"code"`
-		Address       string  `json:"address"`
-		City          string  `json:"city"`
-		State         string  `json:"state"`
-		Pincode       string  `json:"pincode"`
-		ContactPerson string  `json:"contact_person"`
-		ContactPhone  string  `json:"contact_phone"`
-		ContactEmail  string  `json:"contact_email"`
-		IsActive      *bool   `json:"is_active"`
-		IsDefault     *bool   `json:"is_default"`
-		Notes         string  `json:"notes"`
+		Name          string `json:"name"`
+		Code          string `json:"code"`
+		Address       string `json:"address"`
+		City          string `json:"city"`
+		State         string `json:"state"`
+		Pincode       string `json:"pincode"`
+		ContactPerson string `json:"contact_person"`
+		ContactPhone  string `json:"contact_phone"`
+		ContactEmail  string `json:"contact_email"`
+		IsActive      *bool  `json:"is_active"`
+		IsDefault     *bool  `json:"is_default"`
+		Notes         string `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -122,22 +150,43 @@ func UpdateWarehouse(c *gin.Context) {
 		return
 	}
 
+	name := strings.TrimSpace(input.Name)
+	code := strings.ToUpper(strings.TrimSpace(input.Code))
+	if name == "" || code == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Warehouse name and code are required"})
+		return
+	}
+
+	if !strings.EqualFold(warehouse.Code, code) {
+		var existing models.Warehouse
+		if err := utils.DB.Where("user_id = ? AND code = ? AND id != ?", userID, code, warehouse.ID).First(&existing).Error; err == nil {
+			c.JSON(http.StatusConflict, gin.H{"error": "A warehouse with this code already exists"})
+			return
+		} else if err != gorm.ErrRecordNotFound {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update warehouse"})
+			return
+		}
+		utils.DB.Unscoped().
+			Where("user_id = ? AND code = ? AND id != ? AND deleted_at IS NOT NULL", userID, code, warehouse.ID).
+			Delete(&models.Warehouse{})
+	}
+
 	// If setting as default, remove default from other warehouses
 	if input.IsDefault != nil && *input.IsDefault {
 		utils.DB.Model(&models.Warehouse{}).Where("user_id = ? AND id != ?", userID, id).Update("is_default", false)
 	}
 
 	updates := map[string]interface{}{
-		"name":           input.Name,
-		"code":           input.Code,
-		"address":        input.Address,
-		"city":           input.City,
-		"state":          input.State,
-		"pincode":        input.Pincode,
-		"contact_person": input.ContactPerson,
-		"contact_phone":  input.ContactPhone,
-		"contact_email":  input.ContactEmail,
-		"notes":          input.Notes,
+		"name":           name,
+		"code":           code,
+		"address":        strings.TrimSpace(input.Address),
+		"city":           strings.TrimSpace(input.City),
+		"state":          strings.TrimSpace(input.State),
+		"pincode":        strings.TrimSpace(input.Pincode),
+		"contact_person": strings.TrimSpace(input.ContactPerson),
+		"contact_phone":  strings.TrimSpace(input.ContactPhone),
+		"contact_email":  strings.TrimSpace(input.ContactEmail),
+		"notes":          strings.TrimSpace(input.Notes),
 	}
 
 	if input.IsActive != nil {
@@ -148,7 +197,16 @@ func UpdateWarehouse(c *gin.Context) {
 	}
 
 	if err := utils.DB.Model(&warehouse).Updates(updates).Error; err != nil {
+		if isUniqueConstraintError(err) {
+			c.JSON(http.StatusConflict, gin.H{"error": "A warehouse with this code already exists"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update warehouse"})
+		return
+	}
+
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).First(&warehouse).Error; err != nil {
+		c.JSON(http.StatusOK, warehouse)
 		return
 	}
 
@@ -261,13 +319,25 @@ func GetWarehouseStock(c *gin.Context) {
 	}
 
 	var totalValue float64
-	for _, r := range results {
-		r.Value = r.StockQty * r.CostPrice
-		totalValue += r.Value
+	for i := range results {
+		results[i].Value = results[i].StockQty * results[i].CostPrice
+		totalValue += results[i].Value
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"items":       results,
 		"total_value": totalValue,
 	})
+}
+
+func isUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique constraint") ||
+		strings.Contains(msg, "uniqueconstraint") ||
+		strings.Contains(msg, "duplicate key") ||
+		strings.Contains(msg, "idx_warehouses_user_code") ||
+		strings.Contains(msg, "idx_warehouses_code")
 }

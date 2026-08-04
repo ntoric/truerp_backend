@@ -3,7 +3,10 @@ package controllers
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
+	"time"
 	"truerp/models"
 
 	"github.com/go-pdf/fpdf"
@@ -197,7 +200,62 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 	return buf.Bytes(), nil
 }
 
-func buildThermalReceiptPDF(content string, widthMM int) ([]byte, error) {
+func parseThermalLineMarkers(line string) (center, bold bool, text string) {
+	rest := line
+	for {
+		if strings.HasPrefix(rest, "@C@") {
+			center = true
+			rest = rest[3:]
+			continue
+		}
+		if strings.HasPrefix(rest, "@B@") {
+			bold = true
+			rest = rest[3:]
+			continue
+		}
+		if strings.HasPrefix(rest, "@N@") {
+			center = false
+			bold = false
+			rest = rest[3:]
+			continue
+		}
+		break
+	}
+	return center, bold, rest
+}
+
+func fetchThermalLogoBytes(logoURL string) ([]byte, string) {
+	logoURL = strings.TrimSpace(logoURL)
+	if logoURL == "" || !strings.HasPrefix(logoURL, "http") {
+		return nil, ""
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(logoURL)
+	if err != nil {
+		return nil, ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, ""
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil || len(data) == 0 {
+		return nil, ""
+	}
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	switch {
+	case strings.Contains(ct, "png"), bytes.HasPrefix(data, []byte{0x89, 'P', 'N', 'G'}):
+		return data, "PNG"
+	case strings.Contains(ct, "jpeg"), strings.Contains(ct, "jpg"), bytes.HasPrefix(data, []byte{0xff, 0xd8}):
+		return data, "JPG"
+	case strings.Contains(ct, "gif"), bytes.HasPrefix(data, []byte("GIF")):
+		return data, "GIF"
+	default:
+		return nil, ""
+	}
+}
+
+func buildThermalReceiptPDF(content string, widthMM int, logoURL string) ([]byte, error) {
 	if widthMM <= 0 {
 		widthMM = 58
 	}
@@ -219,8 +277,19 @@ func buildThermalReceiptPDF(content string, widthMM int) ([]byte, error) {
 		margin = 2.0
 	}
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	logoBytes, logoType := fetchThermalLogoBytes(logoURL)
+	logoH := 0.0
+	if len(logoBytes) > 0 {
+		logoH = float64(widthMM) * 0.22
+		if logoH < 10 {
+			logoH = 10
+		}
+		if logoH > 18 {
+			logoH = 18
+		}
+	}
 	// Keep page height tight to content — a large min height left long blank gaps on thermal rolls.
-	height := margin*2 + float64(len(lines)+2)*lineH
+	height := margin*2 + logoH + float64(len(lines)+2)*lineH
 	if height < 40 {
 		height = 40
 	}
@@ -235,12 +304,40 @@ func buildThermalReceiptPDF(content string, widthMM int) ([]byte, error) {
 	pdf.SetMargins(margin, margin, margin)
 	pdf.SetAutoPageBreak(false, 0)
 	pdf.AddPage()
-	pdf.SetFont("Courier", "", fontSize)
 	pdf.SetTextColor(0, 0, 0)
 
 	usableW := float64(widthMM) - margin*2
+	if len(logoBytes) > 0 && logoType != "" {
+		opt := fpdf.ImageOptions{ImageType: logoType, ReadDpi: true}
+		info := pdf.RegisterImageOptionsReader("thermal-logo", opt, bytes.NewReader(logoBytes))
+		if info != nil {
+			imgW := usableW * 0.55
+			if info.Width() > 0 && info.Height() > 0 {
+				scale := imgW / info.Width()
+				imgH := info.Height() * scale
+				if imgH > logoH && logoH > 0 {
+					imgH = logoH
+					imgW = info.Width() * (imgH / info.Height())
+				}
+				x := margin + (usableW-imgW)/2
+				pdf.ImageOptions("thermal-logo", x, pdf.GetY(), imgW, imgH, false, opt, 0, "")
+				pdf.SetY(pdf.GetY() + imgH + 1)
+			}
+		}
+	}
+
 	for _, line := range lines {
-		pdf.MultiCell(usableW, lineH, sanitizePDFText(line), "", "L", false)
+		center, bold, text := parseThermalLineMarkers(line)
+		style := ""
+		if bold {
+			style = "B"
+		}
+		pdf.SetFont("Courier", style, fontSize)
+		align := "L"
+		if center {
+			align = "C"
+		}
+		pdf.MultiCell(usableW, lineH, sanitizePDFText(text), "", align, false)
 	}
 
 	var buf bytes.Buffer
