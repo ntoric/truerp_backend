@@ -207,6 +207,7 @@ type PaymentOut struct {
 	ID                   uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID               uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
 	PurchaseBillID       *uuid.UUID     `json:"purchase_bill_id,omitempty" gorm:"type:uuid"`
+	PurchaseBill         *PurchaseBill  `json:"purchase_bill,omitempty" gorm:"foreignKey:PurchaseBillID"`
 	PartyID              uuid.UUID      `json:"party_id" gorm:"type:uuid;not null"`
 	Party                Party          `json:"party,omitempty" gorm:"foreignKey:PartyID"`
 	AmountPaid           float64        `json:"amount_paid" gorm:"default:0"`

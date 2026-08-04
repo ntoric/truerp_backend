@@ -11,14 +11,43 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
+
+// ensureBusinessForUser returns the user's business, creating a default one if missing.
+func ensureBusinessForUser(userID uuid.UUID) (models.Business, error) {
+	var business models.Business
+	err := utils.DB.Where("user_id = ?", userID).First(&business).Error
+	if err == nil {
+		return business, nil
+	}
+	if err != gorm.ErrRecordNotFound {
+		return business, err
+	}
+
+	name := "My Business"
+	var user models.User
+	if utils.DB.Select("id", "name").First(&user, "id = ?", userID).Error == nil && strings.TrimSpace(user.Name) != "" {
+		name = strings.TrimSpace(user.Name) + "'s Business"
+	}
+
+	business = models.Business{
+		ID:     uuid.New(),
+		UserID: userID,
+		Name:   name,
+	}
+	if err := utils.DB.Create(&business).Error; err != nil {
+		return business, err
+	}
+	return business, nil
+}
 
 func GetBusiness(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
-	var business models.Business
-	if err := utils.DB.Where("user_id = ?", userID).First(&business).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Business not found"})
+	business, err := ensureBusinessForUser(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load business"})
 		return
 	}
 
@@ -42,10 +71,10 @@ func UpdateBusiness(c *gin.Context) {
 	}
 	fmt.Println("DEBUG: Input received:", input.Name, "EnableAIHSNSearch:", input.EnableAIHSNSearch, "EnableAIBillParsing:", input.EnableAIBillParsing, "HasAPIKey:", input.GeminiAPIKey != "")
 
-	var business models.Business
-	if err := utils.DB.Where("user_id = ?", userID).First(&business).Error; err != nil {
-		fmt.Println("ERROR: Business not found for user:", userID, "Error:", err)
-		c.JSON(http.StatusNotFound, gin.H{"error": "Business not found"})
+	business, err := ensureBusinessForUser(userID)
+	if err != nil {
+		fmt.Println("ERROR: Failed to ensure business for user:", userID, "Error:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load business"})
 		return
 	}
 	fmt.Println("DEBUG: Business found:", business.ID)
@@ -147,8 +176,12 @@ func UploadLogo(c *gin.Context) {
 		return
 	}
 
-	// Update business record
-	if err := utils.DB.Model(&models.Business{}).Where("user_id = ?", userID).Update("logo_url", publicURL).Error; err != nil {
+	business, err := ensureBusinessForUser(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load business"})
+		return
+	}
+	if err := utils.DB.Model(&business).Update("logo_url", publicURL).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update logo"})
 		return
 	}
@@ -203,8 +236,12 @@ func UploadSignature(c *gin.Context) {
 		return
 	}
 
-	// Update business record
-	if err := utils.DB.Model(&models.Business{}).Where("user_id = ?", userID).Update("signature_url", publicURL).Error; err != nil {
+	business, err := ensureBusinessForUser(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load business"})
+		return
+	}
+	if err := utils.DB.Model(&business).Update("signature_url", publicURL).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update signature"})
 		return
 	}

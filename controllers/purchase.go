@@ -435,11 +435,12 @@ func CreatePurchaseBill(c *gin.Context) {
 		Status:            func() string { if input.Status != "" { return input.Status }; return "unpaid" }(),
 		TotalAmount:       input.TotalAmount,
 		PaidAmount:        input.PaidAmount,
-		BalanceDue:        func() float64 {
-			if input.BalanceDue > 0 || input.PaidAmount > 0 {
-				return input.BalanceDue
+		BalanceDue: func() float64 {
+			due := input.TotalAmount - input.PaidAmount
+			if due < 0 {
+				return 0
 			}
-			return input.TotalAmount - input.PaidAmount
+			return due
 		}(),
 		PaymentMode:       input.PaymentMode,
 		BankAccountID:     resolvedBankAccount,
@@ -570,6 +571,31 @@ func UpdatePurchaseBill(c *gin.Context) {
 		return
 	}
 
+	// Status-only "mark as paid" from the list page (no items / totals in body).
+	if input.Status == "paid" && len(input.Items) == 0 && input.TotalAmount == 0 && bill.TotalAmount > 0 {
+		previousPaidAmount := bill.PaidAmount
+		bill.Status = "paid"
+		bill.PaidAmount = bill.TotalAmount
+		bill.BalanceDue = 0
+		if err := utils.DB.Model(&bill).Updates(map[string]interface{}{
+			"status":      "paid",
+			"paid_amount": bill.TotalAmount,
+			"balance_due": 0,
+		}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update bill"})
+			return
+		}
+		if paymentDelta := bill.PaidAmount - previousPaidAmount; paymentDelta > 0 {
+			desc := fmt.Sprintf("Purchase bill %s (mark paid)", bill.BillNumber)
+			if err := recordPurchasePaymentOut(utils.DB, userID, bill.BankAccountID, paymentDelta, bill.BillDate, bill.BillNumber, desc); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to update cash account"})
+				return
+			}
+		}
+		c.JSON(http.StatusOK, bill)
+		return
+	}
+
 	if err := validateUserBankAccount(userID, input.BankAccountID); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account"})
 		return
@@ -591,7 +617,11 @@ func UpdatePurchaseBill(c *gin.Context) {
 	bill.DueDate = input.DueDate
 	bill.TotalAmount = input.TotalAmount
 	bill.PaidAmount = input.PaidAmount
-	bill.BalanceDue = input.BalanceDue
+	if due := input.TotalAmount - input.PaidAmount; due > 0 {
+		bill.BalanceDue = due
+	} else {
+		bill.BalanceDue = 0
+	}
 	bill.PaymentMode = input.PaymentMode
 	bill.BankAccountID = resolvedBankAccount
 	bill.Status = input.Status
@@ -690,18 +720,28 @@ func GetPurchaseBillStats(c *gin.Context) {
 		Unpaid        float64 `json:"unpaid"`
 	}
 
-	query := utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ?", userID)
+	// Fresh queries each time — reusing one GORM chain stacked status
+	// filters and under-counted paid/unpaid (especially partial bills).
+	qTotal := utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ?", userID)
+	qPaid := utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ?", userID)
+	qUnpaid := utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ?", userID)
 
 	if fromDate := c.Query("from_date"); fromDate != "" {
-		query = query.Where("bill_date >= ?", fromDate)
+		qTotal = qTotal.Where("bill_date >= ?", fromDate)
+		qPaid = qPaid.Where("bill_date >= ?", fromDate)
+		qUnpaid = qUnpaid.Where("bill_date >= ?", fromDate)
 	}
 	if toDate := c.Query("to_date"); toDate != "" {
-		query = query.Where("bill_date <= ?", toDate)
+		qTotal = qTotal.Where("bill_date <= ?", toDate)
+		qPaid = qPaid.Where("bill_date <= ?", toDate)
+		qUnpaid = qUnpaid.Where("bill_date <= ?", toDate)
 	}
 
-	query.Select("COALESCE(SUM(total_amount), 0) as total_purchase").Scan(&stats.TotalPurchase)
-	query.Where("status = ?", "paid").Select("COALESCE(SUM(total_amount), 0)").Scan(&stats.Paid)
-	query.Where("status = ? OR status = ?", "unpaid", "partial").Select("COALESCE(SUM(balance_due), 0)").Scan(&stats.Unpaid)
+	qTotal.Select("COALESCE(SUM(total_amount), 0)").Scan(&stats.TotalPurchase)
+	// Include partial payments, not only fully paid bills.
+	qPaid.Select("COALESCE(SUM(paid_amount), 0)").Scan(&stats.Paid)
+	// Remaining balance from amounts (reliable even if balance_due is stale).
+	qUnpaid.Select("COALESCE(SUM(CASE WHEN total_amount > paid_amount THEN total_amount - paid_amount ELSE 0 END), 0)").Scan(&stats.Unpaid)
 
 	c.JSON(http.StatusOK, stats)
 }

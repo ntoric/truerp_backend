@@ -49,8 +49,8 @@ func GetUserManagementOverview(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
-	if !canManageUsers(actor.Role) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
+	if !isProtectedRole(actor.Role) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Super admin access required"})
 		return
 	}
 
@@ -199,8 +199,8 @@ func GetActivityLogs(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
-	if !canManageUsers(actor.Role) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
+	if !isProtectedRole(actor.Role) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Super admin access required"})
 		return
 	}
 

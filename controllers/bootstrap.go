@@ -27,6 +27,10 @@ func EnsureDefaultSuperAdmin() {
 
 	var existing models.User
 	if err := utils.DB.Where("email = ?", email).First(&existing).Error; err == nil {
+		// User already exists — still ensure they have a business record.
+		if _, err := ensureBusinessForUser(existing.ID); err != nil {
+			log.Printf("Default super admin bootstrap: failed to ensure business: %v", err)
+		}
 		return
 	} else if err != gorm.ErrRecordNotFound {
 		log.Printf("Default super admin bootstrap: database error: %v", err)
