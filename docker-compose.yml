@@ -1,0 +1,49 @@
+# TruERP cloud API
+#
+# From repo root:
+#   cp backend/.env.example backend/.env   # edit secrets
+#   docker compose -f backend/docker-compose.yml up --build
+#
+# Or from backend/:
+#   docker compose up --build
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    image: truerp-api:latest
+    container_name: truerp-api
+    ports:
+      - "${API_PUBLISH_PORT:-8088}:8088"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      API_TRANSPORT: rest
+      API_ADDR: ":8088"
+      DATABASE_PATH: /app/data/truerp.db
+      STORAGE_TYPE: ${STORAGE_TYPE:-local}
+      LOCAL_STORAGE_PATH: /app/uploads
+      # Set to your public API URL so desktop clients can load uploaded assets:
+      # LOCAL_STORAGE_BASE_URL: https://api.example.com/uploads
+      LOCAL_STORAGE_BASE_URL: ${LOCAL_STORAGE_BASE_URL:-/uploads}
+      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-string}
+      SUPER_ADMIN_EMAIL: ${SUPER_ADMIN_EMAIL:-admin@truerp.local}
+      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-change-me-in-production}
+      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+    volumes:
+      - truerp-data:/app/data
+      - truerp-uploads:/app/uploads
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8088/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  truerp-data:
+  truerp-uploads:
