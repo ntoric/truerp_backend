@@ -266,26 +266,46 @@ func Register(c *gin.Context) {
 		Role:     "owner",
 	}
 
-	if err := utils.DB.Create(&user).Error; err != nil {
+	var store models.Store
+	err = utils.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&user).Error; err != nil {
+			return err
+		}
+		if err := EnsureDefaultChartOfAccounts(tx, user.ID); err != nil {
+			return err
+		}
+		business := models.Business{
+			ID:     uuid.New(),
+			UserID: user.ID,
+			Name:   name + "'s Business",
+		}
+		if err := tx.Create(&business).Error; err != nil {
+			return err
+		}
+		utils.EnsureDefaultRoles(tx, user.ID)
+
+		code := utils.UniqueStoreCode(tx, utils.NormalizeStoreCode("", name+" Store"))
+		store = models.Store{
+			ID:          uuid.New(),
+			Name:        name + "'s Store",
+			Code:        code,
+			OwnerUserID: user.ID,
+			IsActive:    true,
+		}
+		if err := tx.Create(&store).Error; err != nil {
+			return err
+		}
+		return tx.Model(&user).Updates(map[string]interface{}{
+			"store_id": store.ID,
+		}).Error
+	})
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
 		return
 	}
+	user.StoreID = &store.ID
 
-	if err := EnsureDefaultChartOfAccounts(utils.DB, user.ID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initialize accounting"})
-		return
-	}
-
-	business := models.Business{
-		ID:     uuid.New(),
-		UserID: user.ID,
-		Name:   name + "'s Business",
-	}
-	utils.DB.Create(&business)
-
-	utils.EnsureDefaultRoles(utils.DB, user.ID)
-
-	token, err := utils.GenerateToken(user.ID, user.Name, user.Email, user.Role)
+	token, err := utils.GenerateToken(user.ID, user.Name, user.Email, user.Role, user.StoreID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
 		return
@@ -310,13 +330,15 @@ func Register(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{
 		"token": token,
 		"user": gin.H{
-			"id":    user.ID,
-			"name":  user.Name,
-			"email": user.Email,
-			"phone": user.Phone,
+			"id":                 user.ID,
+			"name":               user.Name,
+			"email":              user.Email,
+			"phone":              user.Phone,
 			"role":               user.Role,
+			"store_id":           user.StoreID,
 			"two_factor_enabled": user.TwoFactorEnabled,
 		},
+		"store": utils.StorePublicJSON(store),
 	})
 }
 
@@ -381,7 +403,12 @@ func Login(c *gin.Context) {
 		}
 	}
 
-	token, err := utils.GenerateToken(user.ID, user.Name, user.Email, user.Role)
+	if !utils.IsSuperAdminRole(user.Role) && user.StoreID == nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "No store assigned. Contact your administrator."})
+		return
+	}
+
+	token, err := utils.GenerateToken(user.ID, user.Name, user.Email, user.Role, user.StoreID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
 		return
@@ -403,21 +430,41 @@ func Login(c *gin.Context) {
 		"",
 	)
 
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"token": token,
 		"user": gin.H{
-			"id":    user.ID,
-			"name":  user.Name,
-			"email": user.Email,
+			"id":                 user.ID,
+			"name":               user.Name,
+			"email":              user.Email,
 			"phone":              user.Phone,
 			"role":               user.Role,
+			"store_id":           user.StoreID,
 			"two_factor_enabled": user.TwoFactorEnabled,
 		},
-	})
+	}
+
+	if user.StoreID != nil {
+		if store, storeErr := utils.FindStoreByID(utils.DB, *user.StoreID); storeErr == nil {
+			resp["store"] = utils.StorePublicJSON(store)
+		}
+	} else if utils.IsSuperAdminRole(user.Role) {
+		var stores []models.Store
+		utils.DB.Where("is_active = ?", true).Order("name ASC").Find(&stores)
+		list := make([]gin.H, 0, len(stores))
+		for _, s := range stores {
+			list = append(list, gin.H(utils.StorePublicJSON(s)))
+		}
+		resp["stores"] = list
+		if len(stores) > 0 {
+			resp["store"] = utils.StorePublicJSON(stores[0])
+		}
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 func GetProfile(c *gin.Context) {
-	userID := c.MustGet("user_id").(uuid.UUID)
+	userID := actorUserID(c)
 
 	var user models.User
 	if err := utils.DB.Preload("Business").First(&user, "id = ?", userID).Error; err != nil {
@@ -425,19 +472,46 @@ func GetProfile(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"id":       user.ID,
-		"name":     user.Name,
-		"email":    user.Email,
-		"phone":    user.Phone,
+	resp := gin.H{
+		"id":                 user.ID,
+		"name":               user.Name,
+		"email":              user.Email,
+		"phone":              user.Phone,
 		"role":               user.Role,
+		"store_id":           user.StoreID,
 		"two_factor_enabled": user.TwoFactorEnabled,
 		"business":           user.Business,
-	})
+	}
+
+	if storeID, ok := currentStoreID(c); ok {
+		if store, err := utils.FindStoreByID(utils.DB, storeID); err == nil {
+			resp["active_store"] = utils.StorePublicJSON(store)
+			resp["store_id"] = store.ID
+		}
+	} else if user.StoreID != nil {
+		if store, err := utils.FindStoreByID(utils.DB, *user.StoreID); err == nil {
+			resp["active_store"] = utils.StorePublicJSON(store)
+		}
+	}
+
+	if utils.IsSuperAdminRole(user.Role) {
+		var stores []models.Store
+		utils.DB.Where("is_active = ?", true).Order("name ASC").Find(&stores)
+		list := make([]gin.H, 0, len(stores))
+		for _, s := range stores {
+			list = append(list, gin.H(utils.StorePublicJSON(s)))
+		}
+		resp["stores"] = list
+		resp["can_switch_stores"] = true
+	} else {
+		resp["can_switch_stores"] = false
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 func UpdateProfile(c *gin.Context) {
-	userID := c.MustGet("user_id").(uuid.UUID)
+	userID := actorUserID(c)
 
 	var input struct {
 		Name  string `json:"name"`

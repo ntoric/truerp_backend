@@ -74,11 +74,11 @@ func CreateDeliveryChallan(c *gin.Context) {
 		VehicleNumber string       `json:"vehicle_number"`
 		TransportMode string       `json:"transport_mode"`
 		Items         []struct {
-			Description string  `json:"description"`
-			Quantity    float64 `json:"quantity"`
-			Unit        string  `json:"unit"`
-			UnitPrice   float64 `json:"unit_price"`
-			BatchNo     string  `json:"batch_no"`
+			Description string               `json:"description"`
+			Quantity    models.FlexibleFloat `json:"quantity"`
+			Unit        string               `json:"unit"`
+			UnitPrice   models.FlexibleFloat `json:"unit_price"`
+			BatchNo     string               `json:"batch_no"`
 		} `json:"items" binding:"required,min=1"`
 	}
 
@@ -122,20 +122,22 @@ func CreateDeliveryChallan(c *gin.Context) {
 	// Calculate totals
 	var subTotal, totalQuantity float64
 	for _, item := range input.Items {
-		itemTotal := item.Quantity * item.UnitPrice
+		qty := item.Quantity.Float64()
+		unitPrice := item.UnitPrice.Float64()
+		itemTotal := qty * unitPrice
 
 		challan.Items = append(challan.Items, models.DeliveryChallanItem{
 			ID:          uuid.New(),
 			Description: item.Description,
-			Quantity:    item.Quantity,
+			Quantity:    qty,
 			Unit:        item.Unit,
-			UnitPrice:   item.UnitPrice,
+			UnitPrice:   unitPrice,
 			Total:       itemTotal,
 			BatchNo:     item.BatchNo,
 		})
 
 		subTotal += itemTotal
-		totalQuantity += item.Quantity
+		totalQuantity += qty
 	}
 
 	challan.SubTotal = subTotal

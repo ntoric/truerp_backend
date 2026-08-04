@@ -1070,7 +1070,7 @@ func DownloadPurchaseBillPDF(c *gin.Context) {
 }
 
 type LabelConfig struct {
-	PaperSize   string  `json:"paper_size"`   // a4, letter, a5
+	PaperSize   string  `json:"paper_size"`   // a4, letter, a5, 1inch, 1.5inch, 2inch, 3inch
 	LabelWidth  float64 `json:"label_width"`  // mm
 	LabelHeight float64 `json:"label_height"` // mm
 	Cols        int     `json:"cols"`
@@ -1078,6 +1078,15 @@ type LabelConfig struct {
 	Margin      float64 `json:"margin"`       // mm (even on all sides)
 	MarginTop   float64 `json:"margin_top"`   // mm
 	MarginLeft  float64 `json:"margin_left"`  // mm
+}
+
+func isThermalLabelPaperSize(size string) bool {
+	switch size {
+	case "1inch", "1.5inch", "2inch", "3inch":
+		return true
+	default:
+		return false
+	}
 }
 
 type LabelRequest struct {
@@ -1136,38 +1145,68 @@ func PrintPurchaseBillLabels(c *gin.Context) {
 	if config.PaperSize == "" {
 		config.PaperSize = "a4"
 	}
-	if config.LabelWidth == 0 {
-		config.LabelWidth = 50 // mm
-	}
-	if config.LabelHeight == 0 {
-		config.LabelHeight = 30 // mm
-	}
-	if config.Cols == 0 {
-		config.Cols = 4
-	}
-	if config.Rows == 0 {
-		config.Rows = 8
-	}
-	// Prefer unified margin; fall back to legacy top/left
-	if config.Margin > 0 {
-		config.MarginTop = config.Margin
-		config.MarginLeft = config.Margin
-	}
-	if config.MarginTop == 0 {
-		config.MarginTop = 10 // mm
-	}
-	if config.MarginLeft == 0 {
-		config.MarginLeft = 10 // mm
+	if isThermalLabelPaperSize(config.PaperSize) {
+		size := getBarcodeLabelSize(config.PaperSize)
+		config.LabelWidth = size.WidthMM
+		config.LabelHeight = size.HeightMM
+		config.Cols = 1
+		config.Rows = 1
+		config.Margin = 0
+		config.MarginTop = 0
+		config.MarginLeft = 0
+	} else {
+		if config.LabelWidth == 0 {
+			config.LabelWidth = 50 // mm
+		}
+		if config.LabelHeight == 0 {
+			config.LabelHeight = 30 // mm
+		}
+		if config.Cols == 0 {
+			config.Cols = 4
+		}
+		if config.Rows == 0 {
+			config.Rows = 8
+		}
+		// Prefer unified margin; fall back to legacy top/left
+		if config.Margin > 0 {
+			config.MarginTop = config.Margin
+			config.MarginLeft = config.Margin
+		}
+		if config.MarginTop == 0 {
+			config.MarginTop = 10 // mm
+		}
+		if config.MarginLeft == 0 {
+			config.MarginLeft = 10 // mm
+		}
 	}
 
 	// Generate labels HTML
 	html := generateLabelsHTML(bill, req.ItemQuantities, config)
 
-	c.Header("Content-Type", "text/html")
+	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(http.StatusOK, html)
 }
 
+func collectPurchaseLabelItems(bill models.PurchaseBill, itemQuantities map[string]int) []models.PurchaseBillItem {
+	var items []models.PurchaseBillItem
+	for _, item := range bill.Items {
+		quantity := itemQuantities[item.ID.String()]
+		if quantity == 0 {
+			quantity = int(item.Quantity)
+		}
+		for i := 0; i < quantity; i++ {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
 func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]int, config LabelConfig) string {
+	items := collectPurchaseLabelItems(bill, itemQuantities)
+	if isThermalLabelPaperSize(config.PaperSize) {
+		return generateThermalPurchaseLabelsHTML(bill.BillNumber, items, config.PaperSize)
+	}
+
 	// Paper dimensions in mm
 	paperWidthMM := 210.0
 	paperHeightMM := 297.0
@@ -1192,16 +1231,8 @@ func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]int,
 	containerHeight := paperHeight - 2*margin
 
 	var labels []string
-	
-	for _, item := range bill.Items {
-		quantity := itemQuantities[item.ID.String()]
-		if quantity == 0 {
-			quantity = int(item.Quantity)
-		}
-		
-		for i := 0; i < quantity; i++ {
-			labels = append(labels, generateSingleLabel(item, bill.BillNumber))
-		}
+	for _, item := range items {
+		labels = append(labels, generateSingleLabel(item, bill.BillNumber))
 	}
 
 	// Organize labels in grid
@@ -1301,6 +1332,62 @@ func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]int,
 </html>`
 
 	return html
+}
+
+func generateThermalPurchaseLabelsHTML(billNumber string, items []models.PurchaseBillItem, paperSize string) string {
+	size := getBarcodeLabelSize(paperSize)
+	compact := paperSize == "1inch" || paperSize == "1.5inch"
+
+	var labelsHTML strings.Builder
+	for _, item := range items {
+		labelsHTML.WriteString(generateThermalPurchaseLabel(item, size, compact))
+	}
+
+	return wrapBarcodeLabelDocument("Labels - "+billNumber, barcodeLabelPageCSS(size), labelsHTML.String())
+}
+
+func generateThermalPurchaseLabel(item models.PurchaseBillItem, size BarcodeLabelSize, compact bool) string {
+	barcodeVal := strings.TrimSpace(item.ItemCode)
+	if barcodeVal == "" {
+		barcodeVal = strings.TrimSpace(item.HSNCode)
+	}
+	if barcodeVal == "" {
+		barcodeVal = "0000000000"
+	}
+
+	salePrice := item.SalePrice
+	if salePrice == 0 {
+		salePrice = item.UnitPrice
+	}
+	mrp := item.MRP
+	if mrp == 0 {
+		mrp = item.UnitPrice
+	}
+
+	name := html.EscapeString(item.Description)
+	parts := []string{fmt.Sprintf(`<div class="label">
+	<div class="product-name">%s</div>`, name)}
+
+	parts = append(parts, fmt.Sprintf(`	<div class="product-barcode">
+		<svg class="barcode"
+			jsbarcode-format="code128"
+			jsbarcode-value="%s"
+			jsbarcode-width="%.2f"
+			jsbarcode-height="%d"
+			jsbarcode-fontsize="%.0f"
+			jsbarcode-margin="0"
+			jsbarcode-displayvalue="true">
+		</svg>
+	</div>
+	<div class="product-price">₹%.2f</div>`,
+		html.EscapeString(barcodeVal), size.BarcodeW, size.BarcodeH, size.MetaFontPx, salePrice))
+
+	if !compact && mrp > 0 && mrp != salePrice {
+		parts = append(parts, fmt.Sprintf(`	<div class="product-mrp">MRP: ₹%.2f</div>`, mrp))
+	}
+
+	parts = append(parts, `</div>`)
+	return strings.Join(parts, "\n")
 }
 
 func generateSingleLabel(item models.PurchaseBillItem, billNumber string) string {

@@ -275,6 +275,26 @@ func postExpenseAccounting(tx *gorm.DB, userID uuid.UUID, expense *models.Expens
 	})
 }
 
+// postPayrollSalaryAccounting posts salary expense against cash/bank, keyed by payroll ID
+// so reverse/re-apply is idempotent for the general ledger.
+func postPayrollSalaryAccounting(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll, expense *models.Expense) error {
+	if payroll.NetSalary <= 0 {
+		return nil
+	}
+	desc := expense.Description
+	if desc == "" {
+		desc = fmt.Sprintf("Salary %s", payroll.PaymentNumber)
+	}
+	assetCode := acCodeCash
+	if payroll.BankAccountID != nil {
+		assetCode = acCodeBank
+	}
+	return postAutoJournal(tx, userID, payroll.PaymentDate, desc, "payroll", payroll.ID, payroll.PaymentNumber, []glLine{
+		{AccountCode: acCodeExpense, Debit: payroll.NetSalary, Description: desc},
+		{AccountCode: assetCode, Credit: payroll.NetSalary, Description: desc},
+	})
+}
+
 func postStandalonePaymentInAccounting(tx *gorm.DB, userID uuid.UUID, payment *models.Payment, netAmount float64) error {
 	if netAmount <= 0 {
 		return nil

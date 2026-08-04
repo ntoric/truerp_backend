@@ -79,7 +79,23 @@ func GetAuditLogStats(c *gin.Context) {
 }
 
 // Role & Permission Management
+func requireSuperAdminForRoles(c *gin.Context) bool {
+	actor, err := loadActor(c)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return false
+	}
+	if !utils.IsSuperAdminRole(actor.Role) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Only super admins can manage role permissions"})
+		return false
+	}
+	return true
+}
+
 func GetRoles(c *gin.Context) {
+	if !requireSuperAdminForRoles(c) {
+		return
+	}
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var roles []models.Role
@@ -100,6 +116,9 @@ func GetRoles(c *gin.Context) {
 }
 
 func CreateRole(c *gin.Context) {
+	if !requireSuperAdminForRoles(c) {
+		return
+	}
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
@@ -137,6 +156,9 @@ func CreateRole(c *gin.Context) {
 }
 
 func UpdateRole(c *gin.Context) {
+	if !requireSuperAdminForRoles(c) {
+		return
+	}
 	userID := c.MustGet("user_id").(uuid.UUID)
 	id := c.Param("id")
 
@@ -180,6 +202,9 @@ func UpdateRole(c *gin.Context) {
 }
 
 func DeleteRole(c *gin.Context) {
+	if !requireSuperAdminForRoles(c) {
+		return
+	}
 	userID := c.MustGet("user_id").(uuid.UUID)
 	id := c.Param("id")
 
@@ -199,6 +224,9 @@ func DeleteRole(c *gin.Context) {
 }
 
 func GetPermissions(c *gin.Context) {
+	if !requireSuperAdminForRoles(c) {
+		return
+	}
 	var permissions []models.Permission
 	if err := utils.DB.Order("resource, action").Find(&permissions).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch permissions"})

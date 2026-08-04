@@ -18,7 +18,47 @@ import (
 type ThermalPrintRequest struct {
 	DocumentType string    `json:"document_type" binding:"required"` // invoice, expense
 	DocumentID   uuid.UUID `json:"document_id" binding:"required"`
-	PrintSize    string    `json:"print_size" binding:"required"`    // 2inch, 3inch
+	PrintSize    string    `json:"print_size" binding:"required"`    // 1inch, 1.5inch, 2inch, 3inch
+}
+
+// normalizeThermalPrintSize accepts receipt widths: 1 / 1.5 / 2 / 3 inch.
+func normalizeThermalPrintSize(size string) string {
+	switch strings.TrimSpace(strings.ToLower(size)) {
+	case "1inch", "1.5inch", "2inch", "3inch":
+		return strings.TrimSpace(strings.ToLower(size))
+	default:
+		return "2inch"
+	}
+}
+
+func thermalWidthMM(printSize string) int {
+	switch normalizeThermalPrintSize(printSize) {
+	case "1inch":
+		return 25
+	case "1.5inch":
+		return 38
+	case "3inch":
+		return 80
+	default:
+		return 58
+	}
+}
+
+func isWideThermal(printSize string) bool {
+	return normalizeThermalPrintSize(printSize) == "3inch"
+}
+
+func thermalDescLen(printSize string) int {
+	switch normalizeThermalPrintSize(printSize) {
+	case "1inch":
+		return 12
+	case "1.5inch":
+		return 16
+	case "3inch":
+		return 30
+	default:
+		return 20
+	}
 }
 
 type ThermalPrintResponse struct {
@@ -125,9 +165,9 @@ func GenerateDocumentPrint(c *gin.Context) {
 		mode = "a4"
 	}
 
-	printSize := req.PrintSize
-	if printSize != "2inch" && printSize != "3inch" {
-		printSize = settings.ThermalPrintSize
+	printSize := normalizeThermalPrintSize(req.PrintSize)
+	if req.PrintSize == "" {
+		printSize = normalizeThermalPrintSize(settings.ThermalPrintSize)
 	}
 
 	switch req.DocumentType {
@@ -217,10 +257,7 @@ func GenerateDocumentPrint(c *gin.Context) {
 
 func GetThermalPrintPreview(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
-	printSize := c.DefaultQuery("print_size", "2inch")
-	if printSize != "2inch" && printSize != "3inch" {
-		printSize = "2inch"
-	}
+	printSize := normalizeThermalPrintSize(c.DefaultQuery("print_size", "2inch"))
 
 	content, width := generateSampleInvoiceThermal(userID, printSize)
 	if content == "" {
@@ -241,8 +278,18 @@ func GetBarcodePrintPreview(c *gin.Context) {
 		mode = "a4"
 	}
 
-	pageHTML := buildBarcodePreviewHTML(userID, mode)
-	c.JSON(http.StatusOK, gin.H{"html": pageHTML})
+	size := "2inch"
+	if q := c.Query("size"); q != "" {
+		size = normalizeBarcodeLabelSize(q)
+	} else {
+		var printSettings models.PrintSettings
+		if err := utils.DB.Where("user_id = ?", userID).First(&printSettings).Error; err == nil {
+			size = normalizeBarcodeLabelSize(printSettings.BarcodeLabelSize)
+		}
+	}
+
+	pageHTML := buildBarcodePreviewHTML(userID, mode, size)
+	c.JSON(http.StatusOK, gin.H{"html": pageHTML, "label_size": size})
 }
 
 func generateSampleInvoiceThermal(userID uuid.UUID, printSize string) (string, int) {
@@ -281,17 +328,13 @@ func generateSampleInvoiceThermal(userID uuid.UUID, printSize string) (string, i
 		},
 	}
 
-	width := 58
-	if printSize == "3inch" {
-		width = 80
-	}
+	printSize = normalizeThermalPrintSize(printSize)
+	width := thermalWidthMM(printSize)
 
 	data := prepareInvoiceData(sample, business, printSize)
 
-	var tmplStr string
-	if printSize == "2inch" {
-		tmplStr = template2Inch
-	} else {
+	tmplStr := template2Inch
+	if isWideThermal(printSize) {
 		tmplStr = template3Inch
 	}
 
@@ -308,7 +351,7 @@ func generateSampleInvoiceThermal(userID uuid.UUID, printSize string) (string, i
 	return builder.String(), width
 }
 
-func buildBarcodePreviewHTML(userID uuid.UUID, mode string) string {
+func buildBarcodePreviewHTML(userID uuid.UUID, mode string, labelSizeKey string) string {
 	var business models.Business
 	if err := utils.DB.Where("user_id = ?", userID).First(&business).Error; err != nil {
 		business = models.Business{
@@ -321,48 +364,60 @@ func buildBarcodePreviewHTML(userID uuid.UUID, mode string) string {
 		}
 	}
 
-	sampleCode := "8901234567890"
-	barcodeSVG := sampleBarcodeSVG(sampleCode)
-	singleLabel := fmt.Sprintf(`
-<div class="label">
-	<div class="product-name">%s</div>
-	<div class="product-sku">SKU: %s</div>
-	<div class="product-barcode">%s</div>
-	<div class="product-price">₹%.2f</div>
-	<div class="product-mrp">MRP: ₹%.2f</div>
-</div>`, html.EscapeString("Sample Product"), html.EscapeString("DEMO-001"), barcodeSVG, 199.0, 249.0)
+	sample := productLabelData{
+		Name:      "Sample Product",
+		SKU:       "DEMO-001",
+		ItemCode:  "8901234567890",
+		Category:  "General",
+		SalePrice: 199,
+		MRP:       249,
+	}
 
 	if mode == "label" {
-		return fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<style>
-@page { size: %.2fmm %.2fmm; margin: 0; }
-body { margin: 0; font-family: Arial, sans-serif; }
+		size := getBarcodeLabelSize(labelSizeKey)
+		compact := labelSizeKey == "1inch" || labelSizeKey == "1.5inch"
+		singleLabel := buildProductLabelHTML(sample, size, compact)
+		css := barcodeLabelPageCSS(size) + `
+body { display: flex; align-items: center; justify-content: center; min-height: 100vh; background: #f3f4f6; }
 .label {
-	border: 1px dashed #999;
-	padding: 2mm;
-	text-align: center;
-	box-sizing: border-box;
-	width: %.2fmm;
-	height: %.2fmm;
+	border: 1px dashed #9ca3af;
+	background: white;
+	box-shadow: 0 1px 3px rgba(0,0,0,0.08);
 }
-.product-name { font-size: 11px; font-weight: bold; margin-bottom: 2px; }
-.product-sku { font-size: 9px; margin-bottom: 2px; }
-.product-barcode svg { max-width: 100%%; height: auto; }
-.product-price { font-size: 12px; font-weight: bold; }
-.product-mrp { font-size: 9px; color: #666; }
-</style>
-</head>
-<body>%s</body>
-</html>`, business.LabelWidthMM, business.LabelHeightMM, business.LabelWidthMM, business.LabelHeightMM, singleLabel)
+.caption {
+	position: fixed;
+	bottom: 12px;
+	left: 0;
+	right: 0;
+	text-align: center;
+	font-size: 12px;
+	color: #6b7280;
+	font-family: Arial, sans-serif;
+}
+`
+		body := singleLabel + fmt.Sprintf(`<p class="caption">%s · %.0f×%.0f mm thermal label</p>`,
+			html.EscapeString(size.Label), size.WidthMM, size.HeightMM)
+		return wrapBarcodePreviewDocument(css, body)
 	}
 
 	columns := business.LabelColumns
 	if columns < 1 || columns > 5 {
 		columns = 3
 	}
+	a4Width := business.LabelWidthMM
+	a4Height := business.LabelHeightMM
+	if a4Width < 10 {
+		a4Width = 50
+	}
+	if a4Height < 10 {
+		a4Height = 30
+	}
+	a4Size := BarcodeLabelSize{
+		Key: "a4", WidthMM: a4Width, HeightMM: a4Height,
+		NameFontPx: 11, SkuFontPx: 9, PriceFontPx: 12, MetaFontPx: 8,
+		BarcodeH: 28, BarcodeW: 1.2, PaddingMM: 3,
+	}
+	singleLabel := buildProductLabelHTML(sample, a4Size, false)
 	previewCount := columns * 2
 	if previewCount > 6 {
 		previewCount = 6
@@ -370,11 +425,7 @@ body { margin: 0; font-family: Arial, sans-serif; }
 	labelsHTML := strings.Repeat(singleLabel, previewCount)
 	colWidth := 100.0 / float64(columns)
 
-	return fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<style>
+	css := fmt.Sprintf(`
 body { font-family: Arial, sans-serif; margin: 0; padding: 8px; background: #f3f4f6; }
 .sheet {
 	background: white;
@@ -390,62 +441,33 @@ body { font-family: Arial, sans-serif; margin: 0; padding: 8px; background: #f3f
 }
 .label {
 	border: 1px solid #000;
-	padding: 3mm;
+	padding: %.2fmm;
 	text-align: center;
 	box-sizing: border-box;
 	width: %.2fmm;
 	height: %.2fmm;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	overflow: hidden;
 }
-.product-name { font-size: 11px; font-weight: bold; margin-bottom: 2px; }
-.product-sku { font-size: 9px; margin-bottom: 2px; }
+.product-name { font-size: %.1fpx; font-weight: bold; margin-bottom: 2px; max-width: 100%%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.product-sku { font-size: %.1fpx; margin-bottom: 2px; }
+.product-barcode { width: 100%%; line-height: 0; }
 .product-barcode svg { max-width: 100%%; height: auto; }
-.product-price { font-size: 12px; font-weight: bold; }
-.product-mrp { font-size: 9px; color: #666; }
+.product-price { font-size: %.1fpx; font-weight: bold; }
+.product-mrp, .product-category { font-size: %.1fpx; color: #666; }
 .caption { font-size: 11px; color: #6b7280; text-align: center; margin-top: 8px; }
-</style>
-</head>
-<body>
-<div class="sheet">
+`, business.LabelMarginMM, columns, fmt.Sprintf("%.2f%%", colWidth), a4Size.PaddingMM, a4Width, a4Height,
+		a4Size.NameFontPx, a4Size.SkuFontPx, a4Size.PriceFontPx, a4Size.MetaFontPx)
+
+	body := fmt.Sprintf(`<div class="sheet">
 <div class="labels-grid">%s</div>
 <p class="caption">A4 sheet · %d columns × %d rows (preview shows sample labels)</p>
-</div>
-</body>
-</html>`, business.LabelMarginMM, columns, fmt.Sprintf("%.2f%%", colWidth), business.LabelWidthMM, business.LabelHeightMM, labelsHTML, columns, business.LabelRows)
-}
+</div>`, labelsHTML, columns, business.LabelRows)
 
-func sampleBarcodeSVG(code string) string {
-	return fmt.Sprintf(`
-<svg xmlns="http://www.w3.org/2000/svg" width="150" height="50">
-	<rect x="0" y="0" width="150" height="50" fill="white"/>
-	<rect x="5" y="5" width="2" height="35" fill="black"/>
-	<rect x="10" y="5" width="1" height="35" fill="black"/>
-	<rect x="15" y="5" width="3" height="35" fill="black"/>
-	<rect x="20" y="5" width="1" height="35" fill="black"/>
-	<rect x="25" y="5" width="2" height="35" fill="black"/>
-	<rect x="30" y="5" width="1" height="35" fill="black"/>
-	<rect x="35" y="5" width="3" height="35" fill="black"/>
-	<rect x="40" y="5" width="2" height="35" fill="black"/>
-	<rect x="45" y="5" width="1" height="35" fill="black"/>
-	<rect x="50" y="5" width="2" height="35" fill="black"/>
-	<rect x="55" y="5" width="3" height="35" fill="black"/>
-	<rect x="60" y="5" width="1" height="35" fill="black"/>
-	<rect x="65" y="5" width="2" height="35" fill="black"/>
-	<rect x="70" y="5" width="1" height="35" fill="black"/>
-	<rect x="75" y="5" width="3" height="35" fill="black"/>
-	<rect x="80" y="5" width="2" height="35" fill="black"/>
-	<rect x="85" y="5" width="1" height="35" fill="black"/>
-	<rect x="90" y="5" width="2" height="35" fill="black"/>
-	<rect x="95" y="5" width="3" height="35" fill="black"/>
-	<rect x="100" y="5" width="1" height="35" fill="black"/>
-	<rect x="105" y="5" width="2" height="35" fill="black"/>
-	<rect x="110" y="5" width="1" height="35" fill="black"/>
-	<rect x="115" y="5" width="3" height="35" fill="black"/>
-	<rect x="120" y="5" width="2" height="35" fill="black"/>
-	<rect x="125" y="5" width="1" height="35" fill="black"/>
-	<rect x="130" y="5" width="2" height="35" fill="black"/>
-	<rect x="135" y="5" width="3" height="35" fill="black"/>
-	<text x="75" y="45" text-anchor="middle" font-family="monospace" font-size="8">%s</text>
-</svg>`, html.EscapeString(code))
+	return wrapBarcodePreviewDocument(css, body)
 }
 
 func generateInvoiceThermal(userID uuid.UUID, invoiceID uuid.UUID, printSize string) (string, int) {
@@ -461,17 +483,13 @@ func generateInvoiceThermal(userID uuid.UUID, invoiceID uuid.UUID, printSize str
 	var business models.Business
 	utils.DB.Where("user_id = ?", userID).First(&business)
 
-	width := 58 // 2-inch default
-	if printSize == "3inch" {
-		width = 80
-	}
+	printSize = normalizeThermalPrintSize(printSize)
+	width := thermalWidthMM(printSize)
 
 	data := prepareInvoiceData(invoice, business, printSize)
 
-	var tmplStr string
-	if printSize == "2inch" {
-		tmplStr = template2Inch
-	} else {
+	tmplStr := template2Inch
+	if isWideThermal(printSize) {
 		tmplStr = template3Inch
 	}
 
@@ -501,17 +519,13 @@ func generateExpenseThermal(userID uuid.UUID, expenseID uuid.UUID, printSize str
 	var business models.Business
 	utils.DB.Where("user_id = ?", userID).First(&business)
 
-	width := 58
-	if printSize == "3inch" {
-		width = 80
-	}
+	printSize = normalizeThermalPrintSize(printSize)
+	width := thermalWidthMM(printSize)
 
 	data := prepareExpenseData(expense, business, printSize)
 
-	var tmplStr string
-	if printSize == "2inch" {
-		tmplStr = template2Inch
-	} else {
+	tmplStr := template2Inch
+	if isWideThermal(printSize) {
 		tmplStr = template3Inch
 	}
 
@@ -595,10 +609,8 @@ func prepareInvoiceData(invoice models.Invoice, business models.Business, printS
 
 	// Items
 	items := make([]ItemTemplateData, len(invoice.Items))
-	maxDescLen := 20
-	if printSize == "3inch" {
-		maxDescLen = 30
-	}
+	maxDescLen := thermalDescLen(printSize)
+	wide := isWideThermal(printSize)
 	for i, item := range invoice.Items {
 		items[i] = ItemTemplateData{
 			Description: truncateString(item.Description, maxDescLen),
@@ -606,7 +618,7 @@ func prepareInvoiceData(invoice models.Invoice, business models.Business, printS
 			Rate:        fmt.Sprintf("%.2f", item.UnitPrice),
 			Total:       fmt.Sprintf("%.2f", item.Total),
 		}
-		if printSize == "3inch" {
+		if wide {
 			items[i].ItemLine = fmt.Sprintf("%-30s %5s x %8s = %8s",
 				truncateString(item.Description, 30),
 				fmt.Sprintf("%.0f", item.Quantity),
@@ -617,7 +629,7 @@ func prepareInvoiceData(invoice models.Invoice, business models.Business, printS
 
 	// Items Header (3-inch only)
 	itemsHeader := ""
-	if printSize == "3inch" {
+	if wide {
 		itemsHeader = fmt.Sprintf("%-30s %5s %8s %8s", "Item", "Qty", "Rate", "Total")
 	}
 
@@ -650,7 +662,7 @@ func prepareInvoiceData(invoice models.Invoice, business models.Business, printS
 
 	// Tax Details (3-inch only)
 	taxDetails := ""
-	if printSize == "3inch" {
+	if wide {
 		taxDetails = fmt.Sprintf("Payment Mode: %s", invoice.PaymentMode)
 	}
 
@@ -699,10 +711,8 @@ func prepareExpenseData(expense models.Expense, business models.Business, printS
 
 	// Items
 	items := make([]ItemTemplateData, len(expense.Items))
-	maxDescLen := 20
-	if printSize == "3inch" {
-		maxDescLen = 30
-	}
+	maxDescLen := thermalDescLen(printSize)
+	wide := isWideThermal(printSize)
 	for i, item := range expense.Items {
 		items[i] = ItemTemplateData{
 			Description: truncateString(item.Description, maxDescLen),
@@ -710,7 +720,7 @@ func prepareExpenseData(expense models.Expense, business models.Business, printS
 			Rate:        fmt.Sprintf("%.2f", item.UnitPrice),
 			Total:       fmt.Sprintf("%.2f", item.Total),
 		}
-		if printSize == "3inch" {
+		if wide {
 			items[i].ItemLine = fmt.Sprintf("%-30s %5s x %8s = %8s",
 				truncateString(item.Description, 30),
 				fmt.Sprintf("%.0f", item.Quantity),
@@ -721,7 +731,7 @@ func prepareExpenseData(expense models.Expense, business models.Business, printS
 
 	// Items Header (3-inch only)
 	itemsHeader := ""
-	if printSize == "3inch" {
+	if wide {
 		itemsHeader = fmt.Sprintf("%-30s %5s %8s %8s", "Item", "Qty", "Rate", "Total")
 	}
 
@@ -735,7 +745,7 @@ func prepareExpenseData(expense models.Expense, business models.Business, printS
 
 	// Tax Details (3-inch only)
 	taxDetails := ""
-	if printSize == "3inch" {
+	if wide {
 		if expense.Notes != "" {
 			taxDetails = fmt.Sprintf("Notes: %s", expense.Notes)
 		}

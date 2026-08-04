@@ -1,10 +1,11 @@
 package controllers
 
 import (
+	"net/http"
+	"strings"
+	"time"
 	"truerp/models"
 	"truerp/utils"
-	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -138,6 +139,7 @@ func defaultPrintSettings(userID uuid.UUID) models.PrintSettings {
 		PrintFooter:         true,
 		ThermalPrintSize:    "2inch",
 		BarcodePrintMode:    "a4",
+		BarcodeLabelSize:    "2inch",
 		ThermalPrinterName:  "",
 		DocumentPrinterName: "",
 		AutoPrintOnPOS:      true,
@@ -148,12 +150,11 @@ func normalizePrintSettings(settings *models.PrintSettings) {
 	if settings.InvoicePrintMode != "thermal" && settings.InvoicePrintMode != "a4" {
 		settings.InvoicePrintMode = "a4"
 	}
-	if settings.ThermalPrintSize != "2inch" && settings.ThermalPrintSize != "3inch" {
-		settings.ThermalPrintSize = "2inch"
-	}
+	settings.ThermalPrintSize = normalizeThermalPrintSize(settings.ThermalPrintSize)
 	if settings.BarcodePrintMode != "label" && settings.BarcodePrintMode != "a4" {
 		settings.BarcodePrintMode = "a4"
 	}
+	settings.BarcodeLabelSize = normalizeBarcodeLabelSize(settings.BarcodeLabelSize)
 	if settings.PaperSize == "" {
 		settings.PaperSize = "a4"
 	}
@@ -203,6 +204,7 @@ func UpdatePrintSettings(c *gin.Context) {
 			PrintFooter:         input.PrintFooter,
 			ThermalPrintSize:    input.ThermalPrintSize,
 			BarcodePrintMode:    input.BarcodePrintMode,
+			BarcodeLabelSize:    input.BarcodeLabelSize,
 			ThermalPrinterName:  input.ThermalPrinterName,
 			DocumentPrinterName: input.DocumentPrinterName,
 			AutoPrintOnPOS:      input.AutoPrintOnPOS,
@@ -226,6 +228,7 @@ func UpdatePrintSettings(c *gin.Context) {
 			"print_footer":          input.PrintFooter,
 			"thermal_print_size":    input.ThermalPrintSize,
 			"barcode_print_mode":    input.BarcodePrintMode,
+			"barcode_label_size":    input.BarcodeLabelSize,
 			"thermal_printer_name":  input.ThermalPrinterName,
 			"document_printer_name": input.DocumentPrinterName,
 			"auto_print_on_pos":     input.AutoPrintOnPOS,
@@ -268,6 +271,7 @@ func defaultWeighingScaleSettings(userID uuid.UUID) models.WeighingScaleSettings
 		CsvPriceColumn:         "",
 		CsvExportWeightItemsOnly: true,
 		BarcodeScanEnabled:     true,
+		BarcodePrefix:          "w",
 		BarcodePrefixStart:     20,
 		BarcodePrefixEnd:       29,
 		BarcodePluDigits:       5,
@@ -283,6 +287,10 @@ func GetWeighingScaleSettings(c *gin.Context) {
 	if err := utils.DB.Where("user_id = ?", userID).First(&settings).Error; err != nil {
 		c.JSON(http.StatusOK, defaultWeighingScaleSettings(userID))
 		return
+	}
+
+	if strings.TrimSpace(settings.BarcodePrefix) == "" {
+		settings.BarcodePrefix = "w"
 	}
 
 	c.JSON(http.StatusOK, settings)
@@ -328,6 +336,7 @@ func UpdateWeighingScaleSettings(c *gin.Context) {
 		}
 		settings.CsvExportWeightItemsOnly = input.CsvExportWeightItemsOnly
 		settings.BarcodeScanEnabled = input.BarcodeScanEnabled
+		settings.BarcodePrefix = normalizeBarcodePrefix(input.BarcodePrefix)
 		settings.BarcodePrefixStart = input.BarcodePrefixStart
 		settings.BarcodePrefixEnd = input.BarcodePrefixEnd
 		settings.BarcodePluDigits = input.BarcodePluDigits
@@ -364,6 +373,7 @@ func UpdateWeighingScaleSettings(c *gin.Context) {
 			"csv_price_column":           input.CsvPriceColumn,
 			"csv_export_weight_items_only": input.CsvExportWeightItemsOnly,
 			"barcode_scan_enabled":       input.BarcodeScanEnabled,
+			"barcode_prefix":             normalizeBarcodePrefix(input.BarcodePrefix),
 			"barcode_prefix_start":       input.BarcodePrefixStart,
 			"barcode_prefix_end":         input.BarcodePrefixEnd,
 			"barcode_plu_digits":         input.BarcodePluDigits,
@@ -373,9 +383,18 @@ func UpdateWeighingScaleSettings(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update weighing scale settings"})
 			return
 		}
+		settings.BarcodePrefix = normalizeBarcodePrefix(input.BarcodePrefix)
 	}
 
 	c.JSON(http.StatusOK, settings)
+}
+
+func normalizeBarcodePrefix(prefix string) string {
+	trimmed := strings.TrimSpace(prefix)
+	if trimmed == "" {
+		return "w"
+	}
+	return trimmed
 }
 
 // Reminders Controllers
@@ -553,7 +572,7 @@ func DeleteCAReportSharing(c *gin.Context) {
 
 // Account Settings - Change Password
 func ChangePassword(c *gin.Context) {
-	userID := c.MustGet("user_id").(uuid.UUID)
+	userID := actorUserID(c)
 
 	var input struct {
 		CurrentPassword string `json:"current_password" binding:"required"`
@@ -591,28 +610,52 @@ func ChangePassword(c *gin.Context) {
 
 // Manage Users - Get all users (for business owner)
 func GetBusinessUsers(c *gin.Context) {
-	userID := c.MustGet("user_id").(uuid.UUID)
-
-	var user models.User
-	if err := utils.DB.First(&user, "id = ?", userID).Error; err != nil {
+	actor, err := loadActor(c)
+	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
 
-	if !canManageUsers(user.Role) {
+	if !canManageUsers(actor.Role) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions to manage users"})
 		return
 	}
 
 	var users []models.User
-	if err := utils.DB.Order("created_at ASC").Find(&users).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch users"})
-		return
+	if utils.IsSuperAdminRole(actor.Role) && c.Query("all") == "true" {
+		if err := utils.DB.Where("is_store_owner = ?", false).Order("created_at ASC").Find(&users).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch users"})
+			return
+		}
+	} else {
+		storeID, ok := resolveManagedStoreID(c, actor)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Select a store to manage users"})
+			return
+		}
+		if err := utils.DB.Where("store_id = ? AND is_store_owner = ?", storeID, false).
+			Order("created_at ASC").Find(&users).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch users"})
+			return
+		}
+	}
+
+	storeNames := map[uuid.UUID]string{}
+	var stores []models.Store
+	utils.DB.Select("id, name").Find(&stores)
+	for _, s := range stores {
+		storeNames[s.ID] = s.Name
 	}
 
 	out := make([]gin.H, 0, len(users))
 	for _, u := range users {
-		out = append(out, userPublicResponse(u))
+		resp := storeUserResponse(u)
+		if u.StoreID != nil {
+			if name, ok := storeNames[*u.StoreID]; ok {
+				resp["store_name"] = name
+			}
+		}
+		out = append(out, resp)
 	}
 
 	c.JSON(http.StatusOK, out)
@@ -620,56 +663,98 @@ func GetBusinessUsers(c *gin.Context) {
 
 // Create Business User (staff/employee)
 func CreateBusinessUser(c *gin.Context) {
-	userID := c.MustGet("user_id").(uuid.UUID)
-
-	var user models.User
-	if err := utils.DB.First(&user, "id = ?", userID).Error; err != nil {
+	actor, err := loadActor(c)
+	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
 
-	if !canManageUsers(user.Role) {
+	if !canManageUsers(actor.Role) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions to create users"})
 		return
 	}
 
 	var input struct {
-		Name     string `json:"name" binding:"required"`
-		Email    string `json:"email" binding:"required,email"`
-		Password string `json:"password" binding:"required,min=6"`
-		Phone    string `json:"phone"`
-		Role     string `json:"role" binding:"required"`
+		Name     string  `json:"name"`
+		Email    string  `json:"email"`
+		Password string  `json:"password"`
+		Phone    string  `json:"phone"`
+		Role     string  `json:"role"`
+		StoreID  *string `json:"store_id"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request data", "fields": gin.H{"_form": "Invalid request data"}})
 		return
 	}
 
-	role, ok := normalizeAllowedRole(input.Role)
-	if !ok || isProtectedRole(role) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid role for new user"})
+	form, fieldErrs := utils.ValidateStoreUserForm(utils.StoreUserFormInput{
+		Name: input.Name, Email: input.Email, Password: input.Password, Phone: input.Phone, Role: input.Role,
+	})
+	if len(fieldErrs) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": utils.FirstFieldMessage(fieldErrs), "fields": fieldErrs})
 		return
+	}
+
+	if !utils.IsSuperAdminRole(actor.Role) && !isStoreAdminAssignableRole(form.Role) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":  "Store admins can only create admin or staff users",
+			"fields": gin.H{"role": "Select admin or staff"},
+		})
+		return
+	}
+
+	var storeID uuid.UUID
+	if !utils.IsSuperAdminRole(actor.Role) {
+		// Store admins always create users in their own store.
+		if actor.StoreID == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Your account has no store assignment"})
+			return
+		}
+		storeID = *actor.StoreID
+	} else if input.StoreID != nil && strings.TrimSpace(*input.StoreID) != "" {
+		parsed, err := uuid.Parse(strings.TrimSpace(*input.StoreID))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid store_id", "fields": gin.H{"store_id": "Invalid store"}})
+			return
+		}
+		if _, err := utils.FindStoreByID(utils.DB, parsed); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Store not found", "fields": gin.H{"store_id": "Store not found"}})
+			return
+		}
+		storeID = parsed
+	} else {
+		sid, ok := resolveManagedStoreID(c, actor)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Select a store to create users"})
+			return
+		}
+		storeID = sid
 	}
 
 	var existingUser models.User
-	if err := utils.DB.Where("email = ?", input.Email).First(&existingUser).Error; err == nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "Email already registered"})
+	if err := utils.DB.Where("email = ?", form.Email).First(&existingUser).Error; err == nil {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":  "Email already registered",
+			"fields": gin.H{"email": "Email already registered"},
+		})
 		return
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(form.Password), bcrypt.DefaultCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
 		return
 	}
 
+	sid := storeID
 	newUser := models.User{
 		ID:       uuid.New(),
-		Name:     input.Name,
-		Email:    input.Email,
+		Name:     form.Name,
+		Email:    form.Email,
 		Password: string(hashedPassword),
-		Phone:    input.Phone,
-		Role:     role,
+		Phone:    form.Phone,
+		Role:     form.Role,
+		StoreID:  &sid,
 		IsActive: true,
 	}
 
@@ -678,35 +763,51 @@ func CreateBusinessUser(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, userPublicResponse(newUser))
+	CreateAuditLog(
+		actor.ID,
+		actor.Name,
+		"create",
+		"user",
+		&newUser.ID,
+		newUser.Email,
+		"Created user account",
+		c.ClientIP(),
+		c.GetHeader("User-Agent"),
+		nil,
+		"success",
+		"",
+	)
+
+	c.JSON(http.StatusCreated, storeUserResponse(newUser))
 }
 
 // Delete Business User
 func DeleteBusinessUser(c *gin.Context) {
 	id := c.Param("id")
-	userID := c.MustGet("user_id").(uuid.UUID)
-
-	// Only allow business owners to delete users
-	var user models.User
-	if err := utils.DB.First(&user, "id = ?", userID).Error; err != nil {
+	actor, err := loadActor(c)
+	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
 
-	if !canManageUsers(user.Role) {
+	if !canManageUsers(actor.Role) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions to delete users"})
 		return
 	}
 
-	// Prevent deleting the owner
 	var targetUser models.User
 	if err := utils.DB.First(&targetUser, "id = ?", id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
 
-	if isProtectedRole(targetUser.Role) {
+	if isProtectedRole(targetUser.Role) || targetUser.IsStoreOwner {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot delete super admin account"})
+		return
+	}
+
+	if !actorCanAccessUser(actor, targetUser) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "User does not belong to your store"})
 		return
 	}
 

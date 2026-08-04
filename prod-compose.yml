@@ -6,6 +6,9 @@
 
 services:
   api:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: ntoric/truerp-api:latest
     container_name: truerp-api
     ports:

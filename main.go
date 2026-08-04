@@ -24,6 +24,7 @@ func main() {
 
 	utils.InitDatabase()
 	controllers.EnsureDefaultSuperAdmin()
+	controllers.EnsureStoresMigrated()
 	_ = services.GetDefaultStorageService()
 
 	gin.SetMode(gin.ReleaseMode)
@@ -32,7 +33,8 @@ func main() {
 	config := cors.DefaultConfig()
 	// Desktop Tauri WebView (local UI) and any web clients call this cloud API cross-origin.
 	config.AllowOrigins = []string{"*"}
-	config.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization"}
+	config.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Store-ID"}
+	config.ExposeHeaders = []string{"X-Active-Store-ID"}
 	r.Use(cors.New(config))
 
 	storageConfig := services.GetStorageConfig()

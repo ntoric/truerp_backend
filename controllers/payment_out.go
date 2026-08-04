@@ -24,8 +24,18 @@ func GetPaymentOuts(c *gin.Context) {
 	}
 
 	if err := query.Order("date DESC").Find(&paymentOuts).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch payment outs"})
-		return
+		// Fall back without preloads so a relation/schema mismatch still returns data.
+		fallback := utils.DB.Where("user_id = ?", userID)
+		if partyID := c.Query("party_id"); partyID != "" {
+			fallback = fallback.Where("party_id = ?", partyID)
+		}
+		if purchaseBillID := c.Query("purchase_bill_id"); purchaseBillID != "" {
+			fallback = fallback.Where("purchase_bill_id = ?", purchaseBillID)
+		}
+		if err2 := fallback.Order("date DESC").Find(&paymentOuts).Error; err2 != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch payment outs"})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, paymentOuts)
@@ -38,7 +48,7 @@ func CreatePaymentOut(c *gin.Context) {
 		PurchaseBillID     *uuid.UUID `json:"purchase_bill_id"`
 		PartyID            uuid.UUID  `json:"party_id" binding:"required"`
 		AmountPaid         float64    `json:"amount_paid" binding:"required,gt=0"`
-		PaymentOutDiscount float64    `json:"payment_out_discount" binding:"required"`
+		PaymentOutDiscount float64    `json:"payment_out_discount" binding:"gte=0"`
 		PaymentOutNumber   string     `json:"payment_out_number"`
 		Mode               string     `json:"mode" binding:"required"`
 		Date               time.Time  `json:"date" binding:"required"`

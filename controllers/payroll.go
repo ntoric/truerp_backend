@@ -1,21 +1,120 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
+
+// repairZeroNetPayrolls fixes records created with no attendance where net was stored as 0
+// despite a positive basic salary (payable fell to 0 when attendance days were all zero).
+func repairZeroNetPayrolls(userID uuid.UUID) {
+	var broken []models.Payroll
+	utils.DB.Where(
+		"user_id = ? AND net_salary = 0 AND basic_salary > 0 AND working_days = 0",
+		userID,
+	).Find(&broken)
+
+	for _, p := range broken {
+		net := p.BasicSalary - p.Deductions + p.Bonus
+		if net < 0 {
+			net = 0
+		}
+		if net == 0 {
+			continue
+		}
+		utils.DB.Model(&p).Update("net_salary", net)
+	}
+}
+
+func nextExpenseNumber(tx *gorm.DB, userID uuid.UUID) string {
+	var count int64
+	tx.Model(&models.Expense{}).Where("user_id = ?", userID).Count(&count)
+	return fmt.Sprintf("EXP-%04d", count+1)
+}
+
+// applyPayrollPayment creates a Salary expense, deducts cash/bank, and posts GL.
+func applyPayrollPayment(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll, staffName string) error {
+	if payroll.Status != "paid" || payroll.NetSalary <= 0 {
+		return nil
+	}
+	if payroll.ExpenseID != nil {
+		return nil
+	}
+
+	desc := fmt.Sprintf("Salary payment %s — %s", payroll.PaymentNumber, staffName)
+	expense := models.Expense{
+		ID:            uuid.New(),
+		UserID:        userID,
+		ExpenseNumber: nextExpenseNumber(tx, userID),
+		Category:      "Salary",
+		Description:   desc,
+		Amount:        payroll.NetSalary,
+		SubTotal:      payroll.NetSalary,
+		Date:          payroll.PaymentDate,
+		Vendor:        staffName,
+		PaymentMode:   payroll.PaymentMode,
+		Notes:         payroll.Notes,
+	}
+	if err := tx.Create(&expense).Error; err != nil {
+		return err
+	}
+
+	item := models.ExpenseItem{
+		ID:          uuid.New(),
+		ExpenseID:   expense.ID,
+		Description: desc,
+		Quantity:    1,
+		UnitPrice:   payroll.NetSalary,
+		Total:       payroll.NetSalary,
+	}
+	if err := tx.Create(&item).Error; err != nil {
+		return err
+	}
+
+	if err := recordPayrollCashOut(
+		tx, userID, payroll.BankAccountID, payroll.NetSalary,
+		payroll.PaymentDate, payroll.PaymentNumber, desc,
+	); err != nil {
+		return err
+	}
+
+	if err := postPayrollSalaryAccounting(tx, userID, payroll, &expense); err != nil {
+		return err
+	}
+
+	expenseID := expense.ID
+	payroll.ExpenseID = &expenseID
+	return tx.Model(payroll).Update("expense_id", expenseID).Error
+}
+
+// reversePayrollPayment restores cash/bank and removes the linked salary expense.
+func reversePayrollPayment(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll) error {
+	if err := reversePayrollCashOut(tx, userID, payroll.PaymentNumber); err != nil {
+		return err
+	}
+	if payroll.ExpenseID != nil {
+		if err := tx.Where("user_id = ? AND id = ?", userID, *payroll.ExpenseID).Delete(&models.Expense{}).Error; err != nil {
+			return err
+		}
+		payroll.ExpenseID = nil
+		return tx.Model(payroll).Update("expense_id", nil).Error
+	}
+	return nil
+}
 
 func GetPayrolls(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
+	repairZeroNetPayrolls(userID)
 
 	var payrolls []models.Payroll
-	query := utils.DB.Where("user_id = ?", userID).Preload("Staff")
+	query := utils.DB.Where("user_id = ?", userID).Preload("Staff").Preload("BankAccount")
 
 	if staffID := c.Query("staff_id"); staffID != "" {
 		query = query.Where("staff_id = ?", staffID)
@@ -42,7 +141,7 @@ func GetPayroll(c *gin.Context) {
 	id := c.Param("id")
 
 	var payroll models.Payroll
-	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).Preload("Staff").First(&payroll).Error; err != nil {
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).Preload("Staff").Preload("BankAccount").First(&payroll).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Payroll not found"})
 		return
 	}
@@ -54,16 +153,18 @@ func CreatePayroll(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		StaffID       uuid.UUID `json:"staff_id" binding:"required"`
-		PaymentDate   time.Time `json:"payment_date" binding:"required"`
-		StartDate     time.Time `json:"start_date" binding:"required"`
-		EndDate       time.Time `json:"end_date" binding:"required"`
-		BasicSalary   float64   `json:"basic_salary"`
-		Deductions    float64   `json:"deductions"`
-		Bonus         float64   `json:"bonus"`
-		PaymentMode   string    `json:"payment_mode"`
-		Reference     string    `json:"reference"`
-		Notes         string    `json:"notes"`
+		StaffID       uuid.UUID  `json:"staff_id" binding:"required"`
+		PaymentDate   time.Time  `json:"payment_date" binding:"required"`
+		StartDate     time.Time  `json:"start_date" binding:"required"`
+		EndDate       time.Time  `json:"end_date" binding:"required"`
+		BasicSalary   float64    `json:"basic_salary"`
+		Deductions    float64    `json:"deductions"`
+		Bonus         float64    `json:"bonus"`
+		PaymentMode   string     `json:"payment_mode"`
+		BankAccountID *uuid.UUID `json:"bank_account_id"`
+		Reference     string     `json:"reference"`
+		Notes         string     `json:"notes"`
+		Status        string     `json:"status"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -71,14 +172,17 @@ func CreatePayroll(c *gin.Context) {
 		return
 	}
 
-	// Get staff details
+	if err := validateUserBankAccount(userID, input.BankAccountID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account"})
+		return
+	}
+
 	var staff models.Staff
 	if err := utils.DB.Where("user_id = ? AND id = ?", userID, input.StaffID).First(&staff).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Staff not found"})
 		return
 	}
 
-	// Calculate attendance for the period
 	startDateStr := input.StartDate.Format("2006-01-02")
 	endDateStr := input.EndDate.Format("2006-01-02")
 
@@ -108,48 +212,62 @@ func CreatePayroll(c *gin.Context) {
 		}
 	}
 
-	// Calculate salary
 	basicSalary := input.BasicSalary
 	if basicSalary == 0 {
 		basicSalary = staff.Salary
 	}
 
-	// Calculate daily rate based on salary type
-	dailyRate := basicSalary
-	if staff.SalaryType == "monthly" {
-		dailyRate = basicSalary / 30
+	var payableAmount float64
+	if workingDays == 0 {
+		payableAmount = basicSalary
+	} else {
+		dailyRate := basicSalary
+		if staff.SalaryType == "monthly" {
+			dailyRate = basicSalary / 30
+		}
+		payableDays := float64(presentDays) + float64(halfDays)*0.5 + float64(paidLeaveDays) + float64(weeklyOffDays)
+		payableAmount = payableDays * dailyRate
 	}
 
-	// Calculate payable amount
-	payableAmount := (float64(presentDays) + float64(halfDays)*0.5 + float64(paidLeaveDays) + float64(weeklyOffDays)) * dailyRate
-
-	// Calculate total deductions from staff deductions for the period
 	var totalPeriodDeductions float64
 	utils.DB.Model(&models.StaffDeduction{}).
-		Where("user_id = ? AND staff_id = ? AND deduction_date >= ? AND deduction_date <= ? AND status = ?", 
+		Where("user_id = ? AND staff_id = ? AND deduction_date >= ? AND deduction_date <= ? AND status = ?",
 			userID, input.StaffID, startDateStr, endDateStr, "active").
 		Select("COALESCE(SUM(amount), 0)").
 		Scan(&totalPeriodDeductions)
 
-	// Calculate total advance recoveries for the period
 	var totalAdvanceRecovery float64
 	utils.DB.Model(&models.StaffAdvancePayment{}).
-		Where("user_id = ? AND staff_id = ? AND advance_date >= ? AND advance_date <= ? AND status IN ?", 
+		Where("user_id = ? AND staff_id = ? AND advance_date >= ? AND advance_date <= ? AND status IN ?",
 			userID, input.StaffID, startDateStr, endDateStr, []string{"pending", "partial"}).
 		Select("COALESCE(SUM(pending_amount), 0)").
 		Scan(&totalAdvanceRecovery)
 
-	// Total deductions = manual input + system deductions + advance recovery
 	totalDeductions := input.Deductions + totalPeriodDeductions + totalAdvanceRecovery
 
 	netSalary := payableAmount - totalDeductions + input.Bonus
+	if netSalary < 0 {
+		netSalary = 0
+	}
 
-	// Generate payment number
+	paymentMode := input.PaymentMode
+	if paymentMode == "" {
+		if input.BankAccountID == nil {
+			paymentMode = "cash"
+		} else {
+			paymentMode = "bank_transfer"
+		}
+	}
+
+	status := input.Status
+	if status != "pending" {
+		status = "paid"
+	}
+
 	var lastPayroll models.Payroll
 	utils.DB.Where("user_id = ?", userID).Order("created_at DESC").First(&lastPayroll)
 	paymentNumber := "PAY-001"
 	if lastPayroll.ID != uuid.Nil {
-		// Extract number and increment
 		num := 1
 		fmt.Sscanf(lastPayroll.PaymentNumber, "PAY-%d", &num)
 		num++
@@ -174,17 +292,25 @@ func CreatePayroll(c *gin.Context) {
 		Deductions:    totalDeductions,
 		Bonus:         input.Bonus,
 		NetSalary:     netSalary,
-		PaymentMode:   input.PaymentMode,
+		PaymentMode:   paymentMode,
+		BankAccountID: input.BankAccountID,
 		Reference:     input.Reference,
 		Notes:         input.Notes,
-		Status:        "paid",
+		Status:        status,
 	}
 
-	if err := utils.DB.Create(&payroll).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create payroll"})
+	err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&payroll).Error; err != nil {
+			return err
+		}
+		return applyPayrollPayment(tx, userID, &payroll, staff.Name)
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create payroll: " + err.Error()})
 		return
 	}
 
+	utils.DB.Preload("Staff").Preload("BankAccount").First(&payroll, payroll.ID)
 	c.JSON(http.StatusCreated, payroll)
 }
 
@@ -193,13 +319,14 @@ func UpdatePayroll(c *gin.Context) {
 	id := c.Param("id")
 
 	var input struct {
-		PaymentDate   time.Time `json:"payment_date"`
-		Deductions    float64   `json:"deductions"`
-		Bonus         float64   `json:"bonus"`
-		PaymentMode   string    `json:"payment_mode"`
-		Reference     string    `json:"reference"`
-		Notes         string    `json:"notes"`
-		Status        string    `json:"status"`
+		PaymentDate   time.Time  `json:"payment_date"`
+		Deductions    float64    `json:"deductions"`
+		Bonus         float64    `json:"bonus"`
+		PaymentMode   string     `json:"payment_mode"`
+		BankAccountID *uuid.UUID `json:"bank_account_id"`
+		Reference     string     `json:"reference"`
+		Notes         string     `json:"notes"`
+		Status        string     `json:"status"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -207,31 +334,76 @@ func UpdatePayroll(c *gin.Context) {
 		return
 	}
 
+	if err := validateUserBankAccount(userID, input.BankAccountID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account"})
+		return
+	}
+
 	var payroll models.Payroll
-	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).First(&payroll).Error; err != nil {
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).Preload("Staff").First(&payroll).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Payroll not found"})
 		return
 	}
 
-	// Recalculate net salary
 	netSalary := payroll.BasicSalary - input.Deductions + input.Bonus
-
-	updates := map[string]interface{}{
-		"payment_date": input.PaymentDate,
-		"deductions":   input.Deductions,
-		"bonus":        input.Bonus,
-		"net_salary":   netSalary,
-		"payment_mode": input.PaymentMode,
-		"reference":    input.Reference,
-		"notes":        input.Notes,
-		"status":       input.Status,
+	if netSalary < 0 {
+		netSalary = 0
 	}
 
-	if err := utils.DB.Model(&payroll).Updates(updates).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update payroll"})
+	status := input.Status
+	if status != "pending" && status != "paid" {
+		status = payroll.Status
+	}
+
+	staffName := ""
+	if payroll.Staff.Name != "" {
+		staffName = payroll.Staff.Name
+	}
+
+	err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		wasPaid := payroll.Status == "paid" && payroll.ExpenseID != nil
+		if wasPaid {
+			if err := reversePayrollPayment(tx, userID, &payroll); err != nil {
+				return err
+			}
+		}
+
+		payroll.PaymentDate = input.PaymentDate
+		payroll.Deductions = input.Deductions
+		payroll.Bonus = input.Bonus
+		payroll.NetSalary = netSalary
+		payroll.PaymentMode = input.PaymentMode
+		payroll.BankAccountID = input.BankAccountID
+		payroll.Reference = input.Reference
+		payroll.Notes = input.Notes
+		payroll.Status = status
+
+		if err := tx.Model(&payroll).Updates(map[string]interface{}{
+			"payment_date":    payroll.PaymentDate,
+			"deductions":      payroll.Deductions,
+			"bonus":           payroll.Bonus,
+			"net_salary":      payroll.NetSalary,
+			"payment_mode":    payroll.PaymentMode,
+			"bank_account_id": payroll.BankAccountID,
+			"reference":       payroll.Reference,
+			"notes":           payroll.Notes,
+			"status":          payroll.Status,
+			"expense_id":      payroll.ExpenseID,
+		}).Error; err != nil {
+			return err
+		}
+
+		if status == "paid" {
+			return applyPayrollPayment(tx, userID, &payroll, staffName)
+		}
+		return nil
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update payroll: " + err.Error()})
 		return
 	}
 
+	utils.DB.Preload("Staff").Preload("BankAccount").First(&payroll, payroll.ID)
 	c.JSON(http.StatusOK, payroll)
 }
 
@@ -245,8 +417,14 @@ func DeletePayroll(c *gin.Context) {
 		return
 	}
 
-	if err := utils.DB.Delete(&payroll).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete payroll"})
+	err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		if err := reversePayrollPayment(tx, userID, &payroll); err != nil {
+			return err
+		}
+		return tx.Delete(&payroll).Error
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete payroll: " + err.Error()})
 		return
 	}
 
@@ -265,15 +443,26 @@ func BulkDeletePayrolls(c *gin.Context) {
 		return
 	}
 
-	result := utils.DB.Where("user_id = ? AND id IN ?", userID, input.IDs).Delete(&models.Payroll{})
-	if result.Error != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete payrolls"})
+	err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		var payrolls []models.Payroll
+		if err := tx.Where("user_id = ? AND id IN ?", userID, input.IDs).Find(&payrolls).Error; err != nil {
+			return err
+		}
+		for i := range payrolls {
+			if err := reversePayrollPayment(tx, userID, &payrolls[i]); err != nil {
+				return err
+			}
+		}
+		return tx.Where("user_id = ? AND id IN ?", userID, input.IDs).Delete(&models.Payroll{}).Error
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete payrolls: " + err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Payrolls deleted successfully",
-		"deleted": result.RowsAffected,
+		"deleted": len(input.IDs),
 	})
 }
 
@@ -289,23 +478,52 @@ func BulkUpdatePayrollStatus(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if input.Status != "paid" && input.Status != "pending" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Status must be paid or pending"})
+		return
+	}
 
-	result := utils.DB.Model(&models.Payroll{}).
-		Where("user_id = ? AND id IN ?", userID, input.IDs).
-		Update("status", input.Status)
-	if result.Error != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update payroll status"})
+	err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		var payrolls []models.Payroll
+		if err := tx.Where("user_id = ? AND id IN ?", userID, input.IDs).Preload("Staff").Find(&payrolls).Error; err != nil {
+			return err
+		}
+		for i := range payrolls {
+			p := &payrolls[i]
+			if input.Status == "pending" && p.Status == "paid" {
+				if err := reversePayrollPayment(tx, userID, p); err != nil {
+					return err
+				}
+			}
+			p.Status = input.Status
+			if err := tx.Model(p).Updates(map[string]interface{}{
+				"status":     p.Status,
+				"expense_id": p.ExpenseID,
+			}).Error; err != nil {
+				return err
+			}
+			if input.Status == "paid" {
+				if err := applyPayrollPayment(tx, userID, p, p.Staff.Name); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update payroll status: " + err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Payroll status updated successfully",
-		"updated": result.RowsAffected,
+		"updated": len(input.IDs),
 	})
 }
 
 func GetPayrollStats(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
+	repairZeroNetPayrolls(userID)
 
 	var stats struct {
 		TotalPayments float64 `json:"total_payments"`
@@ -313,11 +531,9 @@ func GetPayrollStats(c *gin.Context) {
 		ThisMonth     float64 `json:"this_month"`
 	}
 
-	// Total payments
 	utils.DB.Model(&models.Payroll{}).Where("user_id = ?", userID).Select("COALESCE(SUM(net_salary), 0)").Scan(&stats.TotalPayments)
 	utils.DB.Model(&models.Payroll{}).Where("user_id = ?", userID).Count(&stats.TotalPayrolls)
 
-	// This month
 	now := time.Now()
 	startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 	utils.DB.Model(&models.Payroll{}).Where("user_id = ? AND payment_date >= ?", userID, startOfMonth).Select("COALESCE(SUM(net_salary), 0)").Scan(&stats.ThisMonth)

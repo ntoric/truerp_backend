@@ -551,16 +551,19 @@ func PrintProductLabel(c *gin.Context) {
 	}
 
 	barcodeMode := "a4"
+	labelSizeKey := "2inch"
 	var printSettings models.PrintSettings
 	if err := utils.DB.Where("user_id = ?", userID).First(&printSettings).Error; err == nil {
 		if printSettings.BarcodePrintMode == "label" {
 			barcodeMode = "label"
 		}
+		labelSizeKey = normalizeBarcodeLabelSize(printSettings.BarcodeLabelSize)
 	}
 
-	// Parse request body for quantity (columns comes from settings)
+	// Parse request body for quantity / optional size override
 	var input struct {
-		Quantity int `json:"quantity"`
+		Quantity  int    `json:"quantity"`
+		LabelSize string `json:"label_size"`
 	}
 	if c.Request.Method == "POST" {
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -568,222 +571,136 @@ func PrintProductLabel(c *gin.Context) {
 		}
 	} else {
 		input.Quantity = 1
+		if q := c.Query("label_size"); q != "" {
+			input.LabelSize = q
+		}
+		if q := c.Query("quantity"); q != "" {
+			if n, err := strconv.Atoi(q); err == nil {
+				input.Quantity = n
+			}
+		}
 	}
 
 	if input.Quantity < 1 {
 		input.Quantity = 1
 	}
-
-	// Use business settings for columns
-	columns := business.LabelColumns
-	if columns < 1 || columns > 5 {
-		columns = 3
+	if input.Quantity > 500 {
+		input.Quantity = 500
+	}
+	if input.LabelSize != "" {
+		labelSizeKey = normalizeBarcodeLabelSize(input.LabelSize)
+		// Explicit size from the print dialog always targets thermal label rolls
+		barcodeMode = "label"
 	}
 
-	// Generate barcode SVG
-	barcodeHTML := ""
-	if product.ItemCode != "" {
-		barcodeHTML = fmt.Sprintf(`
-<svg xmlns="http://www.w3.org/2000/svg" width="150" height="50">
-	<rect x="0" y="0" width="150" height="50" fill="white"/>
-	<rect x="5" y="5" width="2" height="35" fill="black"/>
-	<rect x="10" y="5" width="1" height="35" fill="black"/>
-	<rect x="15" y="5" width="3" height="35" fill="black"/>
-	<rect x="20" y="5" width="1" height="35" fill="black"/>
-	<rect x="25" y="5" width="2" height="35" fill="black"/>
-	<rect x="30" y="5" width="1" height="35" fill="black"/>
-	<rect x="35" y="5" width="3" height="35" fill="black"/>
-	<rect x="40" y="5" width="2" height="35" fill="black"/>
-	<rect x="45" y="5" width="1" height="35" fill="black"/>
-	<rect x="50" y="5" width="2" height="35" fill="black"/>
-	<rect x="55" y="5" width="3" height="35" fill="black"/>
-	<rect x="60" y="5" width="1" height="35" fill="black"/>
-	<rect x="65" y="5" width="2" height="35" fill="black"/>
-	<rect x="70" y="5" width="1" height="35" fill="black"/>
-	<rect x="75" y="5" width="3" height="35" fill="black"/>
-	<rect x="80" y="5" width="2" height="35" fill="black"/>
-	<rect x="85" y="5" width="1" height="35" fill="black"/>
-	<rect x="90" y="5" width="2" height="35" fill="black"/>
-	<rect x="95" y="5" width="3" height="35" fill="black"/>
-	<rect x="100" y="5" width="1" height="35" fill="black"/>
-	<rect x="105" y="5" width="2" height="35" fill="black"/>
-	<rect x="110" y="5" width="1" height="35" fill="black"/>
-	<rect x="115" y="5" width="3" height="35" fill="black"/>
-	<rect x="120" y="5" width="2" height="35" fill="black"/>
-	<rect x="125" y="5" width="1" height="35" fill="black"/>
-	<rect x="130" y="5" width="2" height="35" fill="black"/>
-	<rect x="135" y="5" width="3" height="35" fill="black"/>
-	<text x="75" y="45" text-anchor="middle" font-family="monospace" font-size="8">%s</text>
-</svg>`, product.ItemCode)
+	labelSize := getBarcodeLabelSize(labelSizeKey)
+	compact := labelSizeKey == "1inch" || labelSizeKey == "1.5inch"
+
+	labelData := productLabelData{
+		Name:      product.Name,
+		SKU:       product.SKU,
+		ItemCode:  product.ItemCode,
+		Category:  product.Category,
+		SalePrice: product.SalePrice,
+		MRP:       product.MRP,
 	}
+	singleLabel := buildProductLabelHTML(labelData, labelSize, compact)
 
-	// Generate single label HTML
-	singleLabel := fmt.Sprintf(`
-<div class="label">
-	<div class="product-name">%s</div>
-	<div class="product-sku">SKU: %s</div>
-	<div class="product-barcode">%s</div>
-	<div class="product-price">₹%.2f</div>
-	<div class="product-mrp">MRP: ₹%.2f</div>
-	<div class="product-category">%s</div>
-</div>`, product.Name, product.SKU, barcodeHTML, product.SalePrice, product.MRP, product.Category)
-
-	// Generate multiple labels
 	labelsHTML := ""
 	for i := 0; i < input.Quantity; i++ {
 		labelsHTML += singleLabel
 	}
 
 	if barcodeMode == "label" {
-		html := fmt.Sprintf(`
-<!DOCTYPE html>
-<html>
-<head>
-	<meta charset="UTF-8">
-	<title>Product Label</title>
-	<style>
-		@page {
-			size: %.2fmm %.2fmm;
-			margin: 0;
-		}
-		body {
-			font-family: Arial, sans-serif;
-			margin: 0;
-			padding: 0;
-		}
-		.label {
-			border: 1px solid #000;
-			padding: 2mm;
-			text-align: center;
-			box-sizing: border-box;
-			width: %.2fmm;
-			height: %.2fmm;
-		}
-		.product-name {
-			font-size: 12px;
-			font-weight: bold;
-			margin-bottom: 3px;
-			word-wrap: break-word;
-			overflow: hidden;
-			text-overflow: ellipsis;
-			white-space: nowrap;
-		}
-		.product-sku { font-size: 10px; margin-bottom: 3px; }
-		.product-barcode { margin-bottom: 3px; }
-		.product-barcode svg { width: 100%%; max-width: 150px; height: auto; }
-		.product-price { font-size: 14px; font-weight: bold; margin-top: 3px; }
-		.product-mrp { font-size: 10px; color: #666; }
-		.product-category { font-size: 9px; color: #666; margin-top: 2px; }
-		.label + .label { page-break-before: always; }
-	</style>
-</head>
-<body>
-	%s
-<script>
-		window.onload = function() { window.print(); };
-	</script>
-</body>
-</html>`, business.LabelWidthMM, business.LabelHeightMM, business.LabelWidthMM, business.LabelHeightMM, labelsHTML)
-
-		c.Header("Content-Type", "text/html")
+		html := wrapBarcodeLabelDocument("Product Label", barcodeLabelPageCSS(labelSize), labelsHTML)
+		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, html)
 		return
 	}
 
-	// Calculate grid column width percentage
+	// Use business settings for A4 sheet columns
+	columns := business.LabelColumns
+	if columns < 1 || columns > 5 {
+		columns = 3
+	}
 	colWidth := 100.0 / float64(columns)
+	a4Width := business.LabelWidthMM
+	a4Height := business.LabelHeightMM
+	if a4Width < 10 {
+		a4Width = 50
+	}
+	if a4Height < 10 {
+		a4Height = 30
+	}
 
-	// Generate HTML with grid layout using business settings
-	html := fmt.Sprintf(`
-<!DOCTYPE html>
-<html>
-<head>
-	<meta charset="UTF-8">
-	<title>Product Labels</title>
-	<style>
-		@page {
-			size: %s;
-			margin: %.2fmm;
-		}
-		body {
-			font-family: Arial, sans-serif;
-			margin: 0;
-			padding: 0;
-		}
-		.labels-grid {
-			display: grid;
-			grid-template-columns: repeat(%d, %s);
-			gap: 5mm;
-		}
-		.label {
-			border: 1px solid #000;
-			padding: 5mm;
-			text-align: center;
-			page-break-inside: avoid;
-			box-sizing: border-box;
-			width: %.2fmm;
-			height: %.2fmm;
-		}
-		.product-name {
-			font-size: 12px;
-			font-weight: bold;
-			margin-bottom: 3px;
-			word-wrap: break-word;
-			overflow: hidden;
-			text-overflow: ellipsis;
-			white-space: nowrap;
-		}
-		.product-sku {
-			font-size: 10px;
-			margin-bottom: 3px;
-		}
-		.product-barcode {
-			margin-bottom: 3px;
-		}
-		.product-barcode svg {
-			width: 100%%;
-			max-width: 150px;
-			height: auto;
-		}
-		.product-price {
-			font-size: 14px;
-			font-weight: bold;
-			color: #000;
-			margin-top: 3px;
-		}
-		.product-mrp {
-			font-size: 10px;
-			color: #666;
-		}
-		.product-category {
-			font-size: 9px;
-			color: #666;
-			margin-top: 2px;
-		}
-		@media print {
-			body {
-				margin: 0;
-				padding: 0;
-			}
-			.label {
-				border: 1px solid #000;
-			}
-		}
-	</style>
-</head>
-<body>
-	<div class="labels-grid">
-		%s
-	</div>
-<script>
-		window.onload = function() {
-			window.print();
-		};
-	</script>
-</body>
-</html>`, business.LabelPaperSize, business.LabelMarginMM, columns, fmt.Sprintf("%.2f%%", colWidth), business.LabelWidthMM, business.LabelHeightMM, labelsHTML)
+	// For A4 grid, derive barcode bar metrics from cell size
+	a4Size := BarcodeLabelSize{
+		Key:         "a4",
+		WidthMM:     a4Width,
+		HeightMM:    a4Height,
+		NameFontPx:  12,
+		SkuFontPx:   10,
+		PriceFontPx: 14,
+		MetaFontPx:  9,
+		BarcodeH:    32,
+		BarcodeW:    1.3,
+		PaddingMM:   3,
+	}
+	singleLabel = buildProductLabelHTML(labelData, a4Size, false)
+	labelsHTML = ""
+	for i := 0; i < input.Quantity; i++ {
+		labelsHTML += singleLabel
+	}
 
-	c.Header("Content-Type", "text/html")
+	css := fmt.Sprintf(`
+@page {
+	size: %s;
+	margin: %.2fmm;
+}
+body {
+	font-family: Arial, Helvetica, sans-serif;
+	margin: 0;
+	padding: 0;
+}
+.labels-grid {
+	display: grid;
+	grid-template-columns: repeat(%d, %s);
+	gap: 5mm;
+}
+.label {
+	border: 1px solid #000;
+	padding: %.2fmm;
+	text-align: center;
+	page-break-inside: avoid;
+	box-sizing: border-box;
+	width: %.2fmm;
+	height: %.2fmm;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	overflow: hidden;
+}
+.product-name {
+	font-size: %.1fpx;
+	font-weight: bold;
+	margin-bottom: 2px;
+	max-width: 100%%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.product-sku { font-size: %.1fpx; margin-bottom: 2px; }
+.product-barcode { width: 100%%; line-height: 0; margin: 2px 0; }
+.product-barcode svg { max-width: 100%%; height: auto; }
+.product-price { font-size: %.1fpx; font-weight: bold; margin-top: 2px; }
+.product-mrp, .product-category { font-size: %.1fpx; color: #666; }
+`, business.LabelPaperSize, business.LabelMarginMM, columns, fmt.Sprintf("%.2f%%", colWidth),
+		a4Size.PaddingMM, a4Width, a4Height,
+		a4Size.NameFontPx, a4Size.SkuFontPx, a4Size.PriceFontPx, a4Size.MetaFontPx)
+
+	html := wrapBarcodeLabelDocument("Product Labels", css, `<div class="labels-grid">`+labelsHTML+`</div>`)
+	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(http.StatusOK, html)
 }
 

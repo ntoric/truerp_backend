@@ -67,21 +67,43 @@ func (ft FlexibleTime) Value() (driver.Value, error) {
 }
 
 type User struct {
-	ID                uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	Name              string         `json:"name" gorm:"not null"`
-	Email             string         `json:"email" gorm:"unique;not null"`
-	Password          string         `json:"-" gorm:"not null"`
-	Phone             string         `json:"phone"`
-	Role              string         `json:"role" gorm:"default:'owner'"`
-	TwoFactorEnabled  bool           `json:"two_factor_enabled" gorm:"default:false"`
+	ID                       uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	Name                     string         `json:"name" gorm:"not null"`
+	Email                    string         `json:"email" gorm:"unique;not null"`
+	Password                 string         `json:"-" gorm:"not null"`
+	Phone                    string         `json:"phone"`
+	Role                     string         `json:"role" gorm:"default:'owner'"`
+	StoreID                  *uuid.UUID     `json:"store_id,omitempty" gorm:"type:uuid;index"`
+	Store                    *Store         `json:"store,omitempty" gorm:"foreignKey:StoreID"`
+	IsStoreOwner             bool           `json:"is_store_owner" gorm:"default:false"`
+	TwoFactorEnabled         bool           `json:"two_factor_enabled" gorm:"default:false"`
 	TotpSecret               string         `json:"-" gorm:"column:totp_secret"`
 	PasswordResetTokenHash   string         `json:"-" gorm:"index"`
 	PasswordResetExpiresAt   *time.Time     `json:"-"`
 	IsActive                 bool           `json:"is_active" gorm:"default:true"`
-	Business          Business       `json:"business,omitempty" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
-	CreatedAt         time.Time      `json:"created_at"`
-	UpdatedAt         time.Time      `json:"updated_at"`
-	DeletedAt         gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+	Business                 Business       `json:"business,omitempty" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
+	CreatedAt                time.Time      `json:"created_at"`
+	UpdatedAt                time.Time      `json:"updated_at"`
+	DeletedAt                gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// Store is a multi-tenant business unit. Operational data is scoped to OwnerUserID.
+type Store struct {
+	ID          uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	Name        string         `json:"name" gorm:"not null"`
+	Code        string         `json:"code" gorm:"uniqueIndex;not null"`
+	Description string         `json:"description"`
+	Address     string         `json:"address"`
+	City        string         `json:"city"`
+	State       string         `json:"state"`
+	Pincode     string         `json:"pincode"`
+	Phone       string         `json:"phone"`
+	Email       string         `json:"email"`
+	OwnerUserID uuid.UUID      `json:"owner_user_id" gorm:"type:uuid;not null;uniqueIndex"`
+	IsActive    bool           `json:"is_active" gorm:"default:true"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type Business struct {
@@ -305,6 +327,18 @@ type Category struct {
 	Description string         `json:"description"`
 	ParentID    *uuid.UUID     `json:"parent_id" gorm:"type:uuid"`
 	Parent      *Category      `json:"parent,omitempty" gorm:"foreignKey:ParentID"`
+	IsActive    bool           `json:"is_active" gorm:"default:true"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// ExpenseCategory is separate from product Category — used only for expenses.
+type ExpenseCategory struct {
+	ID          uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID      uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	Name        string         `json:"name" gorm:"not null"`
+	Description string         `json:"description"`
 	IsActive    bool           `json:"is_active" gorm:"default:true"`
 	CreatedAt   time.Time      `json:"created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"`
@@ -610,6 +644,7 @@ type CreditNote struct {
 	ID              uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
 	InvoiceID       uuid.UUID      `json:"invoice_id" gorm:"type:uuid"`
+	Invoice         *Invoice       `json:"invoice,omitempty" gorm:"foreignKey:InvoiceID"`
 	PartyID         uuid.UUID      `json:"party_id" gorm:"type:uuid;not null"`
 	Party           Party          `json:"party,omitempty" gorm:"foreignKey:PartyID"`
 	CreditNoteNumber string        `json:"credit_note_number" gorm:"not null;index"`
@@ -642,6 +677,7 @@ type DebitNote struct {
 	ID              uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
 	PurchaseBillID  uuid.UUID      `json:"purchase_bill_id" gorm:"type:uuid"`
+	PurchaseBill    *PurchaseBill  `json:"purchase_bill,omitempty" gorm:"foreignKey:PurchaseBillID"`
 	PartyID         uuid.UUID      `json:"party_id" gorm:"type:uuid;not null"`
 	Party           Party          `json:"party,omitempty" gorm:"foreignKey:PartyID"`
 	DebitNoteNumber string         `json:"debit_note_number" gorm:"not null;index"`
@@ -931,6 +967,9 @@ type Payroll struct {
 	Bonus           float64        `json:"bonus" gorm:"default:0"`
 	NetSalary       float64        `json:"net_salary" gorm:"default:0"`
 	PaymentMode     string         `json:"payment_mode"` // cash, bank_transfer, upi, cheque
+	BankAccountID   *uuid.UUID     `json:"bank_account_id,omitempty" gorm:"type:uuid;index"` // nil = cash in-hand
+	BankAccount     *BankAccount   `json:"bank_account,omitempty" gorm:"foreignKey:BankAccountID"`
+	ExpenseID       *uuid.UUID     `json:"expense_id,omitempty" gorm:"type:uuid;index"`
 	Reference       string         `json:"reference"`
 	Notes           string         `json:"notes"`
 	Status          string         `json:"status" gorm:"default:'paid'"` // paid, pending
@@ -1015,8 +1054,9 @@ type PrintSettings struct {
 	FontSize             int            `json:"font_size" gorm:"default:12"`
 	PrintHeader          bool           `json:"print_header" gorm:"default:true"`
 	PrintFooter          bool           `json:"print_footer" gorm:"default:true"`
-	ThermalPrintSize     string         `json:"thermal_print_size" gorm:"default:'2inch'"` // 2inch, 3inch
+	ThermalPrintSize     string         `json:"thermal_print_size" gorm:"default:'2inch'"` // 1inch, 1.5inch, 2inch, 3inch
 	BarcodePrintMode     string         `json:"barcode_print_mode" gorm:"default:'a4'"`    // label, a4
+	BarcodeLabelSize     string         `json:"barcode_label_size" gorm:"default:'2inch'"` // 1inch, 1.5inch, 2inch, 3inch (thermal label rolls)
 	ThermalPrinterName   string         `json:"thermal_printer_name"`                      // OS printer name (desktop)
 	DocumentPrinterName  string         `json:"document_printer_name"`                     // OS printer name for A4/PDF (desktop)
 	AutoPrintOnPOS       bool           `json:"auto_print_on_pos" gorm:"default:true"`
@@ -1054,10 +1094,11 @@ type WeighingScaleSettings struct {
 	CsvExportWeightItemsOnly bool           `json:"csv_export_weight_items_only" gorm:"default:true"`
 	CsvWeightColumn          string         `json:"csv_weight_column,omitempty"` // legacy DB column; use csv_price_column
 	BarcodeScanEnabled       bool           `json:"barcode_scan_enabled" gorm:"default:true"`
-	BarcodePrefixStart       int            `json:"barcode_prefix_start" gorm:"default:20"`
+	BarcodePrefix            string         `json:"barcode_prefix" gorm:"default:'w'"` // leading char(s), e.g. "w" → w0000112500
+	BarcodePrefixStart       int            `json:"barcode_prefix_start" gorm:"default:20"` // legacy EAN range (optional fallback)
 	BarcodePrefixEnd         int            `json:"barcode_prefix_end" gorm:"default:29"`
-	BarcodePluDigits         int            `json:"barcode_plu_digits" gorm:"default:5"`
-	BarcodePayloadDigits     int            `json:"barcode_payload_digits" gorm:"default:5"`
+	BarcodePluDigits         int            `json:"barcode_plu_digits" gorm:"default:5"`     // item code digits after prefix
+	BarcodePayloadDigits     int            `json:"barcode_payload_digits" gorm:"default:5"` // weight/price digits
 	BarcodePayloadType       string         `json:"barcode_payload_type" gorm:"default:'weight_grams'"` // weight_grams, weight_kg_thousandths, price_paise
 	CreatedAt                time.Time      `json:"created_at"`
 	UpdatedAt                time.Time      `json:"updated_at"`

@@ -23,6 +23,20 @@ func SetupRoutes(r *gin.Engine) {
 		auth.POST("/reset-password", controllers.ResetPassword)
 		auth.GET("/profile", middleware.AuthRequired(), controllers.GetProfile)
 		auth.PUT("/profile", middleware.AuthRequired(), controllers.UpdateProfile)
+		auth.GET("/my-stores", middleware.AuthRequired(), controllers.MyStores)
+	}
+
+	// Store management (super admin)
+	stores := r.Group("/api/v1/stores")
+	stores.Use(middleware.AuthRequired(), middleware.SuperAdminRequired())
+	{
+		stores.GET("", controllers.ListStores)
+		stores.POST("", controllers.CreateStore)
+		stores.GET("/:id", controllers.GetStore)
+		stores.PUT("/:id", controllers.UpdateStore)
+		stores.DELETE("/:id", controllers.DeleteStore)
+		stores.GET("/:id/users", controllers.ListStoreUsers)
+		stores.POST("/:id/users", controllers.CreateStoreUser)
 	}
 
 	// Business routes
@@ -133,6 +147,17 @@ func SetupRoutes(r *gin.Engine) {
 		expenses.GET("/next-number", controllers.GetNextExpenseNumber)
 		expenses.PUT("/:id", controllers.UpdateExpense)
 		expenses.DELETE("/:id", controllers.DeleteExpense)
+	}
+
+	// Expense category routes (separate from product categories)
+	expenseCategories := r.Group("/api/v1/expense-categories")
+	expenseCategories.Use(middleware.AuthRequired())
+	{
+		expenseCategories.GET("", controllers.GetExpenseCategories)
+		expenseCategories.POST("", controllers.CreateExpenseCategory)
+		expenseCategories.GET("/:id", controllers.GetExpenseCategory)
+		expenseCategories.PUT("/:id", controllers.UpdateExpenseCategory)
+		expenseCategories.DELETE("/:id", controllers.DeleteExpenseCategory)
 	}
 
 	// Dashboard routes
@@ -703,6 +728,7 @@ func SetupRoutes(r *gin.Engine) {
 		products.POST("/import/csv", controllers.ImportProductsCSV)
 		products.POST("/import/excel", controllers.ImportProductsExcel)
 		products.GET("/:id/print-label", controllers.PrintProductLabel)
+		products.POST("/:id/print-label", controllers.PrintProductLabel)
 		products.GET("/:id/images", controllers.GetProductImages)
 		products.POST("/:id/images", controllers.CreateProductImage)
 		products.GET("/:id/variants", controllers.GetProductVariants)

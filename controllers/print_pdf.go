@@ -201,12 +201,28 @@ func buildThermalReceiptPDF(content string, widthMM int) ([]byte, error) {
 	if widthMM <= 0 {
 		widthMM = 58
 	}
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	fontSize := 9.0
 	lineH := 4.2
 	margin := 2.0
+	switch {
+	case widthMM <= 28:
+		fontSize = 6
+		lineH = 3.0
+		margin = 1.2
+	case widthMM <= 42:
+		fontSize = 7
+		lineH = 3.4
+		margin = 1.5
+	case widthMM <= 60:
+		fontSize = 8
+		lineH = 3.8
+		margin = 2.0
+	}
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	// Keep page height tight to content — a large min height left long blank gaps on thermal rolls.
 	height := margin*2 + float64(len(lines)+2)*lineH
-	if height < 80 {
-		height = 80
+	if height < 40 {
+		height = 40
 	}
 	if height > 2000 {
 		height = 2000
@@ -219,7 +235,7 @@ func buildThermalReceiptPDF(content string, widthMM int) ([]byte, error) {
 	pdf.SetMargins(margin, margin, margin)
 	pdf.SetAutoPageBreak(false, 0)
 	pdf.AddPage()
-	pdf.SetFont("Courier", "", 9)
+	pdf.SetFont("Courier", "", fontSize)
 	pdf.SetTextColor(0, 0, 0)
 
 	usableW := float64(widthMM) - margin*2

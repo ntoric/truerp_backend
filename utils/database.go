@@ -1,13 +1,15 @@
 package utils
 
 import (
-	"truerp/models"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"truerp/models"
 
+	"github.com/google/uuid"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -81,6 +83,7 @@ func InitDatabase() *gorm.DB {
 	// Auto-migrate models
 	err = db.AutoMigrate(
 		&models.User{},
+		&models.Store{},
 		&models.Business{},
 		&models.Invoice{},
 		&models.InvoiceItem{},
@@ -89,6 +92,7 @@ func InitDatabase() *gorm.DB {
 		&models.Expense{},
 		&models.ExpenseItem{},
 		&models.Category{},
+		&models.ExpenseCategory{},
 		&models.POSSession{},
 		&models.CashMovement{},
 		&models.StockEntry{},
@@ -107,6 +111,10 @@ func InitDatabase() *gorm.DB {
 		&models.BankReconciliation{},
 		&models.CreditNote{},
 		&models.CreditNoteItem{},
+		&models.DebitNote{},
+		&models.DebitNoteItem{},
+		&models.DeliveryChallan{},
+		&models.DeliveryChallanItem{},
 		&models.Party{},
 		&models.LoyaltySettings{},
 		&models.LoyaltyTransaction{},
@@ -178,6 +186,45 @@ func runRawMigrations(db *gorm.DB) {
 
 	migrateInvoicesDropLegacyCustomerID(db)
 	migrateBarcodeColumnsToItemCode(db)
+	backfillExpenseCategories(db)
+}
+
+// backfillExpenseCategories copies distinct expense.category strings into
+// expense_categories so existing expenses keep working after the split from product categories.
+func backfillExpenseCategories(db *gorm.DB) {
+	type row struct {
+		UserID   uuid.UUID
+		Category string
+	}
+	var rows []row
+	if err := db.Model(&models.Expense{}).
+		Select("DISTINCT user_id, category").
+		Where("category <> '' AND category IS NOT NULL").
+		Scan(&rows).Error; err != nil {
+		log.Printf("backfillExpenseCategories: failed to scan expenses: %v", err)
+		return
+	}
+
+	for _, r := range rows {
+		var existing models.ExpenseCategory
+		err := db.Where("user_id = ? AND name = ?", r.UserID, r.Category).First(&existing).Error
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			log.Printf("backfillExpenseCategories: lookup failed for %s/%s: %v", r.UserID, r.Category, err)
+			continue
+		}
+		cat := models.ExpenseCategory{
+			ID:       uuid.New(),
+			UserID:   r.UserID,
+			Name:     r.Category,
+			IsActive: true,
+		}
+		if err := db.Create(&cat).Error; err != nil {
+			log.Printf("backfillExpenseCategories: create failed for %s/%s: %v", r.UserID, r.Category, err)
+		}
+	}
 }
 
 func migrateBarcodeColumnsToItemCode(db *gorm.DB) {

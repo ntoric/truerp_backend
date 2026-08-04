@@ -15,17 +15,19 @@ func SetJWTSecret(secret string) {
 }
 
 type Claims struct {
-	UserID   uuid.UUID `json:"user_id"`
-	PartyID  uuid.UUID `json:"party_id,omitempty"`
-	UserName string    `json:"user_name"`
-	Email    string    `json:"email"`
-	Role     string    `json:"role"`
+	UserID   uuid.UUID  `json:"user_id"`
+	PartyID  uuid.UUID  `json:"party_id,omitempty"`
+	StoreID  *uuid.UUID `json:"store_id,omitempty"`
+	UserName string     `json:"user_name"`
+	Email    string     `json:"email"`
+	Role     string     `json:"role"`
 	jwt.RegisteredClaims
 }
 
-func GenerateToken(userID uuid.UUID, userName, email, role string) (string, error) {
+func GenerateToken(userID uuid.UUID, userName, email, role string, storeID *uuid.UUID) (string, error) {
 	claims := Claims{
 		UserID:   userID,
+		StoreID:  storeID,
 		UserName: userName,
 		Email:    email,
 		Role:     role,

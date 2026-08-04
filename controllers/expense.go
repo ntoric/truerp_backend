@@ -113,8 +113,9 @@ func CreateExpense(c *gin.Context) {
 		return
 	}
 
-	// Create expense items
+	// Create expense items (IDs must be set in app code — SQLite has no uuid_generate_v4())
 	for _, item := range input.Items {
+		item.ID = uuid.New()
 		item.ExpenseID = expense.ID
 		if err := utils.DB.Create(&item).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create expense items"})
