@@ -147,7 +147,7 @@ func calculateCheckDigit(gstinWithoutCheckDigit string) string {
 	remainder := sum % 36
 	checkDigit := strconv.Itoa(remainder)
 	if remainder >= 10 {
-		checkDigit = string('A' + remainder - 10)
+		checkDigit = string(rune('A' + remainder - 10))
 	}
 	
 	return checkDigit

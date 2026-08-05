@@ -1,0 +1,48 @@
+name: Backend CI
+
+# On every push to main: run tests and verify the binary builds.
+# Release/CD stays in backend-docker.yml (triggered by v* tags).
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # mattn/go-sqlite3 requires CGO
+      - name: Install CGO build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc libc6-dev
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Run tests
+        env:
+          CGO_ENABLED: "1"
+        run: go test ./... -count=1
+
+      - name: Verify build
+        env:
+          CGO_ENABLED: "1"
+        run: go build -trimpath -ldflags="-s -w" -o /tmp/truerp .
