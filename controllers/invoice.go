@@ -101,12 +101,14 @@ func CreateInvoice(c *gin.Context) {
 		PDFTemplate      string                 `json:"pdf_template"`
 		CustomFields     map[string]interface{} `json:"custom_fields"`
 		Items            []struct {
+			ProductID   *uuid.UUID           `json:"product_id"`
 			Description string               `json:"description"`
 			Quantity    models.FlexibleFloat `json:"quantity"`
 			UnitPrice   models.FlexibleFloat `json:"unit_price"`
 			Discount    models.FlexibleFloat `json:"discount"`
 			TaxRate     models.FlexibleFloat `json:"tax_rate"`
 			Unit        string               `json:"unit"`
+			HSNCode     string               `json:"hsn_code"`
 		} `json:"items" binding:"required,min=1"`
 	}
 
@@ -206,6 +208,7 @@ func CreateInvoice(c *gin.Context) {
 
 		invoice.Items = append(invoice.Items, models.InvoiceItem{
 			ID:          uuid.New(),
+			ProductID:   item.ProductID,
 			Description: item.Description,
 			Quantity:    qty,
 			Unit:        item.Unit,
@@ -216,6 +219,7 @@ func CreateInvoice(c *gin.Context) {
 			SGST:        sgst,
 			IGST:        igst,
 			Total:       taxableAmount + cgst + sgst + igst,
+			HSNCode:     item.HSNCode,
 		})
 
 		subTotal += itemTotal
@@ -224,19 +228,6 @@ func CreateInvoice(c *gin.Context) {
 		cgstTotal += cgst
 		sgstTotal += sgst
 		igstTotal += igst
-
-		// Update stock entry
-		entry := models.StockEntry{
-			ID:         uuid.New(),
-			UserID:     userID,
-			ItemName:   item.Description,
-			EntryType:  "sale",
-			Quantity:   -qty,
-			BalanceQty: 0,
-			CostPrice:  unitPrice,
-			EntryDate:  input.Date,
-		}
-		utils.DB.Create(&entry)
 	}
 
 	total := subTotal - discountTotal + cgstTotal + sgstTotal + igstTotal - input.InvoiceDiscount + input.AdditionalCharges
@@ -310,6 +301,8 @@ func CreateInvoice(c *gin.Context) {
 		return
 	}
 
+	applyInvoiceSaleStock(userID, &invoice)
+
 	if err := postInvoiceAccounting(utils.DB, userID, &invoice); err != nil {
 		fmt.Printf("[DEBUG] CreateInvoice - accounting error: %v\n", err)
 	}
@@ -361,7 +354,7 @@ func UpdateInvoice(c *gin.Context) {
 	fmt.Printf("[DEBUG] UpdateInvoice - UserID: %s, ID: %s\n", userID, id)
 
 	var invoice models.Invoice
-	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).First(&invoice).Error; err != nil {
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).Preload("Items").First(&invoice).Error; err != nil {
 		fmt.Printf("[DEBUG] UpdateInvoice - Invoice not found: %v\n", err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Invoice not found"})
 		return
@@ -422,6 +415,9 @@ func UpdateInvoice(c *gin.Context) {
 	previousAmountPaid := invoice.AmountPaid
 	previousStatus := invoice.Status
 
+	// Reverse previously applied sale stock before rewriting items
+	reverseInvoiceSaleStock(userID, invoice.ID)
+
 	if input.CustomFields != nil {
 		if err := validateCustomFields(userID, input.CustomFields); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -477,6 +473,7 @@ func UpdateInvoice(c *gin.Context) {
 		invoice.Items = append(invoice.Items, models.InvoiceItem{
 			ID:          uuid.New(),
 			InvoiceID:   invoice.ID,
+			ProductID:   item.ProductID,
 			Description: item.Description,
 			Quantity:    qty,
 			Unit:        item.Unit,
@@ -519,6 +516,8 @@ func UpdateInvoice(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update invoice"})
 		return
 	}
+
+	applyInvoiceSaleStock(userID, &invoice)
 
 	if paymentDelta := invoice.AmountPaid - previousAmountPaid; paymentDelta > 0 {
 		desc := fmt.Sprintf("Sales invoice %s (payment update)", invoice.InvoiceNumber)
@@ -578,6 +577,8 @@ func DeleteInvoice(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot delete a paid invoice"})
 		return
 	}
+
+	reverseInvoiceSaleStock(userID, invoice.ID)
 
 	if err := utils.DB.Delete(&invoice).Error; err != nil {
 		fmt.Printf("[DEBUG] DeleteInvoice - DB delete error: %v\n", err)

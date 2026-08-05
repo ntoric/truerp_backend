@@ -5,6 +5,7 @@ import (
 	"truerp/utils"
 	"encoding/csv"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -624,16 +625,21 @@ func updateInventoryStock(userID, productID, outletID uuid.UUID, entryType strin
 		}
 	}
 
-	// Update quantity based on entry type
+	// Update quantity based on entry type.
+	// Sale/transfer always reduce by absolute quantity so callers can pass signed or unsigned qty.
 	switch entryType {
-	case "purchase", "opening", "adjustment":
+	case "purchase", "opening", "adjustment", "return":
 		stock.Quantity += quantity
-		// Update weighted average cost
-		if stock.Quantity > 0 && costPrice > 0 {
-			stock.AverageCost = ((stock.AverageCost * (stock.Quantity - quantity)) + (costPrice * quantity)) / stock.Quantity
+		// Update weighted average cost (only when adding stock with a cost)
+		if quantity > 0 && stock.Quantity > 0 && costPrice > 0 {
+			prevQty := stock.Quantity - quantity
+			if prevQty < 0 {
+				prevQty = 0
+			}
+			stock.AverageCost = ((stock.AverageCost * prevQty) + (costPrice * quantity)) / stock.Quantity
 		}
 	case "sale", "transfer":
-		stock.Quantity -= quantity
+		stock.Quantity -= math.Abs(quantity)
 	}
 
 	stock.AvailableQty = stock.Quantity - stock.ReservedQty
@@ -643,6 +649,73 @@ func updateInventoryStock(userID, productID, outletID uuid.UUID, entryType strin
 		fmt.Printf("[DEBUG] updateInventoryStock - DB save error: %v\n", err)
 	} else {
 		fmt.Printf("[DEBUG] updateInventoryStock - Stock updated successfully: Quantity=%f, Available=%f\n", stock.Quantity, stock.AvailableQty)
+	}
+}
+
+// applyInvoiceSaleStock reduces available inventory for invoice line items linked to products.
+func applyInvoiceSaleStock(userID uuid.UUID, invoice *models.Invoice) {
+	if invoice == nil || invoice.Status == "cancelled" || invoice.Status == "draft" {
+		return
+	}
+
+	outletID := resolveDefaultWarehouseID(userID)
+	if outletID == uuid.Nil {
+		fmt.Printf("[DEBUG] applyInvoiceSaleStock - No warehouse for user %s\n", userID)
+		return
+	}
+
+	now := time.Now()
+	for _, item := range invoice.Items {
+		if item.ProductID == nil || *item.ProductID == uuid.Nil || item.Quantity == 0 {
+			continue
+		}
+
+		qty := math.Abs(item.Quantity)
+		entry := models.StockEntry{
+			ID:             uuid.New(),
+			UserID:         userID,
+			ItemName:       item.Description,
+			ProductID:      item.ProductID,
+			OutletID:       outletID,
+			EntryType:      "sale",
+			Quantity:       -qty,
+			BalanceQty:     0,
+			CostPrice:      item.UnitPrice,
+			ReferenceID:    invoice.ID,
+			ReferenceType:  "invoice",
+			Notes:          fmt.Sprintf("Sale via invoice %s", invoice.InvoiceNumber),
+			ApprovalStatus: "approved",
+			ApprovedBy:     &userID,
+			ApprovedAt:     &now,
+			EntryDate:      invoice.Date,
+		}
+		if err := utils.DB.Create(&entry).Error; err != nil {
+			fmt.Printf("[DEBUG] applyInvoiceSaleStock - Failed to create stock entry: %v\n", err)
+			continue
+		}
+		updateInventoryStock(userID, *item.ProductID, outletID, "sale", qty, 0)
+	}
+}
+
+// reverseInvoiceSaleStock restores inventory for stock entries previously posted for an invoice.
+func reverseInvoiceSaleStock(userID, invoiceID uuid.UUID) {
+	var entries []models.StockEntry
+	if err := utils.DB.Where(
+		"user_id = ? AND reference_id = ? AND reference_type = ?",
+		userID, invoiceID, "invoice",
+	).Find(&entries).Error; err != nil {
+		fmt.Printf("[DEBUG] reverseInvoiceSaleStock - Failed to load entries: %v\n", err)
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.ProductID != nil && stockEntryIsApproved(entry.ApprovalStatus) {
+			// Sale entries store negative quantity; -entry.Quantity restores stock.
+			updateInventoryStock(userID, *entry.ProductID, entry.OutletID, "adjustment", -entry.Quantity, entry.CostPrice)
+		}
+		if err := utils.DB.Delete(&entry).Error; err != nil {
+			fmt.Printf("[DEBUG] reverseInvoiceSaleStock - Failed to delete entry %s: %v\n", entry.ID, err)
+		}
 	}
 }
 
@@ -943,6 +1016,8 @@ func GetProductStock(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch product stock"})
 		return
 	}
+
+	c.JSON(http.StatusOK, gin.H{"data": stocks})
 }
 
 func SearchByItemCode(c *gin.Context) {
@@ -1131,8 +1206,11 @@ func ReserveStock(c *gin.Context) {
 		return
 	}
 
-	// Update reserved quantity
-	if err := utils.DB.Model(&stock).Update("reserved_qty", stock.ReservedQty+input.Quantity).Error; err != nil {
+	// Update reserved quantity and recompute available
+	stock.ReservedQty += input.Quantity
+	stock.AvailableQty = stock.Quantity - stock.ReservedQty
+	stock.LastUpdated = time.Now()
+	if err := utils.DB.Save(&stock).Error; err != nil {
 		fmt.Printf("[DEBUG] ReserveStock - DB update error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reserve stock"})
 		return
@@ -1158,7 +1236,7 @@ func ReserveStock(c *gin.Context) {
 	}
 
 	fmt.Printf("[DEBUG] ReserveStock - Stock reserved successfully\n")
-	c.JSON(http.StatusOK, gin.H{"message": "Stock reserved successfully", "reserved_qty": stock.ReservedQty + input.Quantity})
+	c.JSON(http.StatusOK, gin.H{"message": "Stock reserved successfully", "reserved_qty": stock.ReservedQty, "available_qty": stock.AvailableQty})
 }
 
 func ReleaseStock(c *gin.Context) {
@@ -1202,8 +1280,14 @@ func ReleaseStock(c *gin.Context) {
 		return
 	}
 
-	// Update reserved quantity
-	if err := utils.DB.Model(&stock).Update("reserved_qty", stock.ReservedQty-input.Quantity).Error; err != nil {
+	// Update reserved quantity and recompute available
+	stock.ReservedQty -= input.Quantity
+	if stock.ReservedQty < 0 {
+		stock.ReservedQty = 0
+	}
+	stock.AvailableQty = stock.Quantity - stock.ReservedQty
+	stock.LastUpdated = time.Now()
+	if err := utils.DB.Save(&stock).Error; err != nil {
 		fmt.Printf("[DEBUG] ReleaseStock - DB update error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to release stock"})
 		return
@@ -1229,7 +1313,7 @@ func ReleaseStock(c *gin.Context) {
 	}
 
 	fmt.Printf("[DEBUG] ReleaseStock - Stock released successfully\n")
-	c.JSON(http.StatusOK, gin.H{"message": "Stock released successfully", "reserved_qty": stock.ReservedQty - input.Quantity})
+	c.JSON(http.StatusOK, gin.H{"message": "Stock released successfully", "reserved_qty": stock.ReservedQty, "available_qty": stock.AvailableQty})
 }
 
 func GetLowStockAlerts(c *gin.Context) {

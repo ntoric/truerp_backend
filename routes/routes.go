@@ -35,6 +35,7 @@ func SetupRoutes(r *gin.Engine) {
 		stores.GET("/:id", controllers.GetStore)
 		stores.PUT("/:id", controllers.UpdateStore)
 		stores.DELETE("/:id", controllers.DeleteStore)
+		stores.POST("/:id/reset", controllers.ResetStore)
 		stores.GET("/:id/users", controllers.ListStoreUsers)
 		stores.POST("/:id/users", controllers.CreateStoreUser)
 	}

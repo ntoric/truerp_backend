@@ -191,6 +191,8 @@ type Invoice struct {
 type InvoiceItem struct {
 	ID          uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	InvoiceID   uuid.UUID      `json:"invoice_id" gorm:"type:uuid;not null;index"`
+	ProductID   *uuid.UUID     `json:"product_id,omitempty" gorm:"type:uuid;index"`
+	Product     Product        `json:"product,omitempty" gorm:"foreignKey:ProductID"`
 	Description string         `json:"description"`
 	Quantity    float64        `json:"quantity" gorm:"default:1"`
 	Unit        string         `json:"unit"`
@@ -808,6 +810,8 @@ type SalesReturnItem struct {
 	ID            uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	ReturnID      uuid.UUID      `json:"return_id" gorm:"type:uuid;not null;index"`
 	InvoiceItemID uuid.UUID      `json:"invoice_item_id" gorm:"type:uuid"`
+	ProductID     *uuid.UUID     `json:"product_id,omitempty" gorm:"type:uuid;index"`
+	Product       Product        `json:"product,omitempty" gorm:"foreignKey:ProductID"`
 	Description   string         `json:"description"`
 	Quantity      float64        `json:"quantity" gorm:"default:1"`
 	UnitPrice     float64        `json:"unit_price" gorm:"default:0"`

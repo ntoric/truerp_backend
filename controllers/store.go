@@ -416,6 +416,279 @@ func DeleteStore(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Store deleted successfully"})
 }
 
+// ResetStore wipes operational data for a store (scoped to OwnerUserID) while
+// preserving the store record, users, roles, and business profile. Defaults
+// (chart of accounts, categories) are re-seeded afterward.
+func ResetStore(c *gin.Context) {
+	actor, err := loadActor(c)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+	if !utils.IsSuperAdminRole(actor.Role) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Super admin access required"})
+		return
+	}
+
+	storeID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid store id"})
+		return
+	}
+	var store models.Store
+	if err := utils.DB.First(&store, "id = ?", storeID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Store not found"})
+		return
+	}
+
+	ownerID := store.OwnerUserID
+	err = utils.DB.Transaction(func(tx *gorm.DB) error {
+		if err := wipeStoreOperationalData(tx, ownerID); err != nil {
+			return err
+		}
+		if err := EnsureDefaultChartOfAccounts(tx, ownerID); err != nil {
+			return err
+		}
+		utils.EnsureDefaultRoles(tx, ownerID)
+		return utils.EnsureDefaultCategories(tx, ownerID)
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset store data", "details": err.Error()})
+		return
+	}
+
+	CreateAuditLog(
+		actor.ID,
+		actor.Name,
+		"reset",
+		"store",
+		&store.ID,
+		store.Name,
+		"Reset store operational data",
+		c.ClientIP(),
+		c.GetHeader("User-Agent"),
+		nil,
+		"success",
+		"",
+	)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":  "Store data reset successfully",
+		"store_id": store.ID,
+	})
+}
+
+func hardDeleteByUser(tx *gorm.DB, model interface{}, userID uuid.UUID) error {
+	return tx.Unscoped().Where("user_id = ?", userID).Delete(model).Error
+}
+
+func pluckIDsByUser(tx *gorm.DB, model interface{}, userID uuid.UUID) ([]uuid.UUID, error) {
+	var ids []uuid.UUID
+	if err := tx.Unscoped().Model(model).Where("user_id = ?", userID).Pluck("id", &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+func hardDeleteByFK(tx *gorm.DB, model interface{}, fkColumn string, parentIDs []uuid.UUID) error {
+	if len(parentIDs) == 0 {
+		return nil
+	}
+	return tx.Unscoped().Where(fkColumn+" IN ?", parentIDs).Delete(model).Error
+}
+
+// wipeStoreOperationalData permanently deletes tenant operational rows for ownerID.
+// Preserves: Store, Users, Business, Roles, UserRoles, DeveloperSettings.
+func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID) error {
+	// Child rows without user_id — delete via parent IDs first.
+	invoiceIDs, err := pluckIDsByUser(tx, &models.Invoice{}, ownerID)
+	if err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.InvoiceItem{}, "invoice_id", invoiceIDs); err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.InvoiceStatusHistory{}, "invoice_id", invoiceIDs); err != nil {
+		return err
+	}
+
+	expenseIDs, err := pluckIDsByUser(tx, &models.Expense{}, ownerID)
+	if err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.ExpenseItem{}, "expense_id", expenseIDs); err != nil {
+		return err
+	}
+
+	sessionIDs, err := pluckIDsByUser(tx, &models.POSSession{}, ownerID)
+	if err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.CashMovement{}, "session_id", sessionIDs); err != nil {
+		return err
+	}
+
+	transferIDs, err := pluckIDsByUser(tx, &models.StockTransfer{}, ownerID)
+	if err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.StockTransferItem{}, "transfer_id", transferIDs); err != nil {
+		return err
+	}
+
+	poIDs, err := pluckIDsByUser(tx, &models.PurchaseOrder{}, ownerID)
+	if err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.PurchaseOrderItem{}, "order_id", poIDs); err != nil {
+		return err
+	}
+
+	receiptIDs, err := pluckIDsByUser(tx, &models.PurchaseReceipt{}, ownerID)
+	if err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.PurchaseReceiptItem{}, "receipt_id", receiptIDs); err != nil {
+		return err
+	}
+
+	billIDs, err := pluckIDsByUser(tx, &models.PurchaseBill{}, ownerID)
+	if err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.PurchaseBillItem{}, "bill_id", billIDs); err != nil {
+		return err
+	}
+
+	journalIDs, err := pluckIDsByUser(tx, &models.JournalEntry{}, ownerID)
+	if err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.JournalEntryLine{}, "entry_id", journalIDs); err != nil {
+		return err
+	}
+
+	creditNoteIDs, err := pluckIDsByUser(tx, &models.CreditNote{}, ownerID)
+	if err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.CreditNoteItem{}, "credit_note_id", creditNoteIDs); err != nil {
+		return err
+	}
+
+	debitNoteIDs, err := pluckIDsByUser(tx, &models.DebitNote{}, ownerID)
+	if err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.DebitNoteItem{}, "debit_note_id", debitNoteIDs); err != nil {
+		return err
+	}
+
+	salesReturnIDs, err := pluckIDsByUser(tx, &models.SalesReturn{}, ownerID)
+	if err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.SalesReturnItem{}, "return_id", salesReturnIDs); err != nil {
+		return err
+	}
+
+	purchaseReturnIDs, err := pluckIDsByUser(tx, &models.PurchaseReturn{}, ownerID)
+	if err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.PurchaseReturnItem{}, "return_id", purchaseReturnIDs); err != nil {
+		return err
+	}
+
+	challanIDs, err := pluckIDsByUser(tx, &models.DeliveryChallan{}, ownerID)
+	if err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.DeliveryChallanItem{}, "challan_id", challanIDs); err != nil {
+		return err
+	}
+
+	statementIDs, err := pluckIDsByUser(tx, &models.CustomerStatement{}, ownerID)
+	if err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.StatementTransaction{}, "statement_id", statementIDs); err != nil {
+		return err
+	}
+
+	// Parent / user-scoped operational tables (order: dependents before references).
+	userScoped := []interface{}{
+		&models.InvoiceStatusHistory{},
+		&models.Payment{},
+		&models.PaymentOut{},
+		&models.Invoice{},
+		&models.Expense{},
+		&models.CreditNote{},
+		&models.DebitNote{},
+		&models.SalesReturn{},
+		&models.PurchaseReturn{},
+		&models.DeliveryChallan{},
+		&models.PurchaseBill{},
+		&models.PurchaseReceipt{},
+		&models.PurchaseOrder{},
+		&models.CustomerStatement{},
+		&models.LoyaltyTransaction{},
+		&models.LoyaltySettings{},
+		&models.CashTransaction{},
+		&models.PaymentMethodAccountMap{},
+		&models.BankReconciliation{},
+		&models.Ledger{},
+		&models.JournalEntry{},
+		&models.BankAccount{},
+		&models.Account{},
+		&models.POSSession{},
+		&models.POSDraft{},
+		&models.StockTransfer{},
+		&models.StockEntry{},
+		&models.InventoryStock{},
+		&models.Product{},
+		&models.Warehouse{},
+		&models.Party{},
+		&models.Category{},
+		&models.ExpenseCategory{},
+		&models.StaffAdvancePayment{},
+		&models.StaffDeduction{},
+		&models.Payroll{},
+		&models.Attendance{},
+		&models.Staff{},
+		&models.InvoiceSettings{},
+		&models.PrintSettings{},
+		&models.WeighingScaleSettings{},
+		&models.Reminder{},
+		&models.Notification{},
+		&models.NotificationTemplate{},
+		&models.NotificationPreference{},
+		&models.CAReportSharing{},
+		&models.Draft{},
+		&models.OfflineQueue{},
+		&models.MediaFile{},
+		&models.TaxPeriod{},
+		&models.InputTaxCredit{},
+		&models.GSTFilingStatus{},
+		&models.GSTR1Data{},
+		&models.GSTR3BData{},
+		&models.CustomerPortalAccess{},
+		&models.CustomerPortalSettings{},
+		&models.SupportTicket{},
+		&models.SavedInvoiceTemplate{},
+		&models.InvoiceCustomFieldDefinition{},
+		&models.AuditLog{},
+	}
+
+	for _, model := range userScoped {
+		if err := hardDeleteByUser(tx, model, ownerID); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func ListStoreUsers(c *gin.Context) {
 	actor, err := loadActor(c)
 	if err != nil {

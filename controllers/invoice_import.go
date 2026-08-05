@@ -234,8 +234,15 @@ func createImportedInvoice(userID uuid.UUID, userName string, lines []invoiceImp
 			sgst = itemTax / 2
 		}
 
+		var productID *uuid.UUID
+		var product models.Product
+		if err := utils.DB.Where("user_id = ? AND LOWER(name) = LOWER(?)", userID, line.itemDescription).First(&product).Error; err == nil {
+			productID = &product.ID
+		}
+
 		invoice.Items = append(invoice.Items, models.InvoiceItem{
 			ID:          uuid.New(),
+			ProductID:   productID,
 			Description: line.itemDescription,
 			Quantity:    line.quantity,
 			Unit:        line.unit,
@@ -283,19 +290,7 @@ func createImportedInvoice(userID uuid.UUID, userName string, lines []invoiceImp
 
 	recordInvoiceStatusHistory(invoice.ID, userID, "", invoice.Status, "Invoice imported from CSV", userName)
 
-	for _, item := range invoice.Items {
-		entry := models.StockEntry{
-			ID:         uuid.New(),
-			UserID:     userID,
-			ItemName:   item.Description,
-			EntryType:  "sale",
-			Quantity:   -item.Quantity,
-			BalanceQty: 0,
-			CostPrice:  item.UnitPrice,
-			EntryDate:  invoice.Date,
-		}
-		utils.DB.Create(&entry)
-	}
+	applyInvoiceSaleStock(userID, &invoice)
 
 	if err := postInvoiceAccounting(utils.DB, userID, &invoice); err != nil {
 		fmt.Printf("[DEBUG] createImportedInvoice - accounting error: %v\n", err)
