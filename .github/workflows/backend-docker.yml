@@ -111,7 +111,7 @@ jobs:
           script: |
             set -euo pipefail
             cd "${{ secrets.DEPLOY_PATH }}"
-            chmod +x scripts/deploy.sh
+            # chmod +x scripts/deploy.sh
 
             # Login when the image is private (harmless if public)
             if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
