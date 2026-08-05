@@ -80,6 +80,9 @@ func InitDatabase() *gorm.DB {
 		log.Fatal("Failed to connect to database:", err)
 	}
 
+	// Rename legacy label gap columns before AutoMigrate adds duplicates.
+	migrateLabelGapColumns(db)
+
 	// Auto-migrate models
 	err = db.AutoMigrate(
 		&models.User{},
@@ -187,6 +190,7 @@ func runRawMigrations(db *gorm.DB) {
 	migrateInvoicesDropLegacyCustomerID(db)
 	migrateBarcodeColumnsToItemCode(db)
 	migratePayrollLabels(db)
+	reclassifyExpenseCategoryGLAccounts(db)
 	backfillExpenseCategories(db)
 	SeedDefaultCategoriesForAllUsers(db)
 	migrateWarehouseCodeUnique(db)
@@ -406,6 +410,151 @@ func reclassifyPayrollGLAccounts(db *gorm.DB) {
 	}
 }
 
+// reclassifyExpenseCategoryGLAccounts moves expense ledger/journal debit lines from
+// General Expenses (5200) onto category-specific expense accounts.
+func reclassifyExpenseCategoryGLAccounts(db *gorm.DB) {
+	const generalExpenseCode = "5200"
+
+	var userIDs []uuid.UUID
+	if err := db.Model(&models.Expense{}).Distinct("user_id").Pluck("user_id", &userIDs).Error; err != nil {
+		log.Printf("reclassifyExpenseCategoryGLAccounts: list users failed: %v", err)
+		return
+	}
+
+	for _, userID := range userIDs {
+		var generalExpense models.Account
+		if err := db.Where("user_id = ? AND code = ?", userID, generalExpenseCode).First(&generalExpense).Error; err != nil {
+			continue
+		}
+
+		var expenses []models.Expense
+		if err := db.Where("user_id = ? AND amount > 0", userID).Find(&expenses).Error; err != nil {
+			log.Printf("reclassifyExpenseCategoryGLAccounts: load expenses for %s failed: %v", userID, err)
+			continue
+		}
+
+		for _, expense := range expenses {
+			category := ResolveCategoryName(expense.Category)
+			if strings.EqualFold(category, DefaultCategoryName) {
+				continue
+			}
+
+			targetAccount, err := EnsureExpenseCategoryAccount(db, userID, category)
+			if err != nil {
+				log.Printf("reclassifyExpenseCategoryGLAccounts: ensure account for %s/%s failed: %v", userID, category, err)
+				continue
+			}
+			if targetAccount.ID == generalExpense.ID {
+				continue
+			}
+
+			var ledgerRows []models.Ledger
+			if err := db.Where(
+				"user_id = ? AND transaction_type = ? AND reference_id = ? AND account_id = ? AND debit > 0",
+				userID, "expense", expense.ID, generalExpense.ID,
+			).Find(&ledgerRows).Error; err != nil {
+				log.Printf("reclassifyExpenseCategoryGLAccounts: load ledger for expense %s failed: %v", expense.ID, err)
+				continue
+			}
+			if len(ledgerRows) == 0 {
+				continue
+			}
+
+			var moved float64
+			for _, row := range ledgerRows {
+				if err := db.Model(&row).Update("account_id", targetAccount.ID).Error; err != nil {
+					log.Printf("reclassifyExpenseCategoryGLAccounts: move ledger %s failed: %v", row.ID, err)
+					continue
+				}
+				moved += row.Debit
+			}
+			if moved == 0 {
+				continue
+			}
+
+			journalDesc := fmt.Sprintf("Expense %s", expense.ExpenseNumber)
+			if err := db.Exec(`
+				UPDATE journal_entry_lines
+				SET account_id = ?
+				WHERE id IN (
+					SELECT jel.id
+					FROM journal_entry_lines jel
+					INNER JOIN journal_entries je ON je.id = jel.entry_id
+					WHERE je.user_id = ?
+					  AND jel.account_id = ?
+					  AND jel.debit > 0
+					  AND je.description = ?
+				)
+			`, targetAccount.ID, userID, generalExpense.ID, journalDesc).Error; err != nil {
+				log.Printf("reclassifyExpenseCategoryGLAccounts: move journal lines for %s failed: %v", expense.ExpenseNumber, err)
+			}
+
+			if err := db.Model(&generalExpense).Update("balance", generalExpense.Balance-moved).Error; err != nil {
+				log.Printf("reclassifyExpenseCategoryGLAccounts: decrease general expense balance failed: %v", err)
+			} else {
+				generalExpense.Balance -= moved
+			}
+			if err := db.Model(&targetAccount).Update("balance", targetAccount.Balance+moved).Error; err != nil {
+				log.Printf("reclassifyExpenseCategoryGLAccounts: increase category balance failed: %v", err)
+			}
+		}
+	}
+}
+
+// EnsureExpenseCategoryAccount finds or creates a GL expense account for a category name.
+func EnsureExpenseCategoryAccount(db *gorm.DB, userID uuid.UUID, category string) (models.Account, error) {
+	category = ResolveCategoryName(category)
+	if strings.EqualFold(category, DefaultCategoryName) {
+		var account models.Account
+		err := db.Where("user_id = ? AND code = ?", userID, "5200").First(&account).Error
+		return account, err
+	}
+	if strings.EqualFold(category, "Payroll") {
+		return ensurePayrollAccount(db, userID, "5300")
+	}
+
+	var account models.Account
+	err := db.Where("user_id = ? AND account_type = ? AND name = ? AND is_active = ?", userID, "expense", category, true).
+		First(&account).Error
+	if err == nil {
+		return account, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return account, err
+	}
+
+	code := nextExpenseAccountCode(db, userID)
+	account = models.Account{
+		ID:          uuid.New(),
+		UserID:      userID,
+		Code:        code,
+		Name:        category,
+		AccountType: "expense",
+		IsActive:    true,
+	}
+	if err := db.Create(&account).Error; err != nil {
+		return account, err
+	}
+	return account, nil
+}
+
+func nextExpenseAccountCode(db *gorm.DB, userID uuid.UUID) string {
+	var accounts []models.Account
+	db.Where("user_id = ? AND account_type = ?", userID, "expense").Find(&accounts)
+
+	maxNum := 5000
+	for _, a := range accounts {
+		var n int
+		if _, err := fmt.Sscanf(a.Code, "%d", &n); err == nil && n > maxNum {
+			maxNum = n
+		}
+	}
+	if maxNum == 5000 && len(accounts) == 0 {
+		return "5100"
+	}
+	return fmt.Sprintf("%d", maxNum+100)
+}
+
 func ensurePayrollAccount(db *gorm.DB, userID uuid.UUID, code string) (models.Account, error) {
 	var account models.Account
 	err := db.Where("user_id = ? AND code = ?", userID, code).First(&account).Error
@@ -466,6 +615,50 @@ func backfillExpenseCategories(db *gorm.DB) {
 			log.Printf("backfillExpenseCategories: create failed for %s/%s: %v", r.UserID, r.Category, err)
 		}
 	}
+}
+
+// migrateLabelGapColumns fixes GORM's default snake_case for LabelGapHMM / LabelGapVMM
+// (label_gap_hmm, label_gap_vm_m) to the intended label_gap_h_mm / label_gap_v_mm names.
+func migrateLabelGapColumns(db *gorm.DB) {
+	if !db.Migrator().HasTable("businesses") {
+		return
+	}
+	consolidateLabelGapColumn(db, "label_gap_hmm", "label_gap_h_mm")
+	consolidateLabelGapColumn(db, "label_gap_vm_m", "label_gap_v_mm")
+}
+
+func consolidateLabelGapColumn(db *gorm.DB, legacyCol, canonicalCol string) {
+	hasLegacy := tableColumnExists(db, "businesses", legacyCol)
+	hasCanonical := tableColumnExists(db, "businesses", canonicalCol)
+	if !hasLegacy {
+		return
+	}
+	if hasCanonical {
+		if err := db.Exec(fmt.Sprintf(
+			`UPDATE businesses SET %s = %s WHERE %s IS NOT NULL`,
+			canonicalCol, legacyCol, legacyCol,
+		)).Error; err != nil {
+			log.Printf("migrateLabelGapColumns: copy %s -> %s failed: %v", legacyCol, canonicalCol, err)
+		}
+		if err := db.Exec(fmt.Sprintf(`ALTER TABLE businesses DROP COLUMN %s`, legacyCol)).Error; err != nil {
+			log.Printf("migrateLabelGapColumns: drop legacy column %s failed: %v", legacyCol, err)
+		} else {
+			log.Printf("migrateLabelGapColumns: dropped legacy column %s", legacyCol)
+		}
+		return
+	}
+	renameColumnIfExists(db, "businesses", legacyCol, canonicalCol)
+}
+
+func tableColumnExists(db *gorm.DB, table, col string) bool {
+	var name string
+	if err := db.Raw(
+		`SELECT name FROM pragma_table_info(?) WHERE name = ?`,
+		table, col,
+	).Scan(&name).Error; err != nil {
+		return false
+	}
+	return name != ""
 }
 
 func migrateBarcodeColumnsToItemCode(db *gorm.DB) {

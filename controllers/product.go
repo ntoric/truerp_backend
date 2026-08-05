@@ -653,6 +653,7 @@ func PrintProductLabel(c *gin.Context) {
 		LabelSize     string `json:"label_size"`
 		Format        string `json:"format"` // html (default) or json for silent ESC/POS
 		StartPosition int    `json:"start_position"`
+		Preview       bool   `json:"preview"`
 	}
 	if c.Request.Method == "POST" {
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -675,6 +676,9 @@ func PrintProductLabel(c *gin.Context) {
 	}
 	if input.Quantity > 500 {
 		input.Quantity = 500
+	}
+	if input.Preview && input.Quantity > 8 {
+		input.Quantity = 8
 	}
 	if input.LabelSize != "" {
 		labelSizeKey = normalizeBarcodeLabelSize(input.LabelSize)
@@ -745,7 +749,7 @@ func PrintProductLabel(c *gin.Context) {
 		labelHTMLs = append(labelHTMLs, singleA4Label)
 	}
 
-	html := buildA4LabelsSheetDocument("Product Labels", labelHTMLs, sheetLayout, input.StartPosition, false)
+	html := buildA4LabelsSheetDocument("Product Labels", labelHTMLs, sheetLayout, input.StartPosition, input.Preview)
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(http.StatusOK, html)
 }

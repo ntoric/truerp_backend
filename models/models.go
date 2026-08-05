@@ -143,8 +143,8 @@ type Business struct {
 	LabelMarginMM      float64 `json:"label_margin_mm" gorm:"default:5"`
 	LabelMarginTopMM   float64 `json:"label_margin_top_mm" gorm:"default:8.8"`
 	LabelMarginLeftMM  float64 `json:"label_margin_left_mm" gorm:"default:5"`
-	LabelGapHMM        float64 `json:"label_gap_h_mm" gorm:"default:2"`
-	LabelGapVMM        float64 `json:"label_gap_v_mm" gorm:"default:0"`
+	LabelGapHMM        float64 `json:"label_gap_h_mm" gorm:"column:label_gap_h_mm;default:2"`
+	LabelGapVMM        float64 `json:"label_gap_v_mm" gorm:"column:label_gap_v_mm;default:0"`
 	// AI HSN search settings
 	EnableAIHSNSearch   bool           `json:"enable_ai_hsn_search" gorm:"column:enable_aihsn_search;default:false"`
 	EnableAIBillParsing bool           `json:"enable_ai_bill_parsing" gorm:"default:false"`
@@ -341,6 +341,8 @@ type DailyReport struct {
 	NetCashFlow          float64 `json:"net_cash_flow"`
 	// DailyProfit = net sales − net purchases − operating expenses (accrual, not cash flow).
 	DailyProfit float64 `json:"daily_profit"`
+	// ProductProfit = gross margin on products sold (sale value − purchase cost), net of returns/credit notes.
+	ProductProfit float64 `json:"product_profit"`
 }
 
 type GSTReport struct {

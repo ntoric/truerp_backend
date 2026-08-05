@@ -81,6 +81,11 @@ func CreateExpenseCategory(c *gin.Context) {
 		return
 	}
 
+	if _, err := utils.EnsureExpenseCategoryAccount(utils.DB, userID, category.Name); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Category created but failed to set up accounting account"})
+		return
+	}
+
 	c.JSON(http.StatusCreated, category)
 }
 

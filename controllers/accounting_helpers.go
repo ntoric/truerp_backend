@@ -3,8 +3,10 @@ package controllers
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"truerp/models"
+	"truerp/utils"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -264,9 +266,54 @@ func postPurchasePaymentAccounting(tx *gorm.DB, userID uuid.UUID, refID uuid.UUI
 	})
 }
 
+// expenseAccountCodeForCategory resolves the GL expense account for an expense category.
+// General maps to the default General Expenses account; Payroll to Payroll; other categories
+// get a dedicated expense account named after the category.
+func expenseAccountCodeForCategory(tx *gorm.DB, userID uuid.UUID, category string) (string, error) {
+	category = utils.ResolveCategoryName(category)
+	switch strings.EqualFold(category, utils.DefaultCategoryName) {
+	case true:
+		return acCodeExpense, nil
+	}
+	if strings.EqualFold(category, "Payroll") {
+		return acCodePayroll, nil
+	}
+
+	var account models.Account
+	err := tx.Where("user_id = ? AND account_type = ? AND name = ? AND is_active = ?", userID, "expense", category, true).
+		First(&account).Error
+	if err == nil {
+		return account.Code, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", err
+	}
+
+	if err := EnsureDefaultChartOfAccounts(tx, userID); err != nil {
+		return "", err
+	}
+	code := nextAccountCode(tx, userID, "expense")
+	account = models.Account{
+		ID:          uuid.New(),
+		UserID:      userID,
+		Code:        code,
+		Name:        category,
+		AccountType: "expense",
+		IsActive:    true,
+	}
+	if err := tx.Create(&account).Error; err != nil {
+		return "", err
+	}
+	return code, nil
+}
+
 func postExpenseAccounting(tx *gorm.DB, userID uuid.UUID, expense *models.Expense) error {
 	if expense.Amount <= 0 {
 		return nil
+	}
+	expenseAccountCode, err := expenseAccountCodeForCategory(tx, userID, expense.Category)
+	if err != nil {
+		return err
 	}
 	desc := fmt.Sprintf("Expense %s", expense.ExpenseNumber)
 	assetCode := acCodeCash
@@ -276,7 +323,7 @@ func postExpenseAccounting(tx *gorm.DB, userID uuid.UUID, expense *models.Expens
 		assetCode = acCodeBank
 	}
 	return postAutoJournal(tx, userID, expense.Date, desc, "expense", expense.ID, expense.ExpenseNumber, []glLine{
-		{AccountCode: acCodeExpense, Debit: expense.Amount, Description: desc},
+		{AccountCode: expenseAccountCode, Debit: expense.Amount, Description: desc},
 		{AccountCode: assetCode, Credit: expense.Amount, Description: desc},
 	})
 }

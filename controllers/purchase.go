@@ -1186,6 +1186,8 @@ type LabelRequest struct {
 	Config         LabelConfig        `json:"config"`
 	// Format: "html" (default) or "json" for silent desktop ESC/POS printing.
 	Format string `json:"format"`
+	// Preview: return on-screen HTML preview (A4 sheet layout) without printing.
+	Preview bool `json:"preview"`
 }
 
 func PrintPurchaseBillLabels(c *gin.Context) {
@@ -1301,6 +1303,12 @@ func PrintPurchaseBillLabels(c *gin.Context) {
 	if format == "" {
 		format = strings.ToLower(strings.TrimSpace(c.Query("format")))
 	}
+	if req.Preview {
+		html := generateLabelsHTML(bill, req.ItemQuantities, config, true)
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, html)
+		return
+	}
 	if format == "json" || (isThermalLabelPaperSize(config.PaperSize) && wantsJSONResponse(c)) {
 		size := getBarcodeLabelSize(config.PaperSize)
 		compact := config.PaperSize == "1inch" || config.PaperSize == "1.5inch"
@@ -1317,7 +1325,7 @@ func PrintPurchaseBillLabels(c *gin.Context) {
 	}
 
 	// Generate labels HTML
-	html := generateLabelsHTML(bill, req.ItemQuantities, config)
+	html := generateLabelsHTML(bill, req.ItemQuantities, config, false)
 
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(http.StatusOK, html)
@@ -1400,7 +1408,7 @@ func labelConfigToA4Layout(config LabelConfig) A4LabelSheetLayout {
 	}
 }
 
-func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]float64, config LabelConfig) string {
+func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]float64, config LabelConfig, screenPreview bool) string {
 	items := collectPurchaseLabelItems(bill, itemQuantities)
 	if isThermalLabelPaperSize(config.PaperSize) {
 		return generateThermalPurchaseLabelsHTML(bill.BillNumber, items, config.PaperSize)
@@ -1434,7 +1442,7 @@ func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]floa
 		}, a4Size, false))
 	}
 
-	return buildA4LabelsSheetDocument("Labels - "+bill.BillNumber, labelHTMLs, layout, config.StartPosition, false)
+	return buildA4LabelsSheetDocument("Labels - "+bill.BillNumber, labelHTMLs, layout, config.StartPosition, screenPreview)
 }
 
 func generateThermalPurchaseLabelsHTML(billNumber string, items []models.PurchaseBillItem, paperSize string) string {

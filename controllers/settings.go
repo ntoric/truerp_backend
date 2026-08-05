@@ -265,19 +265,24 @@ func saveLabelLayout(userID uuid.UUID, p printSettingsPayload) error {
 	if err != nil {
 		return err
 	}
-	return utils.DB.Model(&business).Updates(map[string]interface{}{
-		"label_paper_size":     p.LabelPaperSize,
-		"label_sheet_preset":   p.LabelSheetPreset,
-		"label_width_mm":       p.LabelWidthMM,
-		"label_height_mm":      p.LabelHeightMM,
-		"label_columns":        p.LabelColumns,
-		"label_rows":           p.LabelRows,
-		"label_margin_mm":      p.LabelMarginMM,
-		"label_margin_top_mm":  p.LabelMarginTopMM,
-		"label_margin_left_mm": p.LabelMarginLeftMM,
-		"label_gap_h_mm":       p.LabelGapHMM,
-		"label_gap_v_mm":       p.LabelGapVMM,
-	}).Error
+	updates := models.Business{
+		LabelPaperSize:    p.LabelPaperSize,
+		LabelSheetPreset:  p.LabelSheetPreset,
+		LabelWidthMM:      p.LabelWidthMM,
+		LabelHeightMM:     p.LabelHeightMM,
+		LabelColumns:      p.LabelColumns,
+		LabelRows:         p.LabelRows,
+		LabelMarginMM:     p.LabelMarginMM,
+		LabelMarginTopMM:  p.LabelMarginTopMM,
+		LabelMarginLeftMM: p.LabelMarginLeftMM,
+		LabelGapHMM:       p.LabelGapHMM,
+		LabelGapVMM:       p.LabelGapVMM,
+	}
+	return utils.DB.Model(&business).Select(
+		"LabelPaperSize", "LabelSheetPreset", "LabelWidthMM", "LabelHeightMM",
+		"LabelColumns", "LabelRows", "LabelMarginMM", "LabelMarginTopMM",
+		"LabelMarginLeftMM", "LabelGapHMM", "LabelGapVMM",
+	).Updates(&updates).Error
 }
 
 func toPrintSettingsPayload(settings models.PrintSettings, userID uuid.UUID) printSettingsPayload {

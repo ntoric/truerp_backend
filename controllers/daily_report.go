@@ -14,6 +14,52 @@ import (
 	"github.com/google/uuid"
 )
 
+// computeDailyProductProfit sums (taxable sale − purchase cost) per line item for the day,
+// minus the same margin reversed on sales returns and credit notes.
+func computeDailyProductProfit(userID uuid.UUID, date string) float64 {
+	var salesProfit float64
+	salesQuery := `
+		SELECT COALESCE(SUM(
+			(ii.quantity * ii.unit_price * (1.0 - ii.discount / 100.0))
+			- (ii.quantity * COALESCE(p.purchase_price, 0))
+		), 0) AS profit
+		FROM invoice_items ii
+		INNER JOIN invoices i ON i.id = ii.invoice_id
+		LEFT JOIN products p ON p.id = ii.product_id
+		WHERE i.user_id = ? AND DATE(i.date) = ? AND i.status != 'cancelled' AND i.deleted_at IS NULL
+	`
+	utils.DB.Raw(salesQuery, userID, date).Scan(&salesProfit)
+
+	var returnsProfit float64
+	returnsQuery := `
+		SELECT COALESCE(SUM(
+			(sri.quantity * sri.unit_price)
+			- (sri.quantity * COALESCE(p.purchase_price, 0))
+		), 0) AS profit
+		FROM sales_return_items sri
+		INNER JOIN sales_returns sr ON sr.id = sri.return_id
+		LEFT JOIN products p ON p.id = sri.product_id
+		WHERE sr.user_id = ? AND DATE(sr.date) = ? AND sr.status != 'cancelled' AND sr.deleted_at IS NULL
+	`
+	utils.DB.Raw(returnsQuery, userID, date).Scan(&returnsProfit)
+
+	var creditNoteProfit float64
+	creditQuery := `
+		SELECT COALESCE(SUM(
+			(cni.quantity * cni.unit_price)
+			- (cni.quantity * COALESCE(p.purchase_price, 0))
+		), 0) AS profit
+		FROM credit_note_items cni
+		INNER JOIN credit_notes cn ON cn.id = cni.credit_note_id
+		LEFT JOIN invoice_items ii ON ii.id = cni.invoice_item_id
+		LEFT JOIN products p ON p.id = ii.product_id
+		WHERE cn.user_id = ? AND DATE(cn.date) = ? AND cn.status != 'cancelled' AND cn.deleted_at IS NULL
+	`
+	utils.DB.Raw(creditQuery, userID, date).Scan(&creditNoteProfit)
+
+	return salesProfit - returnsProfit - creditNoteProfit
+}
+
 func parseReportDate(c *gin.Context) (string, bool) {
 	date := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
 	if _, err := time.Parse("2006-01-02", date); err != nil {
@@ -76,6 +122,8 @@ func loadDailyReport(userID uuid.UUID, date string) (models.DailyReport, error) 
 		report.PurchaseReturns.TotalAmount +
 		report.DebitNotes.TotalAmount -
 		report.Expenses.TotalAmount
+
+	report.ProductProfit = computeDailyProductProfit(userID, date)
 
 	return report, nil
 }
@@ -150,6 +198,7 @@ func ExportDailyReportCSV(c *gin.Context) {
 	_ = writer.Write([]string{"Accounts Payable (total outstanding)", "", fmt.Sprintf("%.2f", report.AccountsPayableTotal)})
 	_ = writer.Write([]string{"GST Collected (Sales)", "", fmt.Sprintf("%.2f", report.GSTCollected)})
 	_ = writer.Write([]string{"Daily Profit (Sales − Purchases − Expenses ± returns/notes)", "", fmt.Sprintf("%.2f", report.DailyProfit)})
+	_ = writer.Write([]string{"Product Profit (sale value − purchase cost on items sold)", "", fmt.Sprintf("%.2f", report.ProductProfit)})
 	_ = writer.Write([]string{"Net Cash Flow (In − Out − Expenses)", "", fmt.Sprintf("%.2f", report.NetCashFlow)})
 }
 
@@ -205,7 +254,7 @@ func buildDailyReportPDF(report models.DailyReport) ([]byte, error) {
 	pageW, _ := pdf.GetPageSize()
 	leftM, _, rightM, _ := pdf.GetMargins()
 	usable := pageW - leftM - rightM
-	cardW := (usable - 9) / 4
+	cardW := (usable - 12) / 5
 	cardH := 22.0
 	startY := pdf.GetY()
 
@@ -222,15 +271,20 @@ func buildDailyReportPDF(report models.DailyReport) ([]byte, error) {
 	if report.DailyProfit < 0 {
 		profitR, profitG, profitB = 153, 27, 27
 	}
+	productR, productG, productB := 22, 101, 52
+	if report.ProductProfit < 0 {
+		productR, productG, productB = 153, 27, 27
+	}
 
 	cards := []summaryCard{
 		{"Sales", fmt.Sprintf("Rs. %.2f", report.Sales.TotalAmount), fmt.Sprintf("%d invoices", report.Sales.Count), 22, 101, 52},
 		{"Purchase expense", fmt.Sprintf("Rs. %.2f", purchaseExpense), fmt.Sprintf("Purchases %d · Ops expenses %d · AP %.2f", report.Purchases.Count, report.Expenses.Count, report.AccountsPayable.TotalAmount), 154, 52, 18},
 		{"Daily profit", fmt.Sprintf("Rs. %.2f", report.DailyProfit), "Sales − purchases − expenses ± returns", profitR, profitG, profitB},
+		{"Product profit", fmt.Sprintf("Rs. %.2f", report.ProductProfit), "Sale value − purchase cost on items", productR, productG, productB},
 		{"Net cash flow", fmt.Sprintf("Rs. %.2f", report.NetCashFlow), "Payments in - out - expenses", 30, 64, 175},
 	}
 	if report.NetCashFlow < 0 {
-		cards[3].r, cards[3].g, cards[3].b = 153, 27, 27
+		cards[4].r, cards[4].g, cards[4].b = 153, 27, 27
 	}
 
 	for i, card := range cards {
@@ -303,6 +357,16 @@ func buildDailyReportPDF(report models.DailyReport) ([]byte, error) {
 	pdf.CellFormat(colSection, 7, "Daily profit (Sales - Purchases - Expenses)", "1", 0, "L", true, 0, "")
 	pdf.CellFormat(colCount, 7, "-", "1", 0, "R", true, 0, "")
 	pdf.CellFormat(colAmount, 7, fmt.Sprintf("%.2f", report.DailyProfit), "1", 1, "R", true, 0, "")
+
+	productProfitR, productProfitG, productProfitB := 22, 101, 52
+	if report.ProductProfit < 0 {
+		productProfitR, productProfitG, productProfitB = 153, 27, 27
+	}
+	pdf.SetTextColor(productProfitR, productProfitG, productProfitB)
+	pdf.CellFormat(colSection, 7, "Product profit (sale - purchase cost)", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colCount, 7, "-", "1", 0, "R", true, 0, "")
+	pdf.CellFormat(colAmount, 7, fmt.Sprintf("%.2f", report.ProductProfit), "1", 1, "R", true, 0, "")
+	pdf.SetTextColor(40, 40, 40)
 
 	pdf.CellFormat(colSection, 7, "Net cash flow (In - Out - Expenses)", "1", 0, "L", true, 0, "")
 	pdf.CellFormat(colCount, 7, "-", "1", 0, "R", true, 0, "")

@@ -57,6 +57,9 @@ func EnsureDefaultExpenseCategories(db *gorm.DB, userID uuid.UUID) error {
 		if err := ensureExpenseCategory(db, userID, cat.Name, cat.Description); err != nil {
 			return err
 		}
+		if _, err := EnsureExpenseCategoryAccount(db, userID, cat.Name); err != nil {
+			log.Printf("EnsureDefaultExpenseCategories: GL account for %s failed: %v", cat.Name, err)
+		}
 	}
 	return nil
 }
