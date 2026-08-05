@@ -125,14 +125,24 @@ func processInvoiceSync(userID uuid.UUID, operation string, entityData string) e
 			return err
 		}
 		invoice.UserID = userID
+		if invoice.ID == uuid.Nil {
+			invoice.ID = uuid.New()
+		}
+		items := invoice.Items
+		invoice.Items = nil
 		if err := utils.DB.Create(&invoice).Error; err != nil {
 			return err
 		}
 		// Create invoice items
-		for _, item := range invoice.Items {
-			item.InvoiceID = invoice.ID
-			utils.DB.Create(&item)
+		for i := range items {
+			items[i].ID = uuid.New()
+			items[i].InvoiceID = invoice.ID
+			if err := utils.DB.Create(&items[i]).Error; err != nil {
+				return err
+			}
 		}
+		invoice.Items = items
+		applyInvoiceSaleStock(userID, &invoice)
 	case "update":
 		var invoice models.Invoice
 		if err := json.Unmarshal([]byte(entityData), &invoice); err != nil {

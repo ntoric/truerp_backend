@@ -1,8 +1,6 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
@@ -12,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-pdf/fpdf"
@@ -62,11 +62,11 @@ func CreatePurchaseOrder(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		PartyID      uuid.UUID `json:"party_id" binding:"required"`
-		OrderDate    time.Time `json:"order_date" binding:"required"`
+		PartyID      uuid.UUID  `json:"party_id" binding:"required"`
+		OrderDate    time.Time  `json:"order_date" binding:"required"`
 		ExpectedDate *time.Time `json:"expected_date"`
-		Notes        string    `json:"notes"`
-		Terms        string    `json:"terms"`
+		Notes        string     `json:"notes"`
+		Terms        string     `json:"terms"`
 		Items        []struct {
 			Description string  `json:"description" binding:"required"`
 			Quantity    float64 `json:"quantity" binding:"required,gt=0"`
@@ -378,39 +378,46 @@ func CreatePurchaseBill(c *gin.Context) {
 
 	var input struct {
 		PurchaseReceiptID *uuid.UUID `json:"purchase_receipt_id"`
-		PartyID            uuid.UUID  `json:"party_id" binding:"required"`
-		BillNumber         string     `json:"bill_number" binding:"required"`
-		BillDate           time.Time  `json:"bill_date" binding:"required"`
-		DueDate            *time.Time `json:"due_date"`
-		WarehouseID        *uuid.UUID `json:"warehouse_id"`
-		TotalAmount        float64    `json:"total_amount" binding:"required"`
-		PaidAmount         float64    `json:"paid_amount"`
-		BalanceDue         float64    `json:"balance_due"`
-		PaymentMode        string     `json:"payment_mode"`
-		BankAccountID      *uuid.UUID `json:"bank_account_id"`
-		Status             string     `json:"status"`
-		Notes              string     `json:"notes"`
-		Items              []struct {
-			ProductID   *uuid.UUID          `json:"product_id"`
-			ItemCode    string              `json:"item_code"`
-			Description string              `json:"description" binding:"required"`
+		PartyID           uuid.UUID  `json:"party_id" binding:"required"`
+		BillNumber        string     `json:"bill_number" binding:"required"`
+		BillDate          time.Time  `json:"bill_date" binding:"required"`
+		DueDate           *time.Time `json:"due_date"`
+		WarehouseID       *uuid.UUID `json:"warehouse_id"`
+		TotalAmount       float64    `json:"total_amount" binding:"required"`
+		PaidAmount        float64    `json:"paid_amount"`
+		BalanceDue        float64    `json:"balance_due"`
+		PaymentMode       string     `json:"payment_mode"`
+		BankAccountID     *uuid.UUID `json:"bank_account_id"`
+		Status            string     `json:"status"`
+		Notes             string     `json:"notes"`
+		Items             []struct {
+			ProductID   *uuid.UUID           `json:"product_id"`
+			ItemCode    string               `json:"item_code"`
+			Description string               `json:"description" binding:"required"`
 			Quantity    models.FlexibleFloat `json:"quantity" binding:"required"`
-			Unit        string              `json:"unit"`
+			Unit        string               `json:"unit"`
 			UnitPrice   models.FlexibleFloat `json:"unit_price"`
 			Discount    models.FlexibleFloat `json:"discount"`
 			TaxRate     models.FlexibleFloat `json:"tax_rate"`
 			MRP         models.FlexibleFloat `json:"mrp"`
 			SalePrice   models.FlexibleFloat `json:"sale_price"`
-			HSNCode     string              `json:"hsn_code"`
-			BatchNo     string              `json:"batch_no"`
-			MfgDate     *time.Time          `json:"mfg_date"`
-			ExpDate     *time.Time          `json:"exp_date"`
+			HSNCode     string               `json:"hsn_code"`
+			BatchNo     string               `json:"batch_no"`
+			MfgDate     *time.Time           `json:"mfg_date"`
+			ExpDate     *time.Time           `json:"exp_date"`
 		} `json:"items" binding:"required,min=1"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	for _, item := range input.Items {
+		if err := validateBatchedProductRequiresBatch(userID, item.ProductID, item.BatchNo, item.Description); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	if err := validateUserBankAccount(userID, input.BankAccountID); err != nil {
@@ -449,9 +456,14 @@ func CreatePurchaseBill(c *gin.Context) {
 		DueDate:           input.DueDate,
 		WarehouseID:       warehouseID,
 		StockStatus:       "none",
-		Status:            func() string { if input.Status != "" { return input.Status }; return "unpaid" }(),
-		TotalAmount:       input.TotalAmount,
-		PaidAmount:        input.PaidAmount,
+		Status: func() string {
+			if input.Status != "" {
+				return input.Status
+			}
+			return "unpaid"
+		}(),
+		TotalAmount: input.TotalAmount,
+		PaidAmount:  input.PaidAmount,
 		BalanceDue: func() float64 {
 			due := input.TotalAmount - input.PaidAmount
 			if due < 0 {
@@ -459,9 +471,9 @@ func CreatePurchaseBill(c *gin.Context) {
 			}
 			return due
 		}(),
-		PaymentMode:       input.PaymentMode,
-		BankAccountID:     resolvedBankAccount,
-		Notes:             input.Notes,
+		PaymentMode:   input.PaymentMode,
+		BankAccountID: resolvedBankAccount,
+		Notes:         input.Notes,
 	}
 
 	var subTotal, taxTotal float64
@@ -514,16 +526,20 @@ func CreatePurchaseBill(c *gin.Context) {
 		return
 	}
 
-	if err := postPurchaseBillAccounting(utils.DB, userID, &bill); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill saved but failed to post to accounting"})
-		return
-	}
-
-	if bill.PaidAmount > 0 {
-		desc := fmt.Sprintf("Purchase bill %s", bill.BillNumber)
-		if err := recordPurchasePaymentOut(utils.DB, userID, bill.BankAccountID, bill.PaidAmount, bill.BillDate, bill.BillNumber, desc); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill saved but failed to update cash account"})
+	if bill.Status != "draft" {
+		if err := postPurchaseBillAccounting(utils.DB, userID, &bill); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill saved but failed to post to accounting"})
 			return
+		}
+
+		// Full invoice amount is purchase expense (Dr Purchases / Cr AP).
+		// Paid amount auto-creates Payment Out and reduces AP; unpaid remains Accounts Payable.
+		if bill.PaidAmount > 0 {
+			notes := fmt.Sprintf("Auto-created from purchase bill %s", bill.BillNumber)
+			if err := createLinkedPurchasePaymentOut(utils.DB, userID, &bill, bill.PaidAmount, bill.BillDate, notes); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill saved but failed to create payment out"})
+				return
+			}
 		}
 	}
 
@@ -559,19 +575,19 @@ func UpdatePurchaseBill(c *gin.Context) {
 	}
 
 	var input struct {
-		PartyID         uuid.UUID `json:"party_id"`
-		BillNumber      string    `json:"bill_number"`
-		BillDate        time.Time `json:"bill_date"`
-		DueDate         *time.Time `json:"due_date"`
-		WarehouseID     *uuid.UUID `json:"warehouse_id"`
-		TotalAmount     float64   `json:"total_amount"`
-		PaidAmount      float64    `json:"paid_amount"`
-		BalanceDue      float64    `json:"balance_due"`
-		PaymentMode     string     `json:"payment_mode"`
-		BankAccountID   *uuid.UUID `json:"bank_account_id"`
-		Status          string    `json:"status"`
-		Notes           string    `json:"notes"`
-		Items           []struct {
+		PartyID       uuid.UUID  `json:"party_id"`
+		BillNumber    string     `json:"bill_number"`
+		BillDate      time.Time  `json:"bill_date"`
+		DueDate       *time.Time `json:"due_date"`
+		WarehouseID   *uuid.UUID `json:"warehouse_id"`
+		TotalAmount   float64    `json:"total_amount"`
+		PaidAmount    float64    `json:"paid_amount"`
+		BalanceDue    float64    `json:"balance_due"`
+		PaymentMode   string     `json:"payment_mode"`
+		BankAccountID *uuid.UUID `json:"bank_account_id"`
+		Status        string     `json:"status"`
+		Notes         string     `json:"notes"`
+		Items         []struct {
 			ProductID   *uuid.UUID           `json:"product_id"`
 			ItemCode    string               `json:"item_code"`
 			Description string               `json:"description"`
@@ -594,6 +610,13 @@ func UpdatePurchaseBill(c *gin.Context) {
 		return
 	}
 
+	for _, item := range input.Items {
+		if err := validateBatchedProductRequiresBatch(userID, item.ProductID, item.BatchNo, item.Description); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
 	// Status-only "mark as paid" from the list page (no items / totals in body).
 	if input.Status == "paid" && len(input.Items) == 0 && input.TotalAmount == 0 && bill.TotalAmount > 0 {
 		previousPaidAmount := bill.PaidAmount
@@ -609,9 +632,9 @@ func UpdatePurchaseBill(c *gin.Context) {
 			return
 		}
 		if paymentDelta := bill.PaidAmount - previousPaidAmount; paymentDelta > 0 {
-			desc := fmt.Sprintf("Purchase bill %s (mark paid)", bill.BillNumber)
-			if err := recordPurchasePaymentOut(utils.DB, userID, bill.BankAccountID, paymentDelta, bill.BillDate, bill.BillNumber, desc); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to update cash account"})
+			notes := fmt.Sprintf("Auto-created from purchase bill %s (mark paid)", bill.BillNumber)
+			if err := createLinkedPurchasePaymentOut(utils.DB, userID, &bill, paymentDelta, bill.BillDate, notes); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to create payment out"})
 				return
 			}
 		}
@@ -730,9 +753,9 @@ func UpdatePurchaseBill(c *gin.Context) {
 	}
 
 	if paymentDelta := bill.PaidAmount - previousPaidAmount; paymentDelta > 0 {
-		desc := fmt.Sprintf("Purchase bill %s (payment update)", bill.BillNumber)
-		if err := recordPurchasePaymentOut(utils.DB, userID, bill.BankAccountID, paymentDelta, bill.BillDate, bill.BillNumber, desc); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to update cash account"})
+		notes := fmt.Sprintf("Auto-created from purchase bill %s (payment update)", bill.BillNumber)
+		if err := createLinkedPurchasePaymentOut(utils.DB, userID, &bill, paymentDelta, bill.BillDate, notes); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to create payment out"})
 			return
 		}
 	}
@@ -1139,9 +1162,9 @@ type LabelConfig struct {
 	LabelHeight float64 `json:"label_height"` // mm
 	Cols        int     `json:"cols"`
 	Rows        int     `json:"rows"`
-	Margin      float64 `json:"margin"`       // mm (even on all sides)
-	MarginTop   float64 `json:"margin_top"`   // mm
-	MarginLeft  float64 `json:"margin_left"`  // mm
+	Margin      float64 `json:"margin"`      // mm (even on all sides)
+	MarginTop   float64 `json:"margin_top"`  // mm
+	MarginLeft  float64 `json:"margin_left"` // mm
 }
 
 func isThermalLabelPaperSize(size string) bool {
@@ -1794,11 +1817,11 @@ Return ONLY the JSON, nothing else.`
 	var aiResponse struct {
 		Status string `json:"status"`
 		Data   struct {
-			VendorName  string  `json:"vendor_name"`
-			VendorGSTIN string  `json:"vendor_gstin"`
-			BillNumber  string  `json:"bill_number"`
-			BillDate    string  `json:"bill_date"`
-			DueDate     string  `json:"due_date"`
+			VendorName  string `json:"vendor_name"`
+			VendorGSTIN string `json:"vendor_gstin"`
+			BillNumber  string `json:"bill_number"`
+			BillDate    string `json:"bill_date"`
+			DueDate     string `json:"due_date"`
 			Items       []struct {
 				Description string  `json:"description"`
 				Quantity    float64 `json:"quantity"`

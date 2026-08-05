@@ -173,6 +173,7 @@ func SetupRoutes(r *gin.Engine) {
 		dashboard.GET("/top-parties", controllers.GetTopParties)
 		dashboard.GET("/daily-report", controllers.GetDailyReport)
 		dashboard.GET("/daily-report/export", controllers.ExportDailyReportCSV)
+		dashboard.GET("/daily-report/pdf", controllers.ExportDailyReportPDF)
 	}
 
 	reports := r.Group("/api/v1/reports")

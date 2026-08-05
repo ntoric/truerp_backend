@@ -1,9 +1,10 @@
 package controllers
 
 import (
+	"fmt"
+	"time"
 	"truerp/models"
 	"truerp/utils"
-	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -69,6 +70,57 @@ func recordPurchasePaymentOut(tx *gorm.DB, userID uuid.UUID, accountID *uuid.UUI
 		return err
 	}
 	return postPurchasePaymentAccounting(tx, userID, transaction.ID, accountID, amount, date, reference, description)
+}
+
+// createLinkedPurchasePaymentOut records a PaymentOut row for a purchase bill payment
+// and posts cash/bank + AP reduction. Bill paid_amount/balance_due must already be updated.
+func createLinkedPurchasePaymentOut(tx *gorm.DB, userID uuid.UUID, bill *models.PurchaseBill, amount float64, date time.Time, notes string) error {
+	if amount <= 0 || bill == nil {
+		return nil
+	}
+
+	var count int64
+	if err := tx.Model(&models.PaymentOut{}).Where("user_id = ?", userID).Count(&count).Error; err != nil {
+		return err
+	}
+	number := fmt.Sprintf("POUT-%04d", count+1)
+
+	mode := bill.PaymentMode
+	if mode == "" {
+		mode = "cash"
+	}
+
+	billID := bill.ID
+	paymentOut := models.PaymentOut{
+		ID:               uuid.New(),
+		UserID:           userID,
+		PurchaseBillID:   &billID,
+		PartyID:          bill.PartyID,
+		AmountPaid:       amount,
+		PaymentOutNumber: number,
+		Mode:             mode,
+		Date:             date,
+		Reference:        bill.BillNumber,
+		Notes:            notes,
+	}
+	if err := tx.Create(&paymentOut).Error; err != nil {
+		return err
+	}
+
+	desc := fmt.Sprintf("Payment out %s for purchase %s", number, bill.BillNumber)
+	if err := recordPurchasePaymentOut(tx, userID, bill.BankAccountID, amount, date, bill.BillNumber, desc); err != nil {
+		return err
+	}
+
+	// Match standalone PaymentOut behaviour: bump party balance by amount paid.
+	var party models.Party
+	if err := tx.Where("user_id = ? AND id = ?", userID, bill.PartyID).First(&party).Error; err == nil {
+		if err := tx.Model(&party).Update("balance", party.Balance+amount).Error; err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // recordPayrollCashOut deducts net salary from a bank account or cash in-hand

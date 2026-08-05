@@ -1,10 +1,10 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -34,16 +34,19 @@ func GetReportWidgets(c *gin.Context) {
 	monthStart := time.Date(time.Now().Year(), time.Now().Month(), 1, 0, 0, 0, 0, time.Local)
 
 	type widgets struct {
-		TotalSales        float64 `json:"total_sales"`
-		MonthRevenue      float64 `json:"month_revenue"`
-		OutstandingAmount float64 `json:"outstanding_amount"`
-		OutstandingCount  int64   `json:"outstanding_count"`
-		InventoryValue    float64 `json:"inventory_value"`
-		LowStockCount     int64   `json:"low_stock_count"`
-		MonthTax          float64 `json:"month_tax"`
-		PaymentsInMonth   float64 `json:"payments_in_month"`
-		PaymentsOutMonth  float64 `json:"payments_out_month"`
-		MonthNetProfit    float64 `json:"month_net_profit"`
+		TotalSales           float64 `json:"total_sales"`
+		MonthRevenue         float64 `json:"month_revenue"`
+		OutstandingAmount    float64 `json:"outstanding_amount"`
+		OutstandingCount     int64   `json:"outstanding_count"`
+		InventoryValue       float64 `json:"inventory_value"`
+		LowStockCount        int64   `json:"low_stock_count"`
+		MonthTax             float64 `json:"month_tax"`
+		PaymentsInMonth      float64 `json:"payments_in_month"`
+		PaymentsOutMonth     float64 `json:"payments_out_month"`
+		PurchaseExpenseMonth float64 `json:"purchase_expense_month"`
+		AccountsPayable      float64 `json:"accounts_payable"`
+		AccountsPayableCount int64   `json:"accounts_payable_count"`
+		MonthNetProfit       float64 `json:"month_net_profit"`
 	}
 
 	var w widgets
@@ -77,6 +80,14 @@ func GetReportWidgets(c *gin.Context) {
 		Select("COALESCE(SUM(amount_received), 0)").Scan(&w.PaymentsInMonth)
 	utils.DB.Model(&models.PaymentOut{}).Where("user_id = ? AND date >= ?", userID, monthStart).
 		Select("COALESCE(SUM(amount_paid), 0)").Scan(&w.PaymentsOutMonth)
+
+	// Purchase expense = full bill totals this month; AP = unpaid balances.
+	utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ? AND bill_date >= ?", userID, monthStart).
+		Select("COALESCE(SUM(total_amount), 0)").Scan(&w.PurchaseExpenseMonth)
+	utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ? AND total_amount > paid_amount", userID).
+		Select("COALESCE(SUM(total_amount - paid_amount), 0)").Scan(&w.AccountsPayable)
+	utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ? AND total_amount > paid_amount", userID).
+		Count(&w.AccountsPayableCount)
 
 	var income, expense float64
 	utils.DB.Model(&models.Account{}).Where("user_id = ? AND is_active = ? AND account_type = ?", userID, true, "income").
@@ -168,12 +179,12 @@ func GetRevenueReport(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"period": period,
 		"summary": gin.H{
-			"total_gross":        totalGross,
-			"total_net":          totalNet,
-			"total_tax":          totalTax,
-			"total_invoices":     totalInvoices,
-			"avg_invoice_value":  avgInvoice,
-			"periods_in_report":  len(results),
+			"total_gross":       totalGross,
+			"total_net":         totalNet,
+			"total_tax":         totalTax,
+			"total_invoices":    totalInvoices,
+			"avg_invoice_value": avgInvoice,
+			"periods_in_report": len(results),
 		},
 		"periods": results,
 	})
@@ -253,8 +264,8 @@ func GetSalesReportDetailed(c *gin.Context) {
 	}
 
 	var statusBreakdown []struct {
-		Status string `json:"status"`
-		Count  int64  `json:"count"`
+		Status string  `json:"status"`
+		Count  int64   `json:"count"`
 		Amount float64 `json:"amount"`
 	}
 	utils.DB.Raw(`
@@ -272,8 +283,8 @@ func GetSalesReportDetailed(c *gin.Context) {
 			"best_period_sales": bestSales,
 			"growth_vs_prior":   growthPct,
 		},
-		"series":             series,
-		"status_breakdown":   statusBreakdown,
+		"series":           series,
+		"status_breakdown": statusBreakdown,
 	})
 }
 
@@ -315,13 +326,13 @@ func GetTaxReport(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"summary": gin.H{
-			"total_cgst":           totalCGST,
-			"total_sgst":           totalSGST,
-			"total_igst":           totalIGST,
-			"total_tax":            totalTax,
-			"taxable_turnover":     totalValue,
-			"effective_tax_rate":   effectiveRate,
-			"months_in_report":     len(months),
+			"total_cgst":         totalCGST,
+			"total_sgst":         totalSGST,
+			"total_igst":         totalIGST,
+			"total_tax":          totalTax,
+			"taxable_turnover":   totalValue,
+			"effective_tax_rate": effectiveRate,
+			"months_in_report":   len(months),
 		},
 		"months": months,
 	})
@@ -346,10 +357,10 @@ func GetOutstandingInvoicesReport(c *gin.Context) {
 	}
 
 	type PartyOutstanding struct {
-		PartyID       uuid.UUID `json:"party_id"`
-		PartyName     string    `json:"party_name"`
-		InvoiceCount  int       `json:"invoice_count"`
-		Outstanding   float64   `json:"outstanding"`
+		PartyID      uuid.UUID `json:"party_id"`
+		PartyName    string    `json:"party_name"`
+		InvoiceCount int       `json:"invoice_count"`
+		Outstanding  float64   `json:"outstanding"`
 	}
 
 	type AgingBucket struct {
@@ -450,9 +461,9 @@ func GetOutstandingInvoicesReport(c *gin.Context) {
 			"overdue_count":     overdueCount,
 			"avg_days_overdue":  avgDaysOverdue,
 		},
-		"aging":     aging,
-		"by_party":  byParty,
-		"invoices":  rows,
+		"aging":    aging,
+		"by_party": byParty,
+		"invoices": rows,
 	})
 }
 
@@ -512,9 +523,9 @@ func GetCustomerWiseReport(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"summary": gin.H{
-			"customer_count":      totalCustomers,
-			"total_paid_sales":    totalSales,
-			"total_outstanding":   totalOutstanding,
+			"customer_count":    totalCustomers,
+			"total_paid_sales":  totalSales,
+			"total_outstanding": totalOutstanding,
 			"avg_sales_per_party": func() float64 {
 				if totalCustomers == 0 {
 					return 0
@@ -610,9 +621,9 @@ func GetProductWiseReport(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"source": source,
 		"summary": gin.H{
-			"product_count":   len(products),
-			"total_revenue":   totalRevenue,
-			"total_qty_sold":  totalQty,
+			"product_count":  len(products),
+			"total_revenue":  totalRevenue,
+			"total_qty_sold": totalQty,
 			"avg_unit_revenue": func() float64 {
 				if totalQty == 0 {
 					return 0
@@ -629,11 +640,11 @@ func GetPaymentsReport(c *gin.Context) {
 	period := c.DefaultQuery("period", "monthly")
 
 	type PeriodRow struct {
-		Period     string  `json:"period"`
-		AmountIn   float64 `json:"amount_in"`
-		AmountOut  float64 `json:"amount_out"`
-		CountIn    int64   `json:"count_in"`
-		CountOut   int64   `json:"count_out"`
+		Period    string  `json:"period"`
+		AmountIn  float64 `json:"amount_in"`
+		AmountOut float64 `json:"amount_out"`
+		CountIn   int64   `json:"count_in"`
+		CountOut  int64   `json:"count_out"`
 	}
 
 	type ModeRow struct {
@@ -749,21 +760,21 @@ func GetInventoryReport(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	type StockRow struct {
-		ProductID     uuid.UUID `json:"product_id"`
-		ProductName   string    `json:"product_name"`
-		SKU           string    `json:"sku"`
-		Category      string    `json:"category"`
-		StockQty      float64   `json:"stock_qty"`
-		ReservedQty   float64   `json:"reserved_qty"`
-		AvailableQty  float64   `json:"available_qty"`
-		MinStock      float64   `json:"min_stock"`
-		CostPrice     float64   `json:"cost_price"`
-		SalePrice     float64   `json:"sale_price"`
-		TotalValue    float64   `json:"total_value"`
-		RetailValue   float64   `json:"retail_value"`
-		OutletName    string    `json:"outlet_name"`
-		IsLowStock    bool      `json:"is_low_stock"`
-		IsOutOfStock  bool      `json:"is_out_of_stock"`
+		ProductID    uuid.UUID `json:"product_id"`
+		ProductName  string    `json:"product_name"`
+		SKU          string    `json:"sku"`
+		Category     string    `json:"category"`
+		StockQty     float64   `json:"stock_qty"`
+		ReservedQty  float64   `json:"reserved_qty"`
+		AvailableQty float64   `json:"available_qty"`
+		MinStock     float64   `json:"min_stock"`
+		CostPrice    float64   `json:"cost_price"`
+		SalePrice    float64   `json:"sale_price"`
+		TotalValue   float64   `json:"total_value"`
+		RetailValue  float64   `json:"retail_value"`
+		OutletName   string    `json:"outlet_name"`
+		IsLowStock   bool      `json:"is_low_stock"`
+		IsOutOfStock bool      `json:"is_out_of_stock"`
 	}
 
 	var stocks []models.InventoryStock
@@ -840,11 +851,11 @@ func GetInventoryReport(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"summary": gin.H{
-			"total_value":       totalValue,
+			"total_value":        totalValue,
 			"total_retail_value": totalRetail,
-			"total_quantity":    totalQty,
-			"sku_locations":     len(items),
-			"low_stock_count":   lowStockCount,
+			"total_quantity":     totalQty,
+			"sku_locations":      len(items),
+			"low_stock_count":    lowStockCount,
 			"out_of_stock_count": outOfStockCount,
 		},
 		"categories": categories,
@@ -895,9 +906,21 @@ func GetCustomReport(c *gin.Context) {
 		}
 	case "purchases":
 		query := `
-			SELECT DATE(date) as label, COALESCE(SUM(total_amount), 0) as amount, COUNT(*) as count
-			FROM purchase_bills WHERE user_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ?
-			GROUP BY DATE(date) ORDER BY label DESC`
+			SELECT DATE(bill_date) as label, COALESCE(SUM(total_amount), 0) as amount, COUNT(*) as count
+			FROM purchase_bills WHERE user_id = ? AND deleted_at IS NULL AND bill_date BETWEEN ? AND ?
+			GROUP BY DATE(bill_date) ORDER BY label DESC`
+		if err := utils.DB.Raw(query, userID, start, end).Scan(&rows).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to run custom report"})
+			return
+		}
+	case "accounts_payable":
+		query := `
+			SELECT DATE(bill_date) as label,
+				COALESCE(SUM(CASE WHEN total_amount > paid_amount THEN total_amount - paid_amount ELSE 0 END), 0) as amount,
+				COUNT(*) as count
+			FROM purchase_bills WHERE user_id = ? AND deleted_at IS NULL AND bill_date BETWEEN ? AND ?
+				AND total_amount > paid_amount
+			GROUP BY DATE(bill_date) ORDER BY label DESC`
 		if err := utils.DB.Raw(query, userID, start, end).Scan(&rows).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to run custom report"})
 			return

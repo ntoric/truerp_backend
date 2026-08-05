@@ -57,7 +57,29 @@ func GetProducts(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, products)
+	stockByProduct := map[uuid.UUID]float64{}
+	if len(products) > 0 {
+		var stocks []models.InventoryStock
+		if err := utils.DB.Where("user_id = ?", userID).Find(&stocks).Error; err == nil {
+			for _, stock := range stocks {
+				stockByProduct[stock.ProductID] += stock.AvailableQty
+			}
+		}
+	}
+
+	type productWithStock struct {
+		models.Product
+		StockQty float64 `json:"stock_qty"`
+	}
+	out := make([]productWithStock, 0, len(products))
+	for _, p := range products {
+		out = append(out, productWithStock{
+			Product:  p,
+			StockQty: stockByProduct[p.ID],
+		})
+	}
+
+	c.JSON(http.StatusOK, out)
 }
 
 func GetProduct(c *gin.Context) {
@@ -161,6 +183,14 @@ func CreateProduct(c *gin.Context) {
 		inventoryOutletID = parsed
 	}
 
+	if input.Product.EnableBatching && input.Inventory != nil && input.Inventory.Quantity > 0 && strings.TrimSpace(input.Inventory.BatchNo) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":  "Batch number is required when batching is enabled",
+			"fields": gin.H{"inventory.batch_no": "Batch number is required"},
+		})
+		return
+	}
+
 	if err := utils.DB.Create(&input.Product).Error; err != nil {
 		fmt.Printf("[DEBUG] CreateProduct - DB create error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create product. Please try again."})
@@ -225,7 +255,7 @@ func CreateProduct(c *gin.Context) {
 			fmt.Printf("[DEBUG] CreateProduct - Stock entry created: %s\n", stockEntry.ID)
 
 			// Update inventory stock
-			updateInventoryStock(userID, input.Product.ID, outletID, "opening", input.Inventory.Quantity, input.Inventory.CostPrice)
+			updateInventoryStock(userID, input.Product.ID, outletID, "opening", input.Inventory.Quantity, input.Inventory.CostPrice, input.Inventory.BatchNo, mfgDate, expDate)
 		}
 	}
 
@@ -422,7 +452,7 @@ func UpdateProduct(c *gin.Context) {
 			fmt.Printf("[DEBUG] UpdateProduct - Stock entry created: %s\n", stockEntry.ID)
 
 			// Update inventory stock
-			updateInventoryStock(userID, product.ID, outletID, "adjustment", input.Inventory.Quantity, input.Inventory.CostPrice)
+			updateInventoryStock(userID, product.ID, outletID, "adjustment", input.Inventory.Quantity, input.Inventory.CostPrice, input.Inventory.BatchNo, mfgDate, expDate)
 		}
 	}
 

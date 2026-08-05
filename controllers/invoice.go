@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -109,6 +110,8 @@ func CreateInvoice(c *gin.Context) {
 			TaxRate     models.FlexibleFloat `json:"tax_rate"`
 			Unit        string               `json:"unit"`
 			HSNCode     string               `json:"hsn_code"`
+			BatchNo     string               `json:"batch_no"`
+			ExpDate     *time.Time           `json:"exp_date"`
 		} `json:"items" binding:"required,min=1"`
 	}
 
@@ -220,6 +223,8 @@ func CreateInvoice(c *gin.Context) {
 			IGST:        igst,
 			Total:       taxableAmount + cgst + sgst + igst,
 			HSNCode:     item.HSNCode,
+			BatchNo:     strings.TrimSpace(item.BatchNo),
+			ExpDate:     item.ExpDate,
 		})
 
 		subTotal += itemTotal
@@ -388,6 +393,8 @@ func UpdateInvoice(c *gin.Context) {
 			TaxRate     models.FlexibleFloat `json:"tax_rate"`
 			Unit        string               `json:"unit"`
 			HSNCode     string               `json:"hsn_code"`
+			BatchNo     string               `json:"batch_no"`
+			ExpDate     *time.Time           `json:"exp_date"`
 		} `json:"items"`
 	}
 
@@ -485,6 +492,8 @@ func UpdateInvoice(c *gin.Context) {
 			IGST:        igst,
 			Total:       taxable + cgst + sgst + igst,
 			HSNCode:     item.HSNCode,
+			BatchNo:     strings.TrimSpace(item.BatchNo),
+			ExpDate:     item.ExpDate,
 		})
 
 		subTotal += itemTotal

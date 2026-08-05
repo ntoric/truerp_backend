@@ -334,6 +334,9 @@ func renderInvoiceItemTable(items []models.InvoiceItem, custom models.InvoiceTem
 	if cols.HSN {
 		headers = append(headers, "<th>HSN</th>")
 	}
+	if cols.Batch {
+		headers = append(headers, "<th>Batch</th>")
+	}
 	if cols.Qty {
 		headers = append(headers, "<th>Qty</th>")
 	}
@@ -383,6 +386,17 @@ func renderInvoiceItemRows(items []models.InvoiceItem, custom models.InvoiceTemp
 		}
 		if cols.HSN {
 			cells = append(cells, fmt.Sprintf("<td>%s</td>", html.EscapeString(item.HSNCode)))
+		}
+		if cols.Batch {
+			batchLabel := html.EscapeString(item.BatchNo)
+			if item.ExpDate != nil {
+				batchLabel = fmt.Sprintf("%s<br/><span style=\"font-size:10px;color:#666\">Exp %s</span>",
+					batchLabel, item.ExpDate.Format("02/01/2006"))
+			}
+			if batchLabel == "" {
+				batchLabel = "-"
+			}
+			cells = append(cells, fmt.Sprintf("<td>%s</td>", batchLabel))
 		}
 		if cols.Qty {
 			cells = append(cells, fmt.Sprintf("<td>%.2f %s</td>", item.Quantity, html.EscapeString(item.Unit)))

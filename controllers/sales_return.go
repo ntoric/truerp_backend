@@ -5,6 +5,7 @@ import (
 	"truerp/utils"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -216,10 +217,29 @@ func ProcessSalesReturn(c *gin.Context) {
 	// Restore inventory for returned items
 	for _, item := range salesReturn.Items {
 		productID := item.ProductID
-		if (productID == nil || *productID == uuid.Nil) && item.InvoiceItemID != uuid.Nil {
+		batchNo := strings.TrimSpace(item.BatchNo)
+		var expDate *time.Time
+		if (productID == nil || *productID == uuid.Nil || batchNo == "") && item.InvoiceItemID != uuid.Nil {
 			var invoiceItem models.InvoiceItem
 			if err := utils.DB.Where("id = ?", item.InvoiceItemID).First(&invoiceItem).Error; err == nil {
-				productID = invoiceItem.ProductID
+				if productID == nil || *productID == uuid.Nil {
+					productID = invoiceItem.ProductID
+				}
+				if batchNo == "" {
+					batchNo = invoiceItem.BatchNo
+				}
+				expDate = invoiceItem.ExpDate
+			}
+		}
+
+		restoreOutlet := outletID
+		if productID != nil && *productID != uuid.Nil && batchNo != "" {
+			var stock models.InventoryStock
+			if err := utils.DB.Where(
+				"user_id = ? AND product_id = ? AND batch_no = ?",
+				userID, *productID, batchNo,
+			).Order("available_qty DESC").First(&stock).Error; err == nil {
+				restoreOutlet = stock.OutletID
 			}
 		}
 
@@ -228,11 +248,13 @@ func ProcessSalesReturn(c *gin.Context) {
 			UserID:         userID,
 			ItemName:       item.Description,
 			ProductID:      productID,
-			OutletID:       outletID,
+			OutletID:       restoreOutlet,
 			EntryType:      "return",
 			Quantity:       item.Quantity,
 			BalanceQty:     0,
 			CostPrice:      item.UnitPrice,
+			BatchNo:        batchNo,
+			ExpDate:        expDate,
 			ReferenceID:    salesReturn.ID,
 			ReferenceType:  "sales_return",
 			Notes:          fmt.Sprintf("Sales return %s", salesReturn.ReturnNumber),
@@ -246,8 +268,8 @@ func ProcessSalesReturn(c *gin.Context) {
 			continue
 		}
 
-		if productID != nil && *productID != uuid.Nil && outletID != uuid.Nil {
-			updateInventoryStock(userID, *productID, outletID, "return", item.Quantity, item.UnitPrice)
+		if productID != nil && *productID != uuid.Nil && restoreOutlet != uuid.Nil {
+			updateInventoryStock(userID, *productID, restoreOutlet, "return", item.Quantity, item.UnitPrice, batchNo, nil, expDate)
 		}
 	}
 
