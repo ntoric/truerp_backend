@@ -28,28 +28,30 @@ type BarcodeLabelSize struct {
 }
 
 var barcodeLabelSizes = map[string]BarcodeLabelSize{
+	// Name / MRP / sale price share NameFontPx (a bit larger than barcode digits).
+	// MetaFontPx = barcode number text; PriceFontPx kept equal to NameFontPx.
 	"1inch": {
 		Key: "1inch", Label: "1 Inch (25mm)",
 		WidthMM: 25.4, HeightMM: 15,
-		NameFontPx: 7, SkuFontPx: 6, PriceFontPx: 8, MetaFontPx: 5.5,
+		NameFontPx: 7, SkuFontPx: 6, PriceFontPx: 7, MetaFontPx: 5.5,
 		BarcodeH: 18, BarcodeW: 1, PaddingMM: 0.8,
 	},
 	"1.5inch": {
 		Key: "1.5inch", Label: "1.5 Inch (38mm)",
 		WidthMM: 38.1, HeightMM: 25,
-		NameFontPx: 9, SkuFontPx: 7, PriceFontPx: 11, MetaFontPx: 7,
+		NameFontPx: 8, SkuFontPx: 7, PriceFontPx: 8, MetaFontPx: 6.5,
 		BarcodeH: 28, BarcodeW: 1.2, PaddingMM: 1.2,
 	},
 	"2inch": {
 		Key: "2inch", Label: "2 Inch (51mm)",
 		WidthMM: 50.8, HeightMM: 30,
-		NameFontPx: 11, SkuFontPx: 8, PriceFontPx: 13, MetaFontPx: 8,
+		NameFontPx: 9, SkuFontPx: 8, PriceFontPx: 9, MetaFontPx: 7.5,
 		BarcodeH: 36, BarcodeW: 1.4, PaddingMM: 1.5,
 	},
 	"3inch": {
 		Key: "3inch", Label: "3 Inch (76mm)",
 		WidthMM: 76.2, HeightMM: 50,
-		NameFontPx: 14, SkuFontPx: 10, PriceFontPx: 16, MetaFontPx: 10,
+		NameFontPx: 11, SkuFontPx: 9, PriceFontPx: 11, MetaFontPx: 9,
 		BarcodeH: 48, BarcodeW: 1.6, PaddingMM: 2,
 	},
 }
@@ -191,10 +193,17 @@ type BarcodeLabelsResponse struct {
 }
 
 func barcodeLabelPageCSS(size BarcodeLabelSize) string {
-	// Slightly larger “normal” name than the old bold compact sizes.
-	namePx := size.NameFontPx
-	if namePx < 9 {
-		namePx = 9
+	// Name, MRP, and sale price share one size — a bit larger than barcode digits.
+	bodyPx := size.NameFontPx
+	if bodyPx < size.PriceFontPx {
+		bodyPx = size.PriceFontPx
+	}
+	codePx := size.MetaFontPx
+	if codePx <= 0 || codePx >= bodyPx {
+		codePx = bodyPx - 1.5
+		if codePx < 5 {
+			codePx = 5
+		}
 	}
 	barcodeMaxH := size.HeightMM * 0.42
 	if barcodeMaxH < 6 {
@@ -290,8 +299,9 @@ body {
 	flex-direction: row;
 	align-items: baseline;
 	justify-content: space-between;
-	gap: 1mm;
+	gap: 1.5mm;
 	margin: 0;
+	min-width: 0;
 }
 .product-mrp, .product-sku {
 	font-size: %.1fpx;
@@ -299,9 +309,11 @@ body {
 	line-height: 1.1;
 	margin: 0;
 	text-align: left;
-	flex: 1 1 auto;
+	flex: 1 1 50%%;
 	min-width: 0;
-	word-break: break-word;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 .product-price {
 	font-size: %.1fpx;
@@ -309,7 +321,10 @@ body {
 	line-height: 1.1;
 	margin: 0;
 	text-align: right;
-	flex: 0 0 auto;
+	flex: 0 1 50%%;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 @media print {
@@ -326,7 +341,7 @@ body {
 }
 `, size.WidthMM, size.HeightMM, size.WidthMM,
 		size.WidthMM, size.HeightMM, size.WidthMM, size.HeightMM, size.PaddingMM,
-		namePx, barcodeMaxH, size.MetaFontPx, size.MetaFontPx, size.PriceFontPx,
+		bodyPx, barcodeMaxH, codePx, bodyPx, bodyPx,
 		size.WidthMM, size.WidthMM, size.HeightMM)
 }
 
