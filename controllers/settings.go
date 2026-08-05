@@ -108,6 +108,98 @@ func UpdateInvoiceSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, settings)
 }
 
+// printSettingsPayload is PrintSettings plus A4 barcode label layout (stored on Business).
+type printSettingsPayload struct {
+	models.PrintSettings
+	LabelPaperSize string  `json:"label_paper_size"`
+	LabelWidthMM   float64 `json:"label_width_mm"`
+	LabelHeightMM  float64 `json:"label_height_mm"`
+	LabelColumns   int     `json:"label_columns"`
+	LabelRows      int     `json:"label_rows"`
+	LabelMarginMM  float64 `json:"label_margin_mm"`
+}
+
+func defaultLabelLayout() (paperSize string, widthMM, heightMM float64, columns, rows int, marginMM float64) {
+	return "A4", 50, 30, 3, 8, 10
+}
+
+func loadLabelLayout(userID uuid.UUID) (paperSize string, widthMM, heightMM float64, columns, rows int, marginMM float64) {
+	paperSize, widthMM, heightMM, columns, rows, marginMM = defaultLabelLayout()
+	var business models.Business
+	if err := utils.DB.Where("user_id = ?", userID).First(&business).Error; err != nil {
+		return
+	}
+	if business.LabelPaperSize != "" {
+		paperSize = business.LabelPaperSize
+	}
+	if business.LabelWidthMM > 0 {
+		widthMM = business.LabelWidthMM
+	}
+	if business.LabelHeightMM > 0 {
+		heightMM = business.LabelHeightMM
+	}
+	if business.LabelColumns > 0 {
+		columns = business.LabelColumns
+	}
+	if business.LabelRows > 0 {
+		rows = business.LabelRows
+	}
+	if business.LabelMarginMM >= 0 {
+		marginMM = business.LabelMarginMM
+	}
+	return
+}
+
+func normalizeLabelLayout(p *printSettingsPayload) {
+	defPaper, defW, defH, defCols, defRows, defMargin := defaultLabelLayout()
+	if p.LabelPaperSize == "" {
+		p.LabelPaperSize = defPaper
+	}
+	if p.LabelWidthMM < 10 || p.LabelWidthMM > 200 {
+		p.LabelWidthMM = defW
+	}
+	if p.LabelHeightMM < 10 || p.LabelHeightMM > 200 {
+		p.LabelHeightMM = defH
+	}
+	if p.LabelColumns < 1 || p.LabelColumns > 5 {
+		p.LabelColumns = defCols
+	}
+	if p.LabelRows < 1 || p.LabelRows > 20 {
+		p.LabelRows = defRows
+	}
+	if p.LabelMarginMM < 0 || p.LabelMarginMM > 50 {
+		p.LabelMarginMM = defMargin
+	}
+}
+
+func saveLabelLayout(userID uuid.UUID, p printSettingsPayload) error {
+	business, err := ensureBusinessForUser(userID)
+	if err != nil {
+		return err
+	}
+	return utils.DB.Model(&business).Updates(map[string]interface{}{
+		"label_paper_size": p.LabelPaperSize,
+		"label_width_mm":   p.LabelWidthMM,
+		"label_height_mm":  p.LabelHeightMM,
+		"label_columns":    p.LabelColumns,
+		"label_rows":       p.LabelRows,
+		"label_margin_mm":  p.LabelMarginMM,
+	}).Error
+}
+
+func toPrintSettingsPayload(settings models.PrintSettings, userID uuid.UUID) printSettingsPayload {
+	paper, w, h, cols, rows, margin := loadLabelLayout(userID)
+	return printSettingsPayload{
+		PrintSettings:  settings,
+		LabelPaperSize: paper,
+		LabelWidthMM:   w,
+		LabelHeightMM:  h,
+		LabelColumns:   cols,
+		LabelRows:      rows,
+		LabelMarginMM:  margin,
+	}
+}
+
 // Print Settings Controllers
 func GetPrintSettings(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
@@ -116,12 +208,12 @@ func GetPrintSettings(c *gin.Context) {
 	if err := utils.DB.Where("user_id = ?", userID).First(&settings).Error; err != nil {
 		// Return default settings if not found
 		defaultSettings := defaultPrintSettings(userID)
-		c.JSON(http.StatusOK, defaultSettings)
+		c.JSON(http.StatusOK, toPrintSettingsPayload(defaultSettings, userID))
 		return
 	}
 
 	normalizePrintSettings(&settings)
-	c.JSON(http.StatusOK, settings)
+	c.JSON(http.StatusOK, toPrintSettingsPayload(settings, userID))
 }
 
 func defaultPrintSettings(userID uuid.UUID) models.PrintSettings {
@@ -179,13 +271,14 @@ func loadPrintSettings(userID uuid.UUID) models.PrintSettings {
 func UpdatePrintSettings(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
-	var input models.PrintSettings
+	var input printSettingsPayload
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	normalizePrintSettings(&input)
+	normalizePrintSettings(&input.PrintSettings)
+	normalizeLabelLayout(&input)
 
 	var settings models.PrintSettings
 	if err := utils.DB.Where("user_id = ?", userID).First(&settings).Error; err != nil {
@@ -239,8 +332,13 @@ func UpdatePrintSettings(c *gin.Context) {
 		}
 	}
 
+	if err := saveLabelLayout(userID, input); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update label layout settings"})
+		return
+	}
+
 	normalizePrintSettings(&settings)
-	c.JSON(http.StatusOK, settings)
+	c.JSON(http.StatusOK, toPrintSettingsPayload(settings, userID))
 }
 
 func defaultWeighingScaleSettings(userID uuid.UUID) models.WeighingScaleSettings {
@@ -312,6 +410,8 @@ func UpdateWeighingScaleSettings(c *gin.Context) {
 	}
 
 	extraFieldsJSON := normalizeCsvExtraFieldsJSON(input.CsvExtraFields)
+	input.BarcodePluDigits = clampInt(input.BarcodePluDigits, 3, 5)
+	input.BarcodePayloadDigits = clampInt(input.BarcodePayloadDigits, 3, 8)
 
 	var settings models.WeighingScaleSettings
 	if err := utils.DB.Where("user_id = ?", userID).First(&settings).Error; err != nil {
@@ -537,6 +637,16 @@ func normalizeBarcodePrefix(prefix string) string {
 		return "w"
 	}
 	return trimmed
+}
+
+func clampInt(value, min, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 // Reminders Controllers

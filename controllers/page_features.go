@@ -43,10 +43,13 @@ var defaultPageFeatureKeys = []string{
 	"/email-marketing",
 	"/whatsapp-marketing",
 	"/loyalty",
+	"/stores",
 	"/user-management",
 	"/audit",
 	"/notifications",
 	"/customer-portal",
+	"/settings/reminders",
+	"/settings/ca-share",
 }
 
 func defaultPageFeatures() map[string]bool {

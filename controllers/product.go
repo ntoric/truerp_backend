@@ -16,6 +16,28 @@ import (
 	"github.com/tealeg/xlsx/v3"
 )
 
+const weighingItemCodeMaxLen = 5
+
+func isWeightBasedUnit(unit string) bool {
+	switch strings.ToUpper(strings.TrimSpace(unit)) {
+	case "KG", "GM", "G", "GRAM", "KGS", "KILOGRAM", "KILOGRAMS":
+		return true
+	default:
+		return false
+	}
+}
+
+func weighingItemCodeFieldError(unit, itemCode string) string {
+	code := strings.TrimSpace(itemCode)
+	if !isWeightBasedUnit(unit) || code == "" {
+		return ""
+	}
+	if len(code) > weighingItemCodeMaxLen {
+		return fmt.Sprintf("Item code for weighing items must be at most %d characters", weighingItemCodeMaxLen)
+	}
+	return ""
+}
+
 func GetProducts(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
@@ -85,6 +107,14 @@ func CreateProduct(c *gin.Context) {
 		return
 	}
 
+	if msg := weighingItemCodeFieldError(input.Product.Unit, input.Product.ItemCode); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":  msg,
+			"fields": gin.H{"item_code": msg},
+		})
+		return
+	}
+
 	input.Product.ID = uuid.New()
 	input.Product.UserID = userID
 	input.Product.Category = utils.ResolveCategoryName(input.Product.Category)
@@ -98,15 +128,22 @@ func CreateProduct(c *gin.Context) {
 		}
 	}
 
-	// Check if SKU already exists for this user
-	if input.Product.SKU != "" {
+	input.Product.SKU = strings.TrimSpace(input.Product.SKU)
+	if input.Product.SKU == "" {
+		input.Product.SKU = utils.GenerateUniqueProductSKU(input.Product.Name)
+	} else {
 		var existingProduct models.Product
-		if err := utils.DB.Where("user_id = ? AND sku = ?", userID, input.Product.SKU).First(&existingProduct).Error; err == nil {
-			c.JSON(http.StatusConflict, gin.H{
-				"error":  "A product with this SKU already exists",
-				"fields": gin.H{"sku": "This SKU is already in use"},
-			})
-			return
+		if err := utils.DB.Where("sku = ?", input.Product.SKU).First(&existingProduct).Error; err == nil {
+			// Name-derived SKU already taken — append random digits instead of failing
+			if input.Product.SKU == utils.SKUFromName(input.Product.Name) {
+				input.Product.SKU = utils.GenerateUniqueProductSKU(input.Product.Name)
+			} else {
+				c.JSON(http.StatusConflict, gin.H{
+					"error":  "A product with this SKU already exists",
+					"fields": gin.H{"sku": "This SKU is already in use"},
+				})
+				return
+			}
 		}
 	}
 
@@ -229,6 +266,22 @@ func UpdateProduct(c *gin.Context) {
 	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).First(&product).Error; err != nil {
 		fmt.Printf("[DEBUG] UpdateProduct - Product not found: %v\n", err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Product not found"})
+		return
+	}
+
+	unit := product.Unit
+	if strings.TrimSpace(input.Product.Unit) != "" {
+		unit = input.Product.Unit
+	}
+	itemCode := product.ItemCode
+	if input.Product.ItemCode != "" {
+		itemCode = input.Product.ItemCode
+	}
+	if msg := weighingItemCodeFieldError(unit, itemCode); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":  msg,
+			"fields": gin.H{"item_code": msg},
+		})
 		return
 	}
 
@@ -804,6 +857,11 @@ func ImportProductsCSV(c *gin.Context) {
 			continue
 		}
 
+		product.SKU = strings.TrimSpace(product.SKU)
+		if product.SKU == "" {
+			product.SKU = utils.GenerateUniqueProductSKU(product.Name)
+		}
+
 		if err := utils.DB.Create(&product).Error; err != nil {
 			errors = append(errors, fmt.Sprintf("Row %d: %v", i+2, err))
 			continue
@@ -900,6 +958,11 @@ func ImportProductsExcel(c *gin.Context) {
 		if product.Name == "" {
 			errors = append(errors, fmt.Sprintf("Row %d: Name is required", i+1))
 			continue
+		}
+
+		product.SKU = strings.TrimSpace(product.SKU)
+		if product.SKU == "" {
+			product.SKU = utils.GenerateUniqueProductSKU(product.Name)
 		}
 
 		if err := utils.DB.Create(&product).Error; err != nil {
