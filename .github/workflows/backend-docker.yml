@@ -1,5 +1,20 @@
 name: Backend Docker
 
+# CI: build & push image to Docker Hub on semver tags (v1.2.3).
+# CD: SSH to the VPS, pull the new tag, recreate the container, health-check.
+#
+# Required repository secrets:
+#   DOCKERHUB_USERNAME   Docker Hub user that owns the image
+#   DOCKERHUB_TOKEN      Docker Hub access token (push + optional server pull)
+#   DEPLOY_HOST          Server hostname or IP (e.g. truerp-backend.ntoric.com)
+#   DEPLOY_USER          SSH user on the server (e.g. deploy)
+#   DEPLOY_SSH_KEY       Private key for DEPLOY_USER (full PEM contents)
+#   DEPLOY_PATH          Absolute path to the folder with prod-compose.yml
+# Optional:
+#   DEPLOY_PORT          SSH port (default 22)
+#   DEPLOY_HEALTH_URL    Override health URL after deploy
+#                        (default: http://127.0.0.1:8088/health on the server)
+
 on:
   push:
     tags:
@@ -8,15 +23,29 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: backend-docker-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   IMAGE_NAME: truerp-api
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve image version
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved IMAGE_TAG=${VERSION}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -47,3 +76,50 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # - name: Sync compose + deploy script to server
+      #   uses: appleboy/scp-action@v0.1.7
+      #   with:
+      #     host: ${{ secrets.DEPLOY_HOST }}
+      #     username: ${{ secrets.DEPLOY_USER }}
+      #     key: ${{ secrets.DEPLOY_SSH_KEY }}
+      #     port: ${{ secrets.DEPLOY_PORT || 22 }}
+      #     source: "prod-compose.yml,scripts/deploy.sh"
+      #     target: ${{ secrets.DEPLOY_PATH }}
+      #     overwrite: true
+
+      - name: Pull image and restart container
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.version }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DEPLOY_HEALTH_URL: ${{ secrets.DEPLOY_HEALTH_URL }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          envs: IMAGE_TAG,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,DEPLOY_HEALTH_URL
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.DEPLOY_PATH }}"
+            chmod +x scripts/deploy.sh
+
+            # Login when the image is private (harmless if public)
+            if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+              echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+            fi
+
+            if [ -n "${DEPLOY_HEALTH_URL:-}" ]; then
+              export HEALTH_URL="${DEPLOY_HEALTH_URL}"
+            fi
+
+            ./scripts/deploy.sh

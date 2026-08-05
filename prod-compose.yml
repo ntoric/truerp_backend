@@ -1,15 +1,22 @@
-# TruERP cloud API
+# TruERP cloud API — production
 #
-# From this repo:
+# Expected layout on the server (example):
+#   /opt/truerp-backend/
+#     prod-compose.yml
+#     .env                 # secrets (never commit)
+#     truerp-data/         # SQLite volume
+#     truerp-uploads/      # local uploads volume
+#
+# First-time / manual:
 #   cp .env.example .env   # edit secrets
-#   docker compose up --build
+#   docker compose -f prod-compose.yml pull
+#   docker compose -f prod-compose.yml up -d
+#
+# CD (GitHub Actions) runs scripts/deploy.sh after a successful image push.
 
 services:
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: ntoric/truerp-api:latest
+    image: ${DOCKERHUB_USERNAME:-ntoric}/truerp-api:${IMAGE_TAG:-latest}
     container_name: truerp-api
     ports:
       - "${API_PUBLISH_PORT:-8088}:8088"
@@ -23,7 +30,7 @@ services:
       STORAGE_TYPE: ${STORAGE_TYPE:-local}
       LOCAL_STORAGE_PATH: /app/uploads
       # Set to your public API URL so desktop clients can load uploaded assets:
-      # LOCAL_STORAGE_BASE_URL: https://api.example.com/uploads
+      # LOCAL_STORAGE_BASE_URL: https://truerp-backend.ntoric.com/uploads
       LOCAL_STORAGE_BASE_URL: ${LOCAL_STORAGE_BASE_URL:-/uploads}
       JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-string}
       SUPER_ADMIN_EMAIL: ${SUPER_ADMIN_EMAIL:-ntoric.com@gmail.com}
