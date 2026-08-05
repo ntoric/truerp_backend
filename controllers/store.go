@@ -80,6 +80,9 @@ func createStoreOwnerUser(tx *gorm.DB, storeName string) (models.User, error) {
 		return models.User{}, err
 	}
 	utils.EnsureDefaultRoles(tx, owner.ID)
+	if err := utils.EnsureDefaultCategories(tx, owner.ID); err != nil {
+		return models.User{}, err
+	}
 	return owner, nil
 }
 

@@ -47,7 +47,7 @@ func CreateExpense(c *gin.Context) {
 	}
 
 	var input struct {
-		Category           string               `json:"category" binding:"required"`
+		Category           string               `json:"category"`
 		Description         string               `json:"description"`
 		OriginalInvoiceNum  string               `json:"original_invoice_num"`
 		Date                time.Time            `json:"date" binding:"required"`
@@ -63,6 +63,9 @@ func CreateExpense(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	input.Category = utils.ResolveCategoryName(input.Category)
+	_ = utils.EnsureDefaultCategories(utils.DB, userID)
 
 	// Generate expense number
 	var count int64
@@ -173,6 +176,9 @@ func UpdateExpense(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Expense not found"})
 		return
 	}
+
+	input.Category = utils.ResolveCategoryName(input.Category)
+	_ = utils.EnsureDefaultCategories(utils.DB, userID)
 
 	if err := utils.DB.Model(&expense).Updates(map[string]interface{}{
 		"category":     input.Category,

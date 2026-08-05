@@ -971,15 +971,15 @@ func DownloadPurchaseBillPDF(c *gin.Context) {
 	pdf.Ln(8)
 	pdf.SetFont("Arial", "", 12)
 	pdf.SetTextColor(100, 100, 100)
-	pdf.Cell(0, 6, bill.BillNumber)
+	pdf.Cell(0, 6, sanitizePDFText(bill.BillNumber))
 	pdf.Ln(12)
 
 	// Status
 	pdf.SetFont("Arial", "B", 10)
 	statusColors := map[string][3]int{
-		"paid":     {6, 95, 70},
-		"unpaid":   {153, 27, 27},
-		"partial":  {146, 64, 14},
+		"paid":    {6, 95, 70},
+		"unpaid":  {153, 27, 27},
+		"partial": {146, 64, 14},
 	}
 	color := statusColors[bill.Status]
 	if color[0] == 0 && color[1] == 0 && color[2] == 0 {
@@ -1001,21 +1001,21 @@ func DownloadPurchaseBillPDF(c *gin.Context) {
 	pdf.SetX(14)
 	pdf.SetFont("Arial", "B", 11)
 	pdf.SetTextColor(30, 30, 30)
-	pdf.Cell(0, 6, bill.Party.Name)
+	pdf.Cell(0, 6, sanitizePDFText(bill.Party.Name))
 	pdf.Ln(5)
 	pdf.SetX(14)
 	pdf.SetFont("Arial", "", 10)
 	pdf.SetTextColor(80, 80, 80)
 	if bill.Party.Address != "" {
-		pdf.Cell(0, 5, bill.Party.Address)
+		pdf.Cell(0, 5, sanitizePDFText(bill.Party.Address))
 		pdf.Ln(5)
 		pdf.SetX(14)
 	}
 	cityState := fmt.Sprintf("%s, %s - %s", bill.Party.City, bill.Party.State, bill.Party.Pincode)
-	pdf.Cell(0, 5, cityState)
+	pdf.Cell(0, 5, sanitizePDFText(cityState))
 	pdf.Ln(5)
 	pdf.SetX(14)
-	pdf.Cell(0, 5, "GSTIN: "+bill.Party.GSTIN)
+	pdf.Cell(0, 5, "GSTIN: "+sanitizePDFText(bill.Party.GSTIN))
 	pdf.Ln(20)
 
 	// Invoice Details
@@ -1071,9 +1071,9 @@ func DownloadPurchaseBillPDF(c *gin.Context) {
 		rowY := pdf.GetY()
 		pdf.Rect(10, rowY, 190, 7, "D")
 		pdf.SetXY(10, rowY+2)
-		pdf.Cell(70, 3, item.Description)
+		pdf.Cell(70, 3, sanitizePDFText(item.Description))
 		pdf.Cell(20, 3, fmt.Sprintf("%.2f", item.Quantity))
-		pdf.Cell(20, 3, item.Unit)
+		pdf.Cell(20, 3, sanitizePDFText(item.Unit))
 		pdf.Cell(25, 3, fmt.Sprintf("Rs. %.2f", item.UnitPrice))
 		pdf.Cell(25, 3, fmt.Sprintf("%.2f%%", item.TaxRate))
 		pdf.Cell(30, 3, fmt.Sprintf("Rs. %.2f", item.Total))
@@ -1113,7 +1113,7 @@ func DownloadPurchaseBillPDF(c *gin.Context) {
 		pdf.Ln(6)
 		pdf.SetFont("Arial", "", 9)
 		pdf.SetTextColor(100, 100, 100)
-		pdf.MultiCell(190, 5, bill.Notes, "", "L", false)
+		pdf.MultiCell(190, 5, sanitizePDFText(bill.Notes), "", "L", false)
 	}
 
 	// Footer
@@ -1122,9 +1122,15 @@ func DownloadPurchaseBillPDF(c *gin.Context) {
 	pdf.SetTextColor(150, 150, 150)
 	pdf.Cell(0, 10, fmt.Sprintf("Generated on %s", time.Now().Format("02-01-2006 03:04 PM")))
 
+	var buf bytes.Buffer
+	if err := pdf.Output(&buf); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate purchase invoice PDF"})
+		return
+	}
+
 	c.Header("Content-Type", "application/pdf")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"Purchase_Invoice_%s.pdf\"", bill.BillNumber))
-	pdf.Output(c.Writer)
+	c.Data(http.StatusOK, "application/pdf", buf.Bytes())
 }
 
 type LabelConfig struct {

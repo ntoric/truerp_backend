@@ -31,6 +31,9 @@ func EnsureDefaultSuperAdmin() {
 		if _, err := ensureBusinessForUser(existing.ID); err != nil {
 			log.Printf("Default super admin bootstrap: failed to ensure business: %v", err)
 		}
+		if err := utils.EnsureDefaultCategories(utils.DB, existing.ID); err != nil {
+			log.Printf("Default super admin bootstrap: failed to seed categories: %v", err)
+		}
 		return
 	} else if err != gorm.ErrRecordNotFound {
 		log.Printf("Default super admin bootstrap: database error: %v", err)
@@ -78,6 +81,9 @@ func EnsureDefaultSuperAdmin() {
 	}
 
 	utils.EnsureDefaultRoles(utils.DB, user.ID)
+	if err := utils.EnsureDefaultCategories(utils.DB, user.ID); err != nil {
+		log.Printf("Default super admin bootstrap: failed to seed categories: %v", err)
+	}
 
 	log.Printf("Default super admin account ready for %s", email)
 }

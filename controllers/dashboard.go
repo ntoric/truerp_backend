@@ -55,7 +55,11 @@ func GetDashboardStats(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 	start, end, filterDates := parseDashboardPeriod(c)
 
+	// Keep overdue status in sync before snapshot metrics
+	syncOverdueInvoices(userID)
+
 	var stats models.DashboardStats
+	unpaidStatuses := []string{"sent", "partial", "overdue"}
 
 	salesQuery := utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status = ?", userID, "paid")
 	invoiceQuery := utils.DB.Model(&models.Invoice{}).Where("user_id = ?", userID)
@@ -67,16 +71,34 @@ func GetDashboardStats(c *gin.Context) {
 	invoiceQuery.Count(&stats.TotalInvoices)
 
 	utils.DB.Model(&models.Party{}).Where("user_id = ?", userID).Count(&stats.TotalParties)
+	utils.DB.Model(&models.Party{}).Where("user_id = ? AND party_type = ?", userID, "customer").Count(&stats.TotalCustomers)
 
-	// Pending amount (unpaid invoices) — current snapshot, not period-filtered
-	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status IN ?", userID, []string{"sent", "overdue"}).Select("COALESCE(SUM(total_amount - amount_paid), 0)").Scan(&stats.PendingAmount)
+	// Catalog snapshot — same scope as GET /products (user_id, GORM soft-delete)
+	utils.DB.Model(&models.Product{}).Where("user_id = ?", userID).Count(&stats.TotalProducts)
+
+	lowStockQuery := `
+		SELECT COUNT(DISTINCT p.id)
+		FROM products p
+		INNER JOIN inventory_stocks s ON p.id = s.product_id
+		WHERE p.user_id = ? AND p.deleted_at IS NULL AND p.low_stock_alert = true AND s.quantity <= p.min_stock
+	`
+	utils.DB.Raw(lowStockQuery, userID).Scan(&stats.LowStockProducts)
+
+	// Pending receivables — issued invoices with remaining balance (excludes drafts/cancelled/paid)
+	utils.DB.Model(&models.Invoice{}).
+		Where("user_id = ? AND status IN ? AND total_amount > amount_paid", userID, unpaidStatuses).
+		Select("COALESCE(SUM(total_amount - amount_paid), 0)").
+		Scan(&stats.PendingAmount)
 
 	// Period paid sales and invoice count (mirrors filtered totals for dashboard cards)
 	stats.TodaySales = stats.TotalSales
 	stats.TodayInvoices = stats.TotalInvoices
 
-	// Overdue invoices — current snapshot
-	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status = ? AND due_date < ?", userID, "sent", time.Now()).Count(&stats.OverdueInvoices)
+	// Overdue — unpaid issued invoices past due (includes status=overdue and past-due partial/sent)
+	utils.DB.Model(&models.Invoice{}).
+		Where("user_id = ? AND status IN ? AND due_date IS NOT NULL AND due_date < ? AND total_amount > amount_paid",
+			userID, unpaidStatuses, time.Now()).
+		Count(&stats.OverdueInvoices)
 
 	c.JSON(http.StatusOK, stats)
 }

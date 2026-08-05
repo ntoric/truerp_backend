@@ -87,6 +87,8 @@ func CreateProduct(c *gin.Context) {
 
 	input.Product.ID = uuid.New()
 	input.Product.UserID = userID
+	input.Product.Category = utils.ResolveCategoryName(input.Product.Category)
+	_ = utils.EnsureDefaultCategories(utils.DB, userID)
 
 	// Auto-populate tax rate from HSN code if not provided
 	if input.Product.HSNCode != "" && input.Product.TaxRate == 0 {
@@ -737,6 +739,7 @@ body {
 
 func ImportProductsCSV(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
+	_ = utils.EnsureDefaultCategories(utils.DB, userID)
 
 	file, err := c.FormFile("file")
 	if err != nil {
@@ -779,7 +782,7 @@ func ImportProductsCSV(c *gin.Context) {
 			Name:     getCSVValue(record, headers, "Name"),
 			SKU:      getCSVValue(record, headers, "SKU"),
 			ItemCode: firstCSVValue(record, headers, "Item Code", "Itemcode", "Barcode"),
-			Category: getCSVValue(record, headers, "Category"),
+			Category: utils.ResolveCategoryName(getCSVValue(record, headers, "Category")),
 			Unit:     getCSVValue(record, headers, "Unit"),
 			HSNCode:  getCSVValue(record, headers, "HSN Code"),
 		}
@@ -817,6 +820,7 @@ func ImportProductsCSV(c *gin.Context) {
 
 func ImportProductsExcel(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
+	_ = utils.EnsureDefaultCategories(utils.DB, userID)
 
 	file, err := c.FormFile("file")
 	if err != nil {
@@ -876,7 +880,7 @@ func ImportProductsExcel(c *gin.Context) {
 			Name:     getExcelValue(row, headers, "Name"),
 			SKU:      getExcelValue(row, headers, "SKU"),
 			ItemCode: firstExcelValue(row, headers, "Item Code", "Itemcode", "Barcode"),
-			Category: getExcelValue(row, headers, "Category"),
+			Category: utils.ResolveCategoryName(getExcelValue(row, headers, "Category")),
 			Unit:     getExcelValue(row, headers, "Unit"),
 			HSNCode:  getExcelValue(row, headers, "HSN Code"),
 		}

@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -264,12 +265,14 @@ func defaultWeighingScaleSettings(userID uuid.UUID) models.WeighingScaleSettings
 		CsvImportEnabled:       true,
 		CsvHasHeader:           true,
 		CsvDelimiter:           ",",
-		CsvItemMatchField:      "auto",
+		CsvItemMatchField:      "item_code",
 		CsvItemCodeColumn:      "",
+		CsvSlugColumn:          "",
 		CsvNameColumn:          "",
 		CsvUnitColumn:          "",
 		CsvPriceColumn:         "",
 		CsvExportWeightItemsOnly: true,
+		CsvExtraFields:         "[]",
 		BarcodeScanEnabled:     true,
 		BarcodePrefix:          "w",
 		BarcodePrefixStart:     20,
@@ -285,25 +288,30 @@ func GetWeighingScaleSettings(c *gin.Context) {
 
 	var settings models.WeighingScaleSettings
 	if err := utils.DB.Where("user_id = ?", userID).First(&settings).Error; err != nil {
-		c.JSON(http.StatusOK, defaultWeighingScaleSettings(userID))
+		c.JSON(http.StatusOK, weighingScaleSettingsResponse(defaultWeighingScaleSettings(userID)))
 		return
 	}
 
 	if strings.TrimSpace(settings.BarcodePrefix) == "" {
 		settings.BarcodePrefix = "w"
 	}
+	if strings.TrimSpace(settings.CsvExtraFields) == "" {
+		settings.CsvExtraFields = "[]"
+	}
 
-	c.JSON(http.StatusOK, settings)
+	c.JSON(http.StatusOK, weighingScaleSettingsResponse(settings))
 }
 
 func UpdateWeighingScaleSettings(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
-	var input models.WeighingScaleSettings
+	var input weighingScaleSettingsInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	extraFieldsJSON := normalizeCsvExtraFieldsJSON(input.CsvExtraFields)
 
 	var settings models.WeighingScaleSettings
 	if err := utils.DB.Where("user_id = ?", userID).First(&settings).Error; err != nil {
@@ -328,6 +336,7 @@ func UpdateWeighingScaleSettings(c *gin.Context) {
 		settings.CsvDelimiter = input.CsvDelimiter
 		settings.CsvItemMatchField = input.CsvItemMatchField
 		settings.CsvItemCodeColumn = input.CsvItemCodeColumn
+		settings.CsvSlugColumn = input.CsvSlugColumn
 		settings.CsvNameColumn = input.CsvNameColumn
 		settings.CsvUnitColumn = input.CsvUnitColumn
 		settings.CsvPriceColumn = input.CsvPriceColumn
@@ -335,6 +344,7 @@ func UpdateWeighingScaleSettings(c *gin.Context) {
 			settings.CsvPriceColumn = input.CsvWeightColumn
 		}
 		settings.CsvExportWeightItemsOnly = input.CsvExportWeightItemsOnly
+		settings.CsvExtraFields = extraFieldsJSON
 		settings.BarcodeScanEnabled = input.BarcodeScanEnabled
 		settings.BarcodePrefix = normalizeBarcodePrefix(input.BarcodePrefix)
 		settings.BarcodePrefixStart = input.BarcodePrefixStart
@@ -348,45 +358,177 @@ func UpdateWeighingScaleSettings(c *gin.Context) {
 		}
 	} else {
 		if err := utils.DB.Model(&settings).Updates(map[string]interface{}{
-			"enabled":                    input.Enabled,
-			"connection":                 input.Connection,
-			"protocol":                   input.Protocol,
-			"baud_rate":                  input.BaudRate,
-			"data_bits":                  input.DataBits,
-			"stop_bits":                  input.StopBits,
-			"parity":                     input.Parity,
-			"scale_weight_unit":          input.ScaleWeightUnit,
-			"decimal_places":             input.DecimalPlaces,
-			"min_weight":                 input.MinWeight,
-			"tare_weight":                input.TareWeight,
-			"stable_readings_required":   input.StableReadingsRequired,
-			"require_stable_weight":      input.RequireStableWeight,
-			"auto_apply_on_pos":          input.AutoApplyOnPos,
-			"auto_apply_on_invoice":      input.AutoApplyOnInvoice,
-			"csv_import_enabled":         input.CsvImportEnabled,
-			"csv_has_header":             input.CsvHasHeader,
-			"csv_delimiter":              input.CsvDelimiter,
-			"csv_item_match_field":       input.CsvItemMatchField,
-			"csv_item_code_column":       input.CsvItemCodeColumn,
-			"csv_name_column":            input.CsvNameColumn,
-			"csv_unit_column":            input.CsvUnitColumn,
-			"csv_price_column":           input.CsvPriceColumn,
+			"enabled":                      input.Enabled,
+			"connection":                   input.Connection,
+			"protocol":                     input.Protocol,
+			"baud_rate":                    input.BaudRate,
+			"data_bits":                    input.DataBits,
+			"stop_bits":                    input.StopBits,
+			"parity":                       input.Parity,
+			"scale_weight_unit":            input.ScaleWeightUnit,
+			"decimal_places":               input.DecimalPlaces,
+			"min_weight":                   input.MinWeight,
+			"tare_weight":                  input.TareWeight,
+			"stable_readings_required":     input.StableReadingsRequired,
+			"require_stable_weight":        input.RequireStableWeight,
+			"auto_apply_on_pos":            input.AutoApplyOnPos,
+			"auto_apply_on_invoice":        input.AutoApplyOnInvoice,
+			"csv_import_enabled":           input.CsvImportEnabled,
+			"csv_has_header":               input.CsvHasHeader,
+			"csv_delimiter":                input.CsvDelimiter,
+			"csv_item_match_field":         input.CsvItemMatchField,
+			"csv_item_code_column":         input.CsvItemCodeColumn,
+			"csv_slug_column":              input.CsvSlugColumn,
+			"csv_name_column":              input.CsvNameColumn,
+			"csv_unit_column":              input.CsvUnitColumn,
+			"csv_price_column":             input.CsvPriceColumn,
 			"csv_export_weight_items_only": input.CsvExportWeightItemsOnly,
-			"barcode_scan_enabled":       input.BarcodeScanEnabled,
-			"barcode_prefix":             normalizeBarcodePrefix(input.BarcodePrefix),
-			"barcode_prefix_start":       input.BarcodePrefixStart,
-			"barcode_prefix_end":         input.BarcodePrefixEnd,
-			"barcode_plu_digits":         input.BarcodePluDigits,
-			"barcode_payload_digits":     input.BarcodePayloadDigits,
-			"barcode_payload_type":       input.BarcodePayloadType,
+			"csv_extra_fields":             extraFieldsJSON,
+			"barcode_scan_enabled":         input.BarcodeScanEnabled,
+			"barcode_prefix":               normalizeBarcodePrefix(input.BarcodePrefix),
+			"barcode_prefix_start":         input.BarcodePrefixStart,
+			"barcode_prefix_end":           input.BarcodePrefixEnd,
+			"barcode_plu_digits":           input.BarcodePluDigits,
+			"barcode_payload_digits":       input.BarcodePayloadDigits,
+			"barcode_payload_type":         input.BarcodePayloadType,
 		}).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update weighing scale settings"})
 			return
 		}
-		settings.BarcodePrefix = normalizeBarcodePrefix(input.BarcodePrefix)
+		if err := utils.DB.Where("user_id = ?", userID).First(&settings).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load weighing scale settings"})
+			return
+		}
 	}
 
-	c.JSON(http.StatusOK, settings)
+	c.JSON(http.StatusOK, weighingScaleSettingsResponse(settings))
+}
+
+type weighingScaleSettingsInput struct {
+	Enabled                  bool            `json:"enabled"`
+	Connection               string          `json:"connection"`
+	Protocol                 string          `json:"protocol"`
+	BaudRate                 int             `json:"baud_rate"`
+	DataBits                 int             `json:"data_bits"`
+	StopBits                 int             `json:"stop_bits"`
+	Parity                   string          `json:"parity"`
+	ScaleWeightUnit          string          `json:"scale_weight_unit"`
+	DecimalPlaces            int             `json:"decimal_places"`
+	MinWeight                float64         `json:"min_weight"`
+	TareWeight               float64         `json:"tare_weight"`
+	StableReadingsRequired   int             `json:"stable_readings_required"`
+	RequireStableWeight      bool            `json:"require_stable_weight"`
+	AutoApplyOnPos           bool            `json:"auto_apply_on_pos"`
+	AutoApplyOnInvoice       bool            `json:"auto_apply_on_invoice"`
+	CsvImportEnabled         bool            `json:"csv_import_enabled"`
+	CsvHasHeader             bool            `json:"csv_has_header"`
+	CsvDelimiter             string          `json:"csv_delimiter"`
+	CsvItemMatchField        string          `json:"csv_item_match_field"`
+	CsvItemCodeColumn        string          `json:"csv_item_code_column"`
+	CsvSlugColumn            string          `json:"csv_slug_column"`
+	CsvNameColumn            string          `json:"csv_name_column"`
+	CsvUnitColumn            string          `json:"csv_unit_column"`
+	CsvPriceColumn           string          `json:"csv_price_column"`
+	CsvWeightColumn          string          `json:"csv_weight_column"`
+	CsvExportWeightItemsOnly bool            `json:"csv_export_weight_items_only"`
+	CsvExtraFields           json.RawMessage `json:"csv_extra_fields"`
+	BarcodeScanEnabled       bool            `json:"barcode_scan_enabled"`
+	BarcodePrefix            string          `json:"barcode_prefix"`
+	BarcodePrefixStart       int             `json:"barcode_prefix_start"`
+	BarcodePrefixEnd         int             `json:"barcode_prefix_end"`
+	BarcodePluDigits         int             `json:"barcode_plu_digits"`
+	BarcodePayloadDigits     int             `json:"barcode_payload_digits"`
+	BarcodePayloadType       string          `json:"barcode_payload_type"`
+}
+
+func normalizeCsvExtraFieldsJSON(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return "[]"
+	}
+	var asList []string
+	if err := json.Unmarshal(raw, &asList); err == nil {
+		out, err := json.Marshal(asList)
+		if err != nil {
+			return "[]"
+		}
+		return string(out)
+	}
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		trimmed := strings.TrimSpace(asString)
+		if trimmed == "" {
+			return "[]"
+		}
+		if json.Valid([]byte(trimmed)) {
+			return trimmed
+		}
+		parts := strings.Split(trimmed, ",")
+		clean := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				clean = append(clean, p)
+			}
+		}
+		out, err := json.Marshal(clean)
+		if err != nil {
+			return "[]"
+		}
+		return string(out)
+	}
+	return "[]"
+}
+
+func weighingScaleSettingsResponse(settings models.WeighingScaleSettings) gin.H {
+	var extraFields interface{} = []string{}
+	raw := strings.TrimSpace(settings.CsvExtraFields)
+	if raw == "" {
+		raw = "[]"
+	}
+	var parsed []string
+	if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
+		extraFields = parsed
+	}
+
+	return gin.H{
+		"id":                           settings.ID,
+		"user_id":                      settings.UserID,
+		"enabled":                      settings.Enabled,
+		"connection":                   settings.Connection,
+		"protocol":                     settings.Protocol,
+		"baud_rate":                    settings.BaudRate,
+		"data_bits":                    settings.DataBits,
+		"stop_bits":                    settings.StopBits,
+		"parity":                       settings.Parity,
+		"scale_weight_unit":            settings.ScaleWeightUnit,
+		"decimal_places":               settings.DecimalPlaces,
+		"min_weight":                   settings.MinWeight,
+		"tare_weight":                  settings.TareWeight,
+		"stable_readings_required":     settings.StableReadingsRequired,
+		"require_stable_weight":        settings.RequireStableWeight,
+		"auto_apply_on_pos":            settings.AutoApplyOnPos,
+		"auto_apply_on_invoice":        settings.AutoApplyOnInvoice,
+		"csv_import_enabled":           settings.CsvImportEnabled,
+		"csv_has_header":               settings.CsvHasHeader,
+		"csv_delimiter":                settings.CsvDelimiter,
+		"csv_item_match_field":         settings.CsvItemMatchField,
+		"csv_item_code_column":         settings.CsvItemCodeColumn,
+		"csv_slug_column":              settings.CsvSlugColumn,
+		"csv_name_column":              settings.CsvNameColumn,
+		"csv_unit_column":              settings.CsvUnitColumn,
+		"csv_price_column":             settings.CsvPriceColumn,
+		"csv_export_weight_items_only": settings.CsvExportWeightItemsOnly,
+		"csv_extra_fields":             extraFields,
+		"barcode_scan_enabled":         settings.BarcodeScanEnabled,
+		"barcode_prefix":               settings.BarcodePrefix,
+		"barcode_prefix_start":         settings.BarcodePrefixStart,
+		"barcode_prefix_end":           settings.BarcodePrefixEnd,
+		"barcode_plu_digits":           settings.BarcodePluDigits,
+		"barcode_payload_digits":       settings.BarcodePayloadDigits,
+		"barcode_payload_type":         settings.BarcodePayloadType,
+		"created_at":                   settings.CreatedAt,
+		"updated_at":                   settings.UpdatedAt,
+	}
 }
 
 func normalizeBarcodePrefix(prefix string) string {

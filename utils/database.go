@@ -188,6 +188,7 @@ func runRawMigrations(db *gorm.DB) {
 	migrateBarcodeColumnsToItemCode(db)
 	migratePayrollLabels(db)
 	backfillExpenseCategories(db)
+	SeedDefaultCategoriesForAllUsers(db)
 	migrateWarehouseCodeUnique(db)
 }
 

@@ -54,9 +54,9 @@ func GetReportWidgets(c *gin.Context) {
 	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status = ? AND date >= ?", userID, "paid", monthStart).
 		Select("COALESCE(SUM(total_amount), 0)").Scan(&w.MonthRevenue)
 
-	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status IN ? AND total_amount > amount_paid", userID, []string{"sent", "overdue", "draft"}).
+	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status IN ? AND total_amount > amount_paid", userID, []string{"sent", "partial", "overdue"}).
 		Select("COALESCE(SUM(total_amount - amount_paid), 0)").Scan(&w.OutstandingAmount)
-	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status IN ? AND total_amount > amount_paid", userID, []string{"sent", "overdue", "draft"}).
+	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status IN ? AND total_amount > amount_paid", userID, []string{"sent", "partial", "overdue"}).
 		Count(&w.OutstandingCount)
 
 	utils.DB.Model(&models.InventoryStock{}).Where("user_id = ?", userID).
@@ -367,8 +367,9 @@ func GetOutstandingInvoicesReport(c *gin.Context) {
 			(i.total_amount - i.amount_paid) as outstanding
 		FROM invoices i
 		INNER JOIN parties p ON p.id = i.party_id
-		WHERE i.user_id = ? AND i.status IN ('sent', 'overdue')
+		WHERE i.user_id = ? AND i.status IN ('sent', 'partial', 'overdue')
 			AND (i.total_amount - i.amount_paid) > 0
+			AND i.deleted_at IS NULL
 		ORDER BY i.due_date ASC, i.date DESC
 	`
 	if err := utils.DB.Raw(query, userID).Scan(&rows).Error; err != nil {

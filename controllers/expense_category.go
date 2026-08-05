@@ -13,6 +13,8 @@ func GetExpenseCategories(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 	active := c.Query("is_active")
 
+	_ = utils.EnsureDefaultCategories(utils.DB, userID)
+
 	var categories []models.ExpenseCategory
 	query := utils.DB.Where("user_id = ?", userID)
 

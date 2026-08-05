@@ -63,10 +63,10 @@ func SetupRoutes(r *gin.Engine) {
 		invoices.GET("/:id/attachments", controllers.GetInvoiceAttachments)
 		invoices.POST("/:id/attachments", controllers.UploadInvoiceAttachment)
 		invoices.DELETE("/:id/attachments/:attachmentId", controllers.DeleteInvoiceAttachment)
+		invoices.GET("/:id/pdf", controllers.GenerateInvoicePDF)
 		invoices.GET("/:id", controllers.GetInvoice)
 		invoices.PUT("/:id", controllers.UpdateInvoice)
 		invoices.DELETE("/:id", controllers.DeleteInvoice)
-		invoices.GET("/:id/pdf", controllers.GenerateInvoicePDF)
 	}
 
 	invoiceTemplates := r.Group("/api/v1/invoice-templates")

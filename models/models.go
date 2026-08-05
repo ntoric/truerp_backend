@@ -284,9 +284,12 @@ type DashboardStats struct {
 	TotalSales        float64 `json:"total_sales"`
 	TotalInvoices     int64   `json:"total_invoices"`
 	TotalParties      int64   `json:"total_parties"`
+	TotalCustomers    int64   `json:"total_customers"`
+	TotalProducts     int64   `json:"total_products"`
 	PendingAmount     float64 `json:"pending_amount"`
 	TodaySales        float64 `json:"today_sales"`
 	TodayInvoices     int64   `json:"today_invoices"`
+	LowStockProducts  int64   `json:"low_stock_products"`
 	OverdueInvoices   int64   `json:"overdue_invoices"`
 }
 
@@ -1091,12 +1094,15 @@ type WeighingScaleSettings struct {
 	CsvImportEnabled         bool           `json:"csv_import_enabled" gorm:"default:true"`
 	CsvHasHeader             bool           `json:"csv_has_header" gorm:"default:true"`
 	CsvDelimiter             string         `json:"csv_delimiter" gorm:"default:','"` // comma, semicolon, tab
-	CsvItemMatchField        string         `json:"csv_item_match_field" gorm:"default:'auto'"` // auto, sku, item_code
+	CsvItemMatchField        string         `json:"csv_item_match_field" gorm:"default:'item_code'"` // auto, sku, item_code
 	CsvItemCodeColumn        string         `json:"csv_item_code_column"`
+	CsvSlugColumn            string         `json:"csv_slug_column"`
 	CsvNameColumn            string         `json:"csv_name_column"`
 	CsvUnitColumn            string         `json:"csv_unit_column"`
 	CsvPriceColumn           string         `json:"csv_price_column"`
 	CsvExportWeightItemsOnly bool           `json:"csv_export_weight_items_only" gorm:"default:true"`
+	// CsvExtraFields is a JSON array of optional product field keys to append to scale catalog CSV.
+	CsvExtraFields           string         `json:"csv_extra_fields" gorm:"type:text;default:'[]'"`
 	CsvWeightColumn          string         `json:"csv_weight_column,omitempty"` // legacy DB column; use csv_price_column
 	BarcodeScanEnabled       bool           `json:"barcode_scan_enabled" gorm:"default:true"`
 	BarcodePrefix            string         `json:"barcode_prefix" gorm:"default:'w'"` // leading char(s), e.g. "w" → w0000112500

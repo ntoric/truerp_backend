@@ -665,8 +665,8 @@ func GetInvoiceStats(c *gin.Context) {
 		}).
 		Select("COALESCE(SUM(total_amount), 0)").Scan(&stats.Paid)
 
-	// Unpaid (draft, sent, overdue)
-	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status IN ?", userID, []string{"draft", "sent", "overdue"}).
+	// Unpaid (sent, partial, overdue — remaining balance on issued invoices)
+	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status IN ?", userID, []string{"sent", "partial", "overdue"}).
 		Scopes(func(db *gorm.DB) *gorm.DB {
 			if from := c.Query("from"); from != "" {
 				db = db.Where("date >= ?", from)
@@ -676,7 +676,7 @@ func GetInvoiceStats(c *gin.Context) {
 			}
 			return db
 		}).
-		Select("COALESCE(SUM(total_amount), 0)").Scan(&stats.Unpaid)
+		Select("COALESCE(SUM(total_amount - amount_paid), 0)").Scan(&stats.Unpaid)
 
 	// Cancelled
 	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status = ?", userID, "cancelled").

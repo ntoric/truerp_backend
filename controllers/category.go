@@ -17,6 +17,8 @@ func GetCategories(c *gin.Context) {
 
 	fmt.Printf("[DEBUG] GetCategories - UserID: %s, ParentID: %s, Active: %s\n", userID, parentID, active)
 
+	_ = utils.EnsureDefaultCategories(utils.DB, userID)
+
 	var categories []models.Category
 	query := utils.DB.Where("user_id = ?", userID)
 

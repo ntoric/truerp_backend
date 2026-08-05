@@ -283,6 +283,9 @@ func Register(c *gin.Context) {
 			return err
 		}
 		utils.EnsureDefaultRoles(tx, user.ID)
+		if err := utils.EnsureDefaultCategories(tx, user.ID); err != nil {
+			return err
+		}
 
 		code := utils.UniqueStoreCode(tx, utils.NormalizeStoreCode("", name+" Store"))
 		store = models.Store{
