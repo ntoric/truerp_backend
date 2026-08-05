@@ -617,7 +617,7 @@ func PrintProductLabel(c *gin.Context) {
 			SKU:     labelData.SKU,
 			Price:   labelData.SalePrice,
 		}
-		if !compact && labelData.MRP > 0 {
+		if labelData.MRP > 0 {
 			entry.MRP = labelData.MRP
 		}
 		labels := make([]BarcodeLabelItemJSON, 0, input.Quantity)

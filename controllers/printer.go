@@ -249,14 +249,14 @@ func GenerateDocumentPrint(c *gin.Context) {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate thermal print"})
 				return
 			}
-			pdfBytes, err := buildThermalReceiptPDF(content, width, logoURL)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to build thermal PDF page"})
-				return
+			// PDF is optional for thermal — desktop/browser print from text/ESC-POS.
+			pdfBase64 := ""
+			if pdfBytes, err := buildThermalReceiptPDF(content, width, logoURL); err == nil {
+				pdfBase64 = base64.StdEncoding.EncodeToString(pdfBytes)
 			}
 			c.JSON(http.StatusOK, DocumentPrintResponse{
 				Mode:        "thermal",
-				PDFBase64:   base64.StdEncoding.EncodeToString(pdfBytes),
+				PDFBase64:   pdfBase64,
 				ContentType: "application/pdf",
 				Content:     content,
 				Width:       width,

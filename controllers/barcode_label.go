@@ -148,31 +148,27 @@ func barcodeImageHTML(value string, moduleWidth float64, heightPx int, fontPx fl
 func buildProductLabelHTML(p productLabelData, size BarcodeLabelSize, compact bool) string {
 	code := barcodeValueForProduct(p)
 	name := html.EscapeString(p.Name)
-	sku := html.EscapeString(p.SKU)
-	category := html.EscapeString(p.Category)
 
-	// Horizontal thermal layout: text block (left) + barcode (right), one label per row.
-	left := []string{fmt.Sprintf(`	<div class="label-left">
-		<div class="product-name">%s</div>`, name)}
-	if !compact && p.SKU != "" {
-		left = append(left, fmt.Sprintf(`		<div class="product-sku">SKU: %s</div>`, sku))
+	// Vertical layout: name (1–2 lines) → barcode → MRP left / sale price right.
+	mrpCell := ""
+	if p.MRP > 0 {
+		mrpCell = fmt.Sprintf(`<span class="product-mrp">MRP: ₹%.2f</span>`, p.MRP)
+	} else if !compact && p.SKU != "" {
+		mrpCell = fmt.Sprintf(`<span class="product-sku">SKU: %s</span>`, html.EscapeString(p.SKU))
 	}
-	left = append(left, fmt.Sprintf(`		<div class="product-price">₹%.2f</div>`, p.SalePrice))
-	if !compact && p.MRP > 0 {
-		left = append(left, fmt.Sprintf(`		<div class="product-mrp">MRP: ₹%.2f</div>`, p.MRP))
-	}
-	if !compact && size.Key == "3inch" && p.Category != "" {
-		left = append(left, fmt.Sprintf(`		<div class="product-category">%s</div>`, category))
-	}
-	left = append(left, `	</div>`)
 
 	return fmt.Sprintf(`<div class="label">
-%s
+	<div class="product-name">%s</div>
 	<div class="product-barcode">
 		%s
 	</div>
-</div>`, strings.Join(left, "\n"),
-		barcodeImageHTML(code, size.BarcodeW, size.BarcodeH, size.MetaFontPx))
+	<div class="price-row">
+		%s
+		<span class="product-price">₹%.2f</span>
+	</div>
+</div>`, name,
+		barcodeImageHTML(code, size.BarcodeW, size.BarcodeH, size.MetaFontPx),
+		mrpCell, p.SalePrice)
 }
 
 // BarcodeLabelItemJSON is one printable sticker for silent ESC/POS / client rendering.
@@ -195,6 +191,15 @@ type BarcodeLabelsResponse struct {
 }
 
 func barcodeLabelPageCSS(size BarcodeLabelSize) string {
+	// Slightly larger “normal” name than the old bold compact sizes.
+	namePx := size.NameFontPx
+	if namePx < 9 {
+		namePx = 9
+	}
+	barcodeMaxH := size.HeightMM * 0.42
+	if barcodeMaxH < 6 {
+		barcodeMaxH = 6
+	}
 	return fmt.Sprintf(`
 @page {
 	size: %.2fmm %.2fmm;
@@ -218,10 +223,10 @@ body {
 	max-height: %.2fmm;
 	padding: %.2fmm;
 	display: flex;
-	flex-direction: row;
-	align-items: center;
+	flex-direction: column;
+	align-items: stretch;
 	justify-content: space-between;
-	gap: %.2fmm;
+	gap: 0.4mm;
 	overflow: hidden;
 	border: none;
 	page-break-after: always;
@@ -233,47 +238,30 @@ body {
 	page-break-after: auto;
 	break-after: auto;
 }
-.label-left {
-	flex: 1 1 auto;
-	min-width: 0;
-	max-width: 48%%;
-	display: flex;
-	flex-direction: column;
-	align-items: flex-start;
-	justify-content: center;
-	text-align: left;
-	overflow: hidden;
-}
 .product-name {
 	font-size: %.1fpx;
-	font-weight: bold;
-	line-height: 1.1;
-	max-width: 100%%;
+	font-weight: 400;
+	line-height: 1.15;
+	width: 100%%;
+	text-align: center;
+	margin: 0;
+	display: -webkit-box;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 2;
 	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-	margin: 0 0 1px;
-}
-.product-sku {
-	font-size: %.1fpx;
-	line-height: 1.05;
-	margin: 0 0 1px;
-	color: #333;
-	max-width: 100%%;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
+	word-break: break-word;
+	overflow-wrap: anywhere;
 }
 .product-barcode {
-	flex: 0 1 52%%;
-	max-width: 52%%;
+	width: 100%%;
+	flex: 1 1 auto;
+	min-height: 0;
 	line-height: 1;
 	margin: 0;
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	justify-content: center;
-	overflow: hidden;
 }
 .product-barcode .barcode-img {
 	max-width: 100%%;
@@ -287,26 +275,42 @@ body {
 .product-barcode-fallback {
 	font-family: "Courier New", Courier, monospace;
 	font-size: %.1fpx;
-	line-height: 1.05;
+	line-height: 1.1;
 	margin-top: 1px;
-	letter-spacing: 0.3px;
+	letter-spacing: 0.2px;
 	text-align: center;
-	max-width: 100%%;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
+	width: 100%%;
+	word-break: break-all;
+	overflow-wrap: anywhere;
+	white-space: normal;
+}
+.price-row {
+	width: 100%%;
+	display: flex;
+	flex-direction: row;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 1mm;
+	margin: 0;
+}
+.product-mrp, .product-sku {
+	font-size: %.1fpx;
+	color: #333;
+	line-height: 1.1;
+	margin: 0;
+	text-align: left;
+	flex: 1 1 auto;
+	min-width: 0;
+	word-break: break-word;
 }
 .product-price {
 	font-size: %.1fpx;
-	font-weight: bold;
+	font-weight: 700;
 	line-height: 1.1;
-	margin: 1px 0 0;
-}
-.product-mrp, .product-category {
-	font-size: %.1fpx;
-	color: #555;
-	line-height: 1.05;
 	margin: 0;
+	text-align: right;
+	flex: 0 0 auto;
+	white-space: nowrap;
 }
 @media print {
 	html, body {
@@ -321,9 +325,8 @@ body {
 	}
 }
 `, size.WidthMM, size.HeightMM, size.WidthMM,
-		size.WidthMM, size.HeightMM, size.WidthMM, size.HeightMM, size.PaddingMM, size.PaddingMM,
-		size.NameFontPx, size.SkuFontPx, size.HeightMM*0.55,
-		size.MetaFontPx, size.PriceFontPx, size.MetaFontPx,
+		size.WidthMM, size.HeightMM, size.WidthMM, size.HeightMM, size.PaddingMM,
+		namePx, barcodeMaxH, size.MetaFontPx, size.MetaFontPx, size.PriceFontPx,
 		size.WidthMM, size.WidthMM, size.HeightMM)
 }
 

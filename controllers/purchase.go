@@ -1277,7 +1277,7 @@ func wantsJSONResponse(c *gin.Context) bool {
 	return strings.Contains(accept, "application/json")
 }
 
-func purchaseItemsToBarcodeLabels(items []models.PurchaseBillItem, compact bool) []BarcodeLabelItemJSON {
+func purchaseItemsToBarcodeLabels(items []models.PurchaseBillItem, _ bool) []BarcodeLabelItemJSON {
 	out := make([]BarcodeLabelItemJSON, 0, len(items))
 	for _, item := range items {
 		barcodeVal := strings.TrimSpace(item.ItemCode)
@@ -1300,7 +1300,7 @@ func purchaseItemsToBarcodeLabels(items []models.PurchaseBillItem, compact bool)
 			Barcode: barcodeVal,
 			Price:   salePrice,
 		}
-		if !compact && mrp > 0 && mrp != salePrice {
+		if mrp > 0 {
 			entry.MRP = mrp
 		}
 		out = append(out, entry)
@@ -1476,6 +1476,7 @@ func generateThermalPurchaseLabelsHTML(billNumber string, items []models.Purchas
 }
 
 func generateThermalPurchaseLabel(item models.PurchaseBillItem, size BarcodeLabelSize, compact bool) string {
+	_ = compact
 	barcodeVal := strings.TrimSpace(item.ItemCode)
 	if barcodeVal == "" {
 		barcodeVal = strings.TrimSpace(item.HSNCode)
@@ -1494,21 +1495,23 @@ func generateThermalPurchaseLabel(item models.PurchaseBillItem, size BarcodeLabe
 	}
 
 	name := html.EscapeString(item.Description)
-	left := []string{fmt.Sprintf(`	<div class="label-left">
-		<div class="product-name">%s</div>
-		<div class="product-price">₹%.2f</div>`, name, salePrice)}
-	if !compact && mrp > 0 && mrp != salePrice {
-		left = append(left, fmt.Sprintf(`		<div class="product-mrp">MRP: ₹%.2f</div>`, mrp))
+	mrpCell := ""
+	if mrp > 0 {
+		mrpCell = fmt.Sprintf(`<span class="product-mrp">MRP: ₹%.2f</span>`, mrp)
 	}
-	left = append(left, `	</div>`)
 
 	return fmt.Sprintf(`<div class="label">
-%s
+	<div class="product-name">%s</div>
 	<div class="product-barcode">
 		%s
 	</div>
-</div>`, strings.Join(left, "\n"),
-		barcodeImageHTML(barcodeVal, size.BarcodeW, size.BarcodeH, size.MetaFontPx))
+	<div class="price-row">
+		%s
+		<span class="product-price">₹%.2f</span>
+	</div>
+</div>`, name,
+		barcodeImageHTML(barcodeVal, size.BarcodeW, size.BarcodeH, size.MetaFontPx),
+		mrpCell, salePrice)
 }
 
 func generateSingleLabel(item models.PurchaseBillItem, billNumber string) string {
