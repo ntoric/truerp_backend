@@ -254,9 +254,9 @@ func CreatePurchaseReceipt(c *gin.Context) {
 			Quantity    float64    `json:"quantity" binding:"required,gt=0"`
 			UnitPrice   float64    `json:"unit_price" binding:"required"`
 			TaxRate     float64    `json:"tax_rate"`
-			BatchNo     string     `json:"batch_no"`
-			MfgDate     *time.Time `json:"mfg_date"`
-			ExpDate     *time.Time `json:"exp_date"`
+			BatchNo     string               `json:"batch_no"`
+			MfgDate     *models.FlexibleTime `json:"mfg_date"`
+			ExpDate     *models.FlexibleTime `json:"exp_date"`
 		} `json:"items" binding:"required,min=1"`
 	}
 
@@ -294,8 +294,8 @@ func CreatePurchaseReceipt(c *gin.Context) {
 			TaxAmount:   taxAmount,
 			Total:       total,
 			BatchNo:     item.BatchNo,
-			MfgDate:     item.MfgDate,
-			ExpDate:     item.ExpDate,
+			MfgDate:     item.MfgDate.Ptr(),
+			ExpDate:     item.ExpDate.Ptr(),
 		})
 
 		subTotal += item.UnitPrice * item.Quantity
@@ -403,8 +403,8 @@ func CreatePurchaseBill(c *gin.Context) {
 			SalePrice   models.FlexibleFloat `json:"sale_price"`
 			HSNCode     string               `json:"hsn_code"`
 			BatchNo     string               `json:"batch_no"`
-			MfgDate     *time.Time           `json:"mfg_date"`
-			ExpDate     *time.Time           `json:"exp_date"`
+			MfgDate     *models.FlexibleTime `json:"mfg_date"`
+			ExpDate     *models.FlexibleTime `json:"exp_date"`
 		} `json:"items" binding:"required,min=1"`
 	}
 
@@ -510,8 +510,8 @@ func CreatePurchaseBill(c *gin.Context) {
 			SalePrice:   item.SalePrice.Float64(),
 			HSNCode:     item.HSNCode,
 			BatchNo:     item.BatchNo,
-			MfgDate:     item.MfgDate,
-			ExpDate:     item.ExpDate,
+			MfgDate:     item.MfgDate.Ptr(),
+			ExpDate:     item.ExpDate.Ptr(),
 		})
 
 		subTotal += itemTotal
@@ -600,8 +600,8 @@ func UpdatePurchaseBill(c *gin.Context) {
 			SalePrice   models.FlexibleFloat `json:"sale_price"`
 			HSNCode     string               `json:"hsn_code"`
 			BatchNo     string               `json:"batch_no"`
-			MfgDate     *time.Time           `json:"mfg_date"`
-			ExpDate     *time.Time           `json:"exp_date"`
+			MfgDate     *models.FlexibleTime `json:"mfg_date"`
+			ExpDate     *models.FlexibleTime `json:"exp_date"`
 		} `json:"items"`
 	}
 
@@ -730,8 +730,8 @@ func UpdatePurchaseBill(c *gin.Context) {
 			SalePrice:   item.SalePrice.Float64(),
 			HSNCode:     item.HSNCode,
 			BatchNo:     item.BatchNo,
-			MfgDate:     item.MfgDate,
-			ExpDate:     item.ExpDate,
+			MfgDate:     item.MfgDate.Ptr(),
+			ExpDate:     item.ExpDate.Ptr(),
 		})
 
 		subTotal += itemTotal

@@ -66,6 +66,15 @@ func (ft FlexibleTime) Value() (driver.Value, error) {
 	return ft.Time, nil
 }
 
+// Ptr returns a *time.Time or nil when unset/zero.
+func (ft *FlexibleTime) Ptr() *time.Time {
+	if ft == nil || ft.Time.IsZero() {
+		return nil
+	}
+	t := ft.Time
+	return &t
+}
+
 type User struct {
 	ID                     uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	Name                   string         `json:"name" gorm:"not null"`
