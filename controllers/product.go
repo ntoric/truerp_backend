@@ -488,6 +488,7 @@ func ExportProductsCSV(c *gin.Context) {
 			p.SKU,
 			p.ItemCode,
 			p.Category,
+			"", // Stock Qty (live stock lives in inventory entries)
 			p.Unit,
 			fmt.Sprintf("%.2f", p.PurchasePrice),
 			fmt.Sprintf("%.2f", p.SalePrice),
@@ -556,6 +557,7 @@ func ExportProductsExcel(c *gin.Context) {
 		row.AddCell().SetValue(p.SKU)
 		row.AddCell().SetValue(p.ItemCode)
 		row.AddCell().SetValue(p.Category)
+		row.AddCell().SetValue("") // Stock Qty (live stock lives in inventory entries)
 		row.AddCell().SetValue(p.Unit)
 		row.AddCell().SetValue(p.PurchasePrice)
 		row.AddCell().SetValue(p.SalePrice)
