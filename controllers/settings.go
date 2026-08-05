@@ -195,10 +195,10 @@ func loadLabelLayoutPayload(userID uuid.UUID) printSettingsPayload {
 	if business.LabelMarginMM >= 0 {
 		p.LabelMarginMM = business.LabelMarginMM
 	}
-	if business.LabelMarginTopMM > 0 {
+	if business.LabelMarginTopMM >= 0 {
 		p.LabelMarginTopMM = business.LabelMarginTopMM
 	}
-	if business.LabelMarginLeftMM > 0 {
+	if business.LabelMarginLeftMM >= 0 {
 		p.LabelMarginLeftMM = business.LabelMarginLeftMM
 	}
 	if business.LabelGapHMM >= 0 {
@@ -210,19 +210,37 @@ func loadLabelLayoutPayload(userID uuid.UUID) printSettingsPayload {
 	return p
 }
 
+func labelLayoutMatchesPreset(p printSettingsPayload, preset A4LabelSheetLayout) bool {
+	const eps = 0.05
+	close := func(a, b float64) bool {
+		diff := a - b
+		if diff < 0 {
+			diff = -diff
+		}
+		return diff < eps
+	}
+	paper := strings.TrimSpace(p.LabelPaperSize)
+	if paper == "" {
+		paper = "A4"
+	}
+	return strings.EqualFold(paper, preset.PaperSize) &&
+		close(p.LabelWidthMM, preset.LabelWidthMM) &&
+		close(p.LabelHeightMM, preset.LabelHeightMM) &&
+		p.LabelColumns == preset.Columns &&
+		p.LabelRows == preset.Rows &&
+		close(p.LabelMarginTopMM, preset.MarginTopMM) &&
+		close(p.LabelMarginLeftMM, preset.MarginLeftMM) &&
+		close(p.LabelGapHMM, preset.GapHMM) &&
+		close(p.LabelGapVMM, preset.GapVMM)
+}
+
 func normalizeLabelLayout(p *printSettingsPayload) {
+	// Named presets are applied in the UI when selected. On save, persist the submitted
+	// layout fields as-is; if they no longer match the preset, treat as custom.
 	if preset, ok := a4LabelSheetPresetByKey(p.LabelSheetPreset); ok {
-		p.LabelPaperSize = preset.PaperSize
-		p.LabelWidthMM = preset.LabelWidthMM
-		p.LabelHeightMM = preset.LabelHeightMM
-		p.LabelColumns = preset.Columns
-		p.LabelRows = preset.Rows
-		p.LabelMarginMM = preset.MarginLeftMM
-		p.LabelMarginTopMM = preset.MarginTopMM
-		p.LabelMarginLeftMM = preset.MarginLeftMM
-		p.LabelGapHMM = preset.GapHMM
-		p.LabelGapVMM = preset.GapVMM
-		return
+		if !labelLayoutMatchesPreset(*p, preset) {
+			p.LabelSheetPreset = "custom"
+		}
 	}
 	defPaper, defW, defH, defCols, defRows, defMargin := defaultLabelLayout()
 	if p.LabelPaperSize == "" {

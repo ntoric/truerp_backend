@@ -634,10 +634,10 @@ func buildA4LabelsSheetDocument(title string, labelHTMLs []string, layout A4Labe
 }
 
 func a4LabelSheetLayoutFromBusiness(b models.Business) A4LabelSheetLayout {
-	if preset, ok := a4LabelSheetPresetByKey(b.LabelSheetPreset); ok {
-		return preset
-	}
 	layout := A4LabelSheetPreset485x254()
+	if preset, ok := a4LabelSheetPresetByKey(b.LabelSheetPreset); ok {
+		layout = preset
+	}
 	if b.LabelPaperSize != "" {
 		layout.PaperSize = b.LabelPaperSize
 	}
@@ -657,14 +657,14 @@ func a4LabelSheetLayoutFromBusiness(b models.Business) A4LabelSheetLayout {
 	if margin <= 0 {
 		margin = 5
 	}
-	if b.LabelMarginTopMM > 0 {
+	if b.LabelMarginTopMM >= 0 {
 		layout.MarginTopMM = b.LabelMarginTopMM
-	} else {
+	} else if margin > 0 {
 		layout.MarginTopMM = margin
 	}
-	if b.LabelMarginLeftMM > 0 {
+	if b.LabelMarginLeftMM >= 0 {
 		layout.MarginLeftMM = b.LabelMarginLeftMM
-	} else {
+	} else if margin > 0 {
 		layout.MarginLeftMM = margin
 	}
 	layout.MarginRightMM = layout.MarginLeftMM
