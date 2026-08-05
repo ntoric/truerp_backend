@@ -45,7 +45,7 @@ func GetStockBalance(c *gin.Context) {
 		return
 	}
 
-	fmt.Printf("[DEBUG] GetStockBalance - Found %d stocks\n", len(stocks))
+	fmt.Printf("[DEBUG] GetStockBalance - Found %d stock rows (before consolidation)\n", len(stocks))
 
 	// Fetch outlet names
 	var outletIDs []uuid.UUID
@@ -61,20 +61,41 @@ func GetStockBalance(c *gin.Context) {
 		warehouseMap[wh.ID] = wh.Name
 	}
 
-	balances := make([]StockBalance, 0, len(stocks))
+	// Consolidate batches into one row per product + outlet.
+	type balanceKey struct {
+		ProductID uuid.UUID
+		OutletID  uuid.UUID
+	}
+	balanceMap := make(map[balanceKey]*StockBalance)
 	for _, stock := range stocks {
-		balances = append(balances, StockBalance{
+		key := balanceKey{ProductID: stock.ProductID, OutletID: stock.OutletID}
+		lineValue := stock.Quantity * stock.AverageCost
+		if existing, ok := balanceMap[key]; ok {
+			existing.StockQty += stock.Quantity
+			existing.Value += lineValue
+			if existing.StockQty > 0 {
+				existing.CostPrice = existing.Value / existing.StockQty
+			}
+			continue
+		}
+		balanceMap[key] = &StockBalance{
 			ProductID:   stock.ProductID,
 			ProductName: stock.Product.Name,
 			SKU:         stock.Product.SKU,
 			StockQty:    stock.Quantity,
 			CostPrice:   stock.AverageCost,
-			Value:       stock.Quantity * stock.AverageCost,
+			Value:       lineValue,
 			OutletID:    stock.OutletID,
 			OutletName:  warehouseMap[stock.OutletID],
-		})
+		}
 	}
 
+	balances := make([]StockBalance, 0, len(balanceMap))
+	for _, balance := range balanceMap {
+		balances = append(balances, *balance)
+	}
+
+	fmt.Printf("[DEBUG] GetStockBalance - Returning %d consolidated balances\n", len(balances))
 	c.JSON(http.StatusOK, gin.H{"data": balances})
 }
 
@@ -635,19 +656,27 @@ func updateInventoryStock(userID, productID, outletID uuid.UUID, entryType strin
 
 	if err != nil {
 		fmt.Printf("[DEBUG] updateInventoryStock - Creating new stock record\n")
+		initialQty := 0.0
+		if quantity > 0 {
+			switch entryType {
+			case "opening", "purchase", "adjustment", "return":
+				initialQty = quantity
+			}
+		}
 		stock = models.InventoryStock{
-			ID:           uuid.New(),
-			UserID:       userID,
-			ProductID:    productID,
-			OutletID:     outletID,
-			BatchNo:      batchNo,
-			MfgDate:      mfgDate,
-			ExpDate:      expDate,
-			Quantity:     0,
-			ReservedQty:  0,
-			AvailableQty: 0,
-			AverageCost:  costPrice,
-			LastUpdated:  time.Now(),
+			ID:              uuid.New(),
+			UserID:          userID,
+			ProductID:       productID,
+			OutletID:        outletID,
+			BatchNo:         batchNo,
+			MfgDate:         mfgDate,
+			ExpDate:         expDate,
+			Quantity:        0,
+			InitialQuantity: initialQty,
+			ReservedQty:     0,
+			AvailableQty:    0,
+			AverageCost:     costPrice,
+			LastUpdated:     time.Now(),
 		}
 	} else {
 		if mfgDate != nil {
@@ -1099,6 +1128,34 @@ func GetInventoryStocks(c *gin.Context) {
 
 	fmt.Printf("[DEBUG] GetInventoryStocks - Found %d stocks\n", len(stocks))
 
+	// Backfill initial quantity from opening stock entries for legacy rows.
+	type openingKey struct {
+		ProductID uuid.UUID
+		OutletID  uuid.UUID
+		BatchNo   string
+	}
+	openingQtyMap := make(map[openingKey]float64)
+	if len(stocks) > 0 {
+		var openingRows []struct {
+			ProductID uuid.UUID
+			OutletID  uuid.UUID
+			BatchNo   string
+			TotalQty  float64
+		}
+		utils.DB.Model(&models.StockEntry{}).
+			Select("product_id, outlet_id, batch_no, COALESCE(SUM(quantity), 0) as total_qty").
+			Where("user_id = ? AND entry_type = ? AND product_id IS NOT NULL", userID, "opening").
+			Group("product_id, outlet_id, batch_no").
+			Scan(&openingRows)
+		for _, row := range openingRows {
+			openingQtyMap[openingKey{
+				ProductID: row.ProductID,
+				OutletID:  row.OutletID,
+				BatchNo:   strings.TrimSpace(row.BatchNo),
+			}] = row.TotalQty
+		}
+	}
+
 	// Fetch outlet names
 	var outletIDs []uuid.UUID
 	for _, stock := range stocks {
@@ -1120,6 +1177,15 @@ func GetInventoryStocks(c *gin.Context) {
 	}
 	stocksWithOutlet := make([]InventoryStockWithOutlet, 0, len(stocks))
 	for _, stock := range stocks {
+		if stock.InitialQuantity == 0 {
+			if qty, ok := openingQtyMap[openingKey{
+				ProductID: stock.ProductID,
+				OutletID:  stock.OutletID,
+				BatchNo:   strings.TrimSpace(stock.BatchNo),
+			}]; ok {
+				stock.InitialQuantity = qty
+			}
+		}
 		stocksWithOutlet = append(stocksWithOutlet, InventoryStockWithOutlet{
 			InventoryStock: stock,
 			OutletName:     warehouseMap[stock.OutletID],
@@ -1249,6 +1315,12 @@ func AdjustStock(c *gin.Context) {
 		return
 	}
 
+	input.Reason = strings.TrimSpace(input.Reason)
+	if input.Reason == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Reason is required for stock adjustment"})
+		return
+	}
+
 	fmt.Printf("[DEBUG] AdjustStock - UserID: %s, ItemName: %s, Quantity: %f\n", userID, input.ItemName, input.Quantity)
 
 	// Verify product exists if provided
@@ -1308,6 +1380,12 @@ func ReserveStock(c *gin.Context) {
 	if err := c.ShouldBindJSON(&input); err != nil {
 		fmt.Printf("[DEBUG] ReserveStock - JSON bind error: %v\n", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	input.Reason = strings.TrimSpace(input.Reason)
+	if input.Reason == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Reason is required for stock reservation"})
 		return
 	}
 
@@ -1411,6 +1489,12 @@ func ReleaseStock(c *gin.Context) {
 		return
 	}
 
+	input.Reason = strings.TrimSpace(input.Reason)
+	if input.Reason == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Reason is required for stock release"})
+		return
+	}
+
 	fmt.Printf("[DEBUG] ReleaseStock - UserID: %s, ProductID: %s, OutletID: %s, Quantity: %f\n", userID, input.ProductID, input.OutletID, input.Quantity)
 
 	// Verify product exists
@@ -1485,6 +1569,28 @@ func ReleaseStock(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Stock released successfully", "reserved_qty": stock.ReservedQty, "available_qty": stock.AvailableQty})
 }
 
+// countConsolidatedLowStockProducts counts distinct products where consolidated stock
+// (summed across batches per outlet, matching stock balance) is at or below min_stock.
+func countConsolidatedLowStockProducts(userID uuid.UUID, excludeDeleted bool) int64 {
+	var count int64
+	deletedFilter := ""
+	if excludeDeleted {
+		deletedFilter = " AND p.deleted_at IS NULL"
+	}
+	query := `
+		SELECT COUNT(DISTINCT product_id) FROM (
+			SELECT p.id AS product_id
+			FROM products p
+			INNER JOIN inventory_stocks s ON p.id = s.product_id
+			WHERE p.user_id = ? AND p.low_stock_alert = true` + deletedFilter + `
+			GROUP BY p.id, p.min_stock, s.outlet_id
+			HAVING SUM(s.quantity) <= p.min_stock
+		) consolidated
+	`
+	utils.DB.Raw(query, userID).Scan(&count)
+	return count
+}
+
 func GetLowStockAlerts(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
@@ -1501,12 +1607,16 @@ func GetLowStockAlerts(c *gin.Context) {
 	}
 
 	results := make([]LowStockItem, 0)
+	// Consolidate batches per product + outlet (same as GetStockBalance).
 	query := `
-		SELECT p.id as product_id, p.name as product_name, p.sku, p.min_stock, s.outlet_id, s.quantity as current_stock, w.name as outlet_name
+		SELECT p.id as product_id, p.name as product_name, p.sku, p.min_stock, s.outlet_id,
+			SUM(s.quantity) as current_stock, w.name as outlet_name
 		FROM products p
 		INNER JOIN inventory_stocks s ON p.id = s.product_id
 		LEFT JOIN warehouses w ON s.outlet_id = w.id
-		WHERE p.user_id = ? AND p.low_stock_alert = true AND s.quantity <= p.min_stock
+		WHERE p.user_id = ? AND p.deleted_at IS NULL AND p.low_stock_alert = true
+		GROUP BY p.id, p.name, p.sku, p.min_stock, s.outlet_id, w.name
+		HAVING SUM(s.quantity) <= p.min_stock
 	`
 
 	if err := utils.DB.Raw(query, userID).Scan(&results).Error; err != nil {

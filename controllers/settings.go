@@ -111,16 +111,21 @@ func UpdateInvoiceSettings(c *gin.Context) {
 // printSettingsPayload is PrintSettings plus A4 barcode label layout (stored on Business).
 type printSettingsPayload struct {
 	models.PrintSettings
-	LabelPaperSize string  `json:"label_paper_size"`
-	LabelWidthMM   float64 `json:"label_width_mm"`
-	LabelHeightMM  float64 `json:"label_height_mm"`
-	LabelColumns   int     `json:"label_columns"`
-	LabelRows      int     `json:"label_rows"`
-	LabelMarginMM  float64 `json:"label_margin_mm"`
+	LabelPaperSize    string  `json:"label_paper_size"`
+	LabelSheetPreset  string  `json:"label_sheet_preset"`
+	LabelWidthMM      float64 `json:"label_width_mm"`
+	LabelHeightMM     float64 `json:"label_height_mm"`
+	LabelColumns      int     `json:"label_columns"`
+	LabelRows         int     `json:"label_rows"`
+	LabelMarginMM     float64 `json:"label_margin_mm"`
+	LabelMarginTopMM  float64 `json:"label_margin_top_mm"`
+	LabelMarginLeftMM float64 `json:"label_margin_left_mm"`
+	LabelGapHMM       float64 `json:"label_gap_h_mm"`
+	LabelGapVMM       float64 `json:"label_gap_v_mm"`
 }
 
 func defaultLabelLayout() (paperSize string, widthMM, heightMM float64, columns, rows int, marginMM float64) {
-	return "A4", 50, 30, 3, 8, 10
+	return "A4", 48.5, 25.4, 4, 11, 5
 }
 
 func loadLabelLayout(userID uuid.UUID) (paperSize string, widthMM, heightMM float64, columns, rows int, marginMM float64) {
@@ -150,10 +155,81 @@ func loadLabelLayout(userID uuid.UUID) (paperSize string, widthMM, heightMM floa
 	return
 }
 
+func loadLabelLayoutPayload(userID uuid.UUID) printSettingsPayload {
+	var business models.Business
+	defPaper, defW, defH, defCols, defRows, defMargin := defaultLabelLayout()
+	p := printSettingsPayload{
+		LabelPaperSize:    defPaper,
+		LabelSheetPreset:  "48.5x25.4",
+		LabelWidthMM:      defW,
+		LabelHeightMM:     defH,
+		LabelColumns:      defCols,
+		LabelRows:         defRows,
+		LabelMarginMM:     defMargin,
+		LabelMarginTopMM:  8.8,
+		LabelMarginLeftMM: defMargin,
+		LabelGapHMM:       2,
+		LabelGapVMM:       0,
+	}
+	if err := utils.DB.Where("user_id = ?", userID).First(&business).Error; err != nil {
+		return p
+	}
+	if business.LabelPaperSize != "" {
+		p.LabelPaperSize = business.LabelPaperSize
+	}
+	if business.LabelSheetPreset != "" {
+		p.LabelSheetPreset = business.LabelSheetPreset
+	}
+	if business.LabelWidthMM > 0 {
+		p.LabelWidthMM = business.LabelWidthMM
+	}
+	if business.LabelHeightMM > 0 {
+		p.LabelHeightMM = business.LabelHeightMM
+	}
+	if business.LabelColumns > 0 {
+		p.LabelColumns = business.LabelColumns
+	}
+	if business.LabelRows > 0 {
+		p.LabelRows = business.LabelRows
+	}
+	if business.LabelMarginMM >= 0 {
+		p.LabelMarginMM = business.LabelMarginMM
+	}
+	if business.LabelMarginTopMM > 0 {
+		p.LabelMarginTopMM = business.LabelMarginTopMM
+	}
+	if business.LabelMarginLeftMM > 0 {
+		p.LabelMarginLeftMM = business.LabelMarginLeftMM
+	}
+	if business.LabelGapHMM >= 0 {
+		p.LabelGapHMM = business.LabelGapHMM
+	}
+	if business.LabelGapVMM >= 0 {
+		p.LabelGapVMM = business.LabelGapVMM
+	}
+	return p
+}
+
 func normalizeLabelLayout(p *printSettingsPayload) {
+	if preset, ok := a4LabelSheetPresetByKey(p.LabelSheetPreset); ok {
+		p.LabelPaperSize = preset.PaperSize
+		p.LabelWidthMM = preset.LabelWidthMM
+		p.LabelHeightMM = preset.LabelHeightMM
+		p.LabelColumns = preset.Columns
+		p.LabelRows = preset.Rows
+		p.LabelMarginMM = preset.MarginLeftMM
+		p.LabelMarginTopMM = preset.MarginTopMM
+		p.LabelMarginLeftMM = preset.MarginLeftMM
+		p.LabelGapHMM = preset.GapHMM
+		p.LabelGapVMM = preset.GapVMM
+		return
+	}
 	defPaper, defW, defH, defCols, defRows, defMargin := defaultLabelLayout()
 	if p.LabelPaperSize == "" {
 		p.LabelPaperSize = defPaper
+	}
+	if p.LabelSheetPreset == "" {
+		p.LabelSheetPreset = "custom"
 	}
 	if p.LabelWidthMM < 10 || p.LabelWidthMM > 200 {
 		p.LabelWidthMM = defW
@@ -161,7 +237,7 @@ func normalizeLabelLayout(p *printSettingsPayload) {
 	if p.LabelHeightMM < 10 || p.LabelHeightMM > 200 {
 		p.LabelHeightMM = defH
 	}
-	if p.LabelColumns < 1 || p.LabelColumns > 5 {
+	if p.LabelColumns < 1 || p.LabelColumns > 6 {
 		p.LabelColumns = defCols
 	}
 	if p.LabelRows < 1 || p.LabelRows > 20 {
@@ -169,6 +245,18 @@ func normalizeLabelLayout(p *printSettingsPayload) {
 	}
 	if p.LabelMarginMM < 0 || p.LabelMarginMM > 50 {
 		p.LabelMarginMM = defMargin
+	}
+	if p.LabelMarginTopMM < 0 || p.LabelMarginTopMM > 50 {
+		p.LabelMarginTopMM = p.LabelMarginMM
+	}
+	if p.LabelMarginLeftMM < 0 || p.LabelMarginLeftMM > 50 {
+		p.LabelMarginLeftMM = p.LabelMarginMM
+	}
+	if p.LabelGapHMM < 0 || p.LabelGapHMM > 20 {
+		p.LabelGapHMM = 2
+	}
+	if p.LabelGapVMM < 0 || p.LabelGapVMM > 20 {
+		p.LabelGapVMM = 0
 	}
 }
 
@@ -178,25 +266,35 @@ func saveLabelLayout(userID uuid.UUID, p printSettingsPayload) error {
 		return err
 	}
 	return utils.DB.Model(&business).Updates(map[string]interface{}{
-		"label_paper_size": p.LabelPaperSize,
-		"label_width_mm":   p.LabelWidthMM,
-		"label_height_mm":  p.LabelHeightMM,
-		"label_columns":    p.LabelColumns,
-		"label_rows":       p.LabelRows,
-		"label_margin_mm":  p.LabelMarginMM,
+		"label_paper_size":     p.LabelPaperSize,
+		"label_sheet_preset":   p.LabelSheetPreset,
+		"label_width_mm":       p.LabelWidthMM,
+		"label_height_mm":      p.LabelHeightMM,
+		"label_columns":        p.LabelColumns,
+		"label_rows":           p.LabelRows,
+		"label_margin_mm":      p.LabelMarginMM,
+		"label_margin_top_mm":  p.LabelMarginTopMM,
+		"label_margin_left_mm": p.LabelMarginLeftMM,
+		"label_gap_h_mm":       p.LabelGapHMM,
+		"label_gap_v_mm":       p.LabelGapVMM,
 	}).Error
 }
 
 func toPrintSettingsPayload(settings models.PrintSettings, userID uuid.UUID) printSettingsPayload {
-	paper, w, h, cols, rows, margin := loadLabelLayout(userID)
+	layout := loadLabelLayoutPayload(userID)
 	return printSettingsPayload{
-		PrintSettings:  settings,
-		LabelPaperSize: paper,
-		LabelWidthMM:   w,
-		LabelHeightMM:  h,
-		LabelColumns:   cols,
-		LabelRows:      rows,
-		LabelMarginMM:  margin,
+		PrintSettings:     settings,
+		LabelPaperSize:    layout.LabelPaperSize,
+		LabelSheetPreset:  layout.LabelSheetPreset,
+		LabelWidthMM:      layout.LabelWidthMM,
+		LabelHeightMM:     layout.LabelHeightMM,
+		LabelColumns:      layout.LabelColumns,
+		LabelRows:         layout.LabelRows,
+		LabelMarginMM:     layout.LabelMarginMM,
+		LabelMarginTopMM:  layout.LabelMarginTopMM,
+		LabelMarginLeftMM: layout.LabelMarginLeftMM,
+		LabelGapHMM:       layout.LabelGapHMM,
+		LabelGapVMM:       layout.LabelGapVMM,
 	}
 }
 

@@ -69,6 +69,14 @@ func loadDailyReport(userID uuid.UUID, date string) (models.DailyReport, error) 
 
 	report.NetCashFlow = report.PaymentsIn.TotalAmount - report.PaymentsOut.TotalAmount - report.Expenses.TotalAmount
 
+	report.DailyProfit = report.Sales.TotalAmount -
+		report.CreditNotes.TotalAmount -
+		report.SalesReturns.TotalAmount -
+		report.Purchases.TotalAmount +
+		report.PurchaseReturns.TotalAmount +
+		report.DebitNotes.TotalAmount -
+		report.Expenses.TotalAmount
+
 	return report, nil
 }
 
@@ -141,6 +149,7 @@ func ExportDailyReportCSV(c *gin.Context) {
 	_ = writer.Write([]string{""})
 	_ = writer.Write([]string{"Accounts Payable (total outstanding)", "", fmt.Sprintf("%.2f", report.AccountsPayableTotal)})
 	_ = writer.Write([]string{"GST Collected (Sales)", "", fmt.Sprintf("%.2f", report.GSTCollected)})
+	_ = writer.Write([]string{"Daily Profit (Sales − Purchases − Expenses ± returns/notes)", "", fmt.Sprintf("%.2f", report.DailyProfit)})
 	_ = writer.Write([]string{"Net Cash Flow (In − Out − Expenses)", "", fmt.Sprintf("%.2f", report.NetCashFlow)})
 }
 
@@ -196,7 +205,7 @@ func buildDailyReportPDF(report models.DailyReport) ([]byte, error) {
 	pageW, _ := pdf.GetPageSize()
 	leftM, _, rightM, _ := pdf.GetMargins()
 	usable := pageW - leftM - rightM
-	cardW := (usable - 6) / 3
+	cardW := (usable - 9) / 4
 	cardH := 22.0
 	startY := pdf.GetY()
 
@@ -209,13 +218,19 @@ func buildDailyReportPDF(report models.DailyReport) ([]byte, error) {
 		sub     string
 		r, g, b int
 	}
+	profitR, profitG, profitB := 22, 101, 52
+	if report.DailyProfit < 0 {
+		profitR, profitG, profitB = 153, 27, 27
+	}
+
 	cards := []summaryCard{
 		{"Sales", fmt.Sprintf("Rs. %.2f", report.Sales.TotalAmount), fmt.Sprintf("%d invoices", report.Sales.Count), 22, 101, 52},
 		{"Purchase expense", fmt.Sprintf("Rs. %.2f", purchaseExpense), fmt.Sprintf("Purchases %d · Ops expenses %d · AP %.2f", report.Purchases.Count, report.Expenses.Count, report.AccountsPayable.TotalAmount), 154, 52, 18},
+		{"Daily profit", fmt.Sprintf("Rs. %.2f", report.DailyProfit), "Sales − purchases − expenses ± returns", profitR, profitG, profitB},
 		{"Net cash flow", fmt.Sprintf("Rs. %.2f", report.NetCashFlow), "Payments in - out - expenses", 30, 64, 175},
 	}
 	if report.NetCashFlow < 0 {
-		cards[2].r, cards[2].g, cards[2].b = 153, 27, 27
+		cards[3].r, cards[3].g, cards[3].b = 153, 27, 27
 	}
 
 	for i, card := range cards {
@@ -284,6 +299,10 @@ func buildDailyReportPDF(report models.DailyReport) ([]byte, error) {
 	pdf.CellFormat(colSection, 7, "GST collected (sales)", "1", 0, "L", true, 0, "")
 	pdf.CellFormat(colCount, 7, "-", "1", 0, "R", true, 0, "")
 	pdf.CellFormat(colAmount, 7, fmt.Sprintf("%.2f", report.GSTCollected), "1", 1, "R", true, 0, "")
+
+	pdf.CellFormat(colSection, 7, "Daily profit (Sales - Purchases - Expenses)", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colCount, 7, "-", "1", 0, "R", true, 0, "")
+	pdf.CellFormat(colAmount, 7, fmt.Sprintf("%.2f", report.DailyProfit), "1", 1, "R", true, 0, "")
 
 	pdf.CellFormat(colSection, 7, "Net cash flow (In - Out - Expenses)", "1", 0, "L", true, 0, "")
 	pdf.CellFormat(colCount, 7, "-", "1", 0, "R", true, 0, "")

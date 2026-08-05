@@ -7,6 +7,7 @@ import (
 	"html"
 	"image/png"
 	"strings"
+	"truerp/models"
 
 	"github.com/boombuler/barcode"
 	"github.com/boombuler/barcode/code128"
@@ -372,4 +373,313 @@ func wrapBarcodePreviewDocument(css, bodyHTML string) string {
 %s
 </body>
 </html>`, css, bodyHTML)
+}
+
+// A4LabelSheetLayout describes a fixed-grid sticker sheet (e.g. 4×11 on A4).
+type A4LabelSheetLayout struct {
+	PaperSize      string
+	LabelWidthMM   float64
+	LabelHeightMM  float64
+	Columns        int
+	Rows           int
+	MarginTopMM    float64
+	MarginRightMM  float64
+	MarginBottomMM float64
+	MarginLeftMM   float64
+	GapHMM         float64
+	GapVMM         float64
+}
+
+func (l A4LabelSheetLayout) labelsPerSheet() int {
+	if l.Columns < 1 || l.Rows < 1 {
+		return 1
+	}
+	return l.Columns * l.Rows
+}
+
+func normalizeStartPosition(start, perSheet int) int {
+	if perSheet < 1 {
+		perSheet = 1
+	}
+	if start < 1 {
+		return 1
+	}
+	if start > perSheet {
+		return perSheet
+	}
+	return start
+}
+
+// A4LabelSheetPreset485x254 — common 48.5 × 25.4 mm stickers, 4 cols × 11 rows (44/sheet).
+// Verified: 5 + 4×48.5 + 3×2 + 5 = 210 mm; 8.8 + 11×25.4 + 8.8 = 297 mm.
+func A4LabelSheetPreset485x254() A4LabelSheetLayout {
+	return A4LabelSheetLayout{
+		PaperSize: "A4", LabelWidthMM: 48.5, LabelHeightMM: 25.4,
+		Columns: 4, Rows: 11,
+		MarginTopMM: 8.8, MarginBottomMM: 8.8, MarginLeftMM: 5, MarginRightMM: 5,
+		GapHMM: 2, GapVMM: 0,
+	}
+}
+
+// A4LabelSheetPreset46x24 — 46 × 24 mm stickers with manufacturer gaps/margins.
+// Verified: 10 + 4×46 + 3×2 + 10 = 210 mm; 11 + 11×24 + 10×1.1 + 11 = 297 mm.
+func A4LabelSheetPreset46x24() A4LabelSheetLayout {
+	return A4LabelSheetLayout{
+		PaperSize: "A4", LabelWidthMM: 46, LabelHeightMM: 24,
+		Columns: 4, Rows: 11,
+		MarginTopMM: 11, MarginBottomMM: 11, MarginLeftMM: 10, MarginRightMM: 10,
+		GapHMM: 2, GapVMM: 1.1,
+	}
+}
+
+func a4LabelSheetPresetByKey(key string) (A4LabelSheetLayout, bool) {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "48.5x25.4", "485x254", "a4_48_5x25_4":
+		return A4LabelSheetPreset485x254(), true
+	case "46x24", "a4_46x24":
+		return A4LabelSheetPreset46x24(), true
+	default:
+		return A4LabelSheetLayout{}, false
+	}
+}
+
+func barcodeLabelSizeForA4Layout(layout A4LabelSheetLayout) BarcodeLabelSize {
+	h := layout.LabelHeightMM
+	namePx := 9.0
+	metaPx := 7.0
+	barcodeH := 24
+	padding := 2.0
+	if h >= 24 {
+		namePx = 10
+		metaPx = 7.5
+		barcodeH = 26
+		padding = 2.5
+	}
+	if h >= 25 {
+		namePx = 10.5
+		metaPx = 8
+		barcodeH = 28
+	}
+	return BarcodeLabelSize{
+		Key:         "a4",
+		WidthMM:     layout.LabelWidthMM,
+		HeightMM:    layout.LabelHeightMM,
+		NameFontPx:  namePx,
+		SkuFontPx:   namePx - 1,
+		PriceFontPx: namePx,
+		MetaFontPx:  metaPx,
+		BarcodeH:    barcodeH,
+		BarcodeW:    1.2,
+		PaddingMM:   padding,
+	}
+}
+
+func a4PaperDimensionsMM(paperSize string) (width, height float64) {
+	switch strings.ToLower(strings.TrimSpace(paperSize)) {
+	case "letter":
+		return 216, 279
+	case "a5":
+		return 148, 210
+	case "legal":
+		return 216, 356
+	default:
+		return 210, 297
+	}
+}
+
+func a4LabelSheetCSS(layout A4LabelSheetLayout, screenPreview bool) string {
+	paperW, paperH := a4PaperDimensionsMM(layout.PaperSize)
+	size := barcodeLabelSizeForA4Layout(layout)
+	labelCSS := barcodeLabelPageCSS(size)
+	// Strip per-label page breaks — labels sit on a shared sheet grid.
+	labelCSS = strings.ReplaceAll(labelCSS, "page-break-after: always;", "")
+	labelCSS = strings.ReplaceAll(labelCSS, "break-after: page;", "")
+	labelCSS = strings.ReplaceAll(labelCSS, "page-break-after: auto;", "")
+	labelCSS = strings.ReplaceAll(labelCSS, "break-after: auto;", "")
+
+	borderRule := ""
+	if screenPreview {
+		borderRule = `.label-slot .label { border: 1px dashed #9ca3af; }`
+	}
+
+	return labelCSS + fmt.Sprintf(`
+@page {
+	size: %s;
+	margin: 0;
+}
+html, body {
+	margin: 0;
+	padding: 0;
+	width: %.2fmm;
+	font-family: Arial, Helvetica, sans-serif;
+	-webkit-print-color-adjust: exact;
+	print-color-adjust: exact;
+}
+body.screen-preview {
+	background: #f3f4f6;
+	padding: 8px;
+}
+.sheet {
+	width: %.2fmm;
+	height: %.2fmm;
+	box-sizing: border-box;
+	padding: %.2fmm %.2fmm %.2fmm %.2fmm;
+	page-break-after: always;
+	break-after: page;
+	overflow: hidden;
+}
+body.screen-preview .sheet {
+	background: white;
+	border: 1px solid #d1d5db;
+	margin: 0 auto 12px;
+	box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.sheet:last-child {
+	page-break-after: auto;
+	break-after: auto;
+}
+.labels-grid {
+	display: grid;
+	grid-template-columns: repeat(%d, %.2fmm);
+	grid-template-rows: repeat(%d, %.2fmm);
+	column-gap: %.2fmm;
+	row-gap: %.2fmm;
+}
+.label-slot {
+	width: %.2fmm;
+	height: %.2fmm;
+	overflow: hidden;
+	box-sizing: border-box;
+}
+.label-slot.label-empty {
+	visibility: hidden;
+}
+.label-slot .label {
+	width: 100%% !important;
+	height: 100%% !important;
+	max-width: 100%% !important;
+	max-height: 100%% !important;
+	padding: %.2fmm;
+	page-break-after: unset !important;
+	break-after: unset !important;
+	border: none;
+}
+%s
+@media print {
+	html, body { width: %.2fmm !important; margin: 0 !important; padding: 0 !important; }
+	.sheet { width: %.2fmm !important; height: %.2fmm !important; }
+}
+`, layout.PaperSize, paperW,
+		paperW, paperH,
+		layout.MarginTopMM, layout.MarginRightMM, layout.MarginBottomMM, layout.MarginLeftMM,
+		layout.Columns, layout.LabelWidthMM,
+		layout.Rows, layout.LabelHeightMM,
+		layout.GapHMM, layout.GapVMM,
+		layout.LabelWidthMM, layout.LabelHeightMM,
+		size.PaddingMM,
+		borderRule,
+		paperW, paperW, paperH)
+}
+
+func buildA4LabelsSheetDocument(title string, labelHTMLs []string, layout A4LabelSheetLayout, startPosition int, screenPreview bool) string {
+	perSheet := layout.labelsPerSheet()
+	startPosition = normalizeStartPosition(startPosition, perSheet)
+
+	var pages strings.Builder
+	labelIdx := 0
+	firstPage := true
+
+	for labelIdx < len(labelHTMLs) || firstPage {
+		pages.WriteString(`<div class="sheet"><div class="labels-grid">`)
+		cellsUsed := 0
+
+		if firstPage {
+			for i := 1; i < startPosition; i++ {
+				pages.WriteString(`<div class="label-slot label-empty"></div>`)
+				cellsUsed++
+			}
+			firstPage = false
+		}
+
+		for cellsUsed < perSheet && labelIdx < len(labelHTMLs) {
+			pages.WriteString(`<div class="label-slot">`)
+			pages.WriteString(labelHTMLs[labelIdx])
+			pages.WriteString(`</div>`)
+			labelIdx++
+			cellsUsed++
+		}
+
+		pages.WriteString(`</div></div>`)
+		if labelIdx >= len(labelHTMLs) {
+			break
+		}
+	}
+
+	bodyClass := ""
+	if screenPreview {
+		bodyClass = ` class="screen-preview"`
+	}
+	css := a4LabelSheetCSS(layout, screenPreview)
+	return fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>%s</title>
+<style>%s</style>
+</head>
+<body%s>
+%s
+</body>
+</html>`, html.EscapeString(title), css, bodyClass, pages.String())
+}
+
+func a4LabelSheetLayoutFromBusiness(b models.Business) A4LabelSheetLayout {
+	if preset, ok := a4LabelSheetPresetByKey(b.LabelSheetPreset); ok {
+		return preset
+	}
+	layout := A4LabelSheetPreset485x254()
+	if b.LabelPaperSize != "" {
+		layout.PaperSize = b.LabelPaperSize
+	}
+	if b.LabelWidthMM > 0 {
+		layout.LabelWidthMM = b.LabelWidthMM
+	}
+	if b.LabelHeightMM > 0 {
+		layout.LabelHeightMM = b.LabelHeightMM
+	}
+	if b.LabelColumns > 0 {
+		layout.Columns = b.LabelColumns
+	}
+	if b.LabelRows > 0 {
+		layout.Rows = b.LabelRows
+	}
+	margin := b.LabelMarginMM
+	if margin <= 0 {
+		margin = 5
+	}
+	if b.LabelMarginTopMM > 0 {
+		layout.MarginTopMM = b.LabelMarginTopMM
+	} else {
+		layout.MarginTopMM = margin
+	}
+	if b.LabelMarginLeftMM > 0 {
+		layout.MarginLeftMM = b.LabelMarginLeftMM
+	} else {
+		layout.MarginLeftMM = margin
+	}
+	layout.MarginRightMM = layout.MarginLeftMM
+	layout.MarginBottomMM = layout.MarginTopMM
+	if b.LabelGapHMM >= 0 {
+		layout.GapHMM = b.LabelGapHMM
+	}
+	if b.LabelGapVMM >= 0 {
+		layout.GapVMM = b.LabelGapVMM
+	}
+	if layout.Columns < 1 || layout.Columns > 6 {
+		layout.Columns = 4
+	}
+	if layout.Rows < 1 || layout.Rows > 20 {
+		layout.Rows = 11
+	}
+	return layout
 }

@@ -649,9 +649,10 @@ func PrintProductLabel(c *gin.Context) {
 
 	// Parse request body for quantity / optional size override
 	var input struct {
-		Quantity  int    `json:"quantity"`
-		LabelSize string `json:"label_size"`
-		Format    string `json:"format"` // html (default) or json for silent ESC/POS
+		Quantity      int    `json:"quantity"`
+		LabelSize     string `json:"label_size"`
+		Format        string `json:"format"` // html (default) or json for silent ESC/POS
+		StartPosition int    `json:"start_position"`
 	}
 	if c.Request.Method == "POST" {
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -736,88 +737,15 @@ func PrintProductLabel(c *gin.Context) {
 		return
 	}
 
-	// Use business settings for A4 sheet columns
-	columns := business.LabelColumns
-	if columns < 1 || columns > 5 {
-		columns = 3
-	}
-	colWidth := 100.0 / float64(columns)
-	a4Width := business.LabelWidthMM
-	a4Height := business.LabelHeightMM
-	if a4Width < 10 {
-		a4Width = 50
-	}
-	if a4Height < 10 {
-		a4Height = 30
-	}
-
-	// For A4 grid, derive barcode bar metrics from cell size
-	a4Size := BarcodeLabelSize{
-		Key:         "a4",
-		WidthMM:     a4Width,
-		HeightMM:    a4Height,
-		NameFontPx:  12,
-		SkuFontPx:   10,
-		PriceFontPx: 14,
-		MetaFontPx:  9,
-		BarcodeH:    32,
-		BarcodeW:    1.3,
-		PaddingMM:   3,
-	}
-	singleLabel = buildProductLabelHTML(labelData, a4Size, false)
-	labelsHTML = ""
+	sheetLayout := a4LabelSheetLayoutFromBusiness(business)
+	a4Size := barcodeLabelSizeForA4Layout(sheetLayout)
+	labelHTMLs := make([]string, 0, input.Quantity)
+	singleA4Label := buildProductLabelHTML(labelData, a4Size, false)
 	for i := 0; i < input.Quantity; i++ {
-		labelsHTML += singleLabel
+		labelHTMLs = append(labelHTMLs, singleA4Label)
 	}
 
-	css := fmt.Sprintf(`
-@page {
-	size: %s;
-	margin: %.2fmm;
-}
-body {
-	font-family: Arial, Helvetica, sans-serif;
-	margin: 0;
-	padding: 0;
-}
-.labels-grid {
-	display: grid;
-	grid-template-columns: repeat(%d, %s);
-	gap: 5mm;
-}
-.label {
-	border: 1px solid #000;
-	padding: %.2fmm;
-	text-align: center;
-	page-break-inside: avoid;
-	box-sizing: border-box;
-	width: %.2fmm;
-	height: %.2fmm;
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-	justify-content: center;
-	overflow: hidden;
-}
-.product-name {
-	font-size: %.1fpx;
-	font-weight: bold;
-	margin-bottom: 2px;
-	max-width: 100%%;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-.product-sku { font-size: %.1fpx; margin-bottom: 2px; }
-.product-barcode { width: 100%%; line-height: 0; margin: 2px 0; }
-.product-barcode svg { max-width: 100%%; height: auto; }
-.product-price { font-size: %.1fpx; font-weight: bold; margin-top: 2px; }
-.product-mrp, .product-category { font-size: %.1fpx; color: #666; }
-`, business.LabelPaperSize, business.LabelMarginMM, columns, fmt.Sprintf("%.2f%%", colWidth),
-		a4Size.PaddingMM, a4Width, a4Height,
-		a4Size.NameFontPx, a4Size.SkuFontPx, a4Size.PriceFontPx, a4Size.MetaFontPx)
-
-	html := wrapBarcodeLabelDocument("Product Labels", css, `<div class="labels-grid">`+labelsHTML+`</div>`)
+	html := buildA4LabelsSheetDocument("Product Labels", labelHTMLs, sheetLayout, input.StartPosition, false)
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(http.StatusOK, html)
 }

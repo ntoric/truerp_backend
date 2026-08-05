@@ -53,6 +53,7 @@ func CreateExpense(c *gin.Context) {
 		Date                time.Time            `json:"date" binding:"required"`
 		Vendor              string               `json:"vendor"`
 		PaymentMode         string               `json:"payment_mode"`
+		BankAccountID       *uuid.UUID           `json:"bank_account_id"`
 		Notes               string               `json:"notes"`
 		WithGST             bool                 `json:"with_gst"`
 		TaxRate             float64              `json:"tax_rate"`
@@ -60,6 +61,17 @@ func CreateExpense(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := validateUserBankAccount(userID, input.BankAccountID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account"})
+		return
+	}
+
+	resolvedBankAccount, err := resolveBankAccountForPaymentMode(userID, input.PaymentMode, input.BankAccountID)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -108,10 +120,13 @@ func CreateExpense(c *gin.Context) {
 		Date:               input.Date,
 		Vendor:             input.Vendor,
 		PaymentMode:        input.PaymentMode,
+		BankAccountID:      resolvedBankAccount,
 		Notes:              input.Notes,
 	}
 
-	if err := utils.DB.Create(&expense).Error; err != nil {
+	tx := utils.DB.Begin()
+	if err := tx.Create(&expense).Error; err != nil {
+		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create expense"})
 		return
 	}
@@ -120,19 +135,36 @@ func CreateExpense(c *gin.Context) {
 	for _, item := range input.Items {
 		item.ID = uuid.New()
 		item.ExpenseID = expense.ID
-		if err := utils.DB.Create(&item).Error; err != nil {
+		if err := tx.Create(&item).Error; err != nil {
+			tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create expense items"})
 			return
 		}
 	}
 
-	// Reload with items
-	utils.DB.Preload("Items").First(&expense, expense.ID)
+	desc := fmt.Sprintf("Expense %s", expense.ExpenseNumber)
+	if input.Description != "" {
+		desc = input.Description
+	}
+	if err := recordExpenseCashOut(tx, userID, resolvedBankAccount, totalAmount, input.Date, expense.ExpenseNumber, desc); err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to deduct from account"})
+		return
+	}
 
-	if err := postExpenseAccounting(utils.DB, userID, &expense); err != nil {
+	if err := postExpenseAccounting(tx, userID, &expense); err != nil {
+		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Expense saved but failed to post to accounting"})
 		return
 	}
+
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create expense"})
+		return
+	}
+
+	// Reload with items
+	utils.DB.Preload("Items").First(&expense, expense.ID)
 
 	// Log expense creation
 	CreateAuditLog(
@@ -165,7 +197,16 @@ func UpdateExpense(c *gin.Context) {
 	}
 	id := c.Param("id")
 
-	var input models.Expense
+	var input struct {
+		Category      string     `json:"category"`
+		Description   string     `json:"description"`
+		Amount        float64    `json:"amount"`
+		Date          time.Time  `json:"date"`
+		Vendor        string     `json:"vendor"`
+		PaymentMode   string     `json:"payment_mode"`
+		BankAccountID *uuid.UUID `json:"bank_account_id"`
+		Notes         string     `json:"notes"`
+	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -177,18 +218,71 @@ func UpdateExpense(c *gin.Context) {
 		return
 	}
 
+	if err := validateUserBankAccount(userID, input.BankAccountID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account"})
+		return
+	}
+
+	resolvedBankAccount, err := resolveBankAccountForPaymentMode(userID, input.PaymentMode, input.BankAccountID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	input.Category = utils.ResolveCategoryName(input.Category)
 	_ = utils.EnsureDefaultCategories(utils.DB, userID)
 
-	if err := utils.DB.Model(&expense).Updates(map[string]interface{}{
-		"category":     input.Category,
-		"description":  input.Description,
-		"amount":       input.Amount,
-		"date":         input.Date,
-		"vendor":       input.Vendor,
-		"payment_mode": input.PaymentMode,
-		"notes":        input.Notes,
+	paymentChanged := expense.Amount != input.Amount ||
+		expense.PaymentMode != input.PaymentMode ||
+		!bankAccountIDsEqual(expense.BankAccountID, resolvedBankAccount) ||
+		!expense.Date.Equal(input.Date)
+
+	tx := utils.DB.Begin()
+	if paymentChanged {
+		if err := reverseExpenseCashOut(tx, userID, expense.ExpenseNumber); err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse previous account deduction"})
+			return
+		}
+	}
+
+	if err := tx.Model(&expense).Updates(map[string]interface{}{
+		"category":        input.Category,
+		"description":     input.Description,
+		"amount":          input.Amount,
+		"date":            input.Date,
+		"vendor":          input.Vendor,
+		"payment_mode":    input.PaymentMode,
+		"bank_account_id": resolvedBankAccount,
+		"notes":           input.Notes,
 	}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update expense"})
+		return
+	}
+
+	expense.Category = input.Category
+	expense.Description = input.Description
+	expense.Amount = input.Amount
+	expense.Date = input.Date
+	expense.Vendor = input.Vendor
+	expense.PaymentMode = input.PaymentMode
+	expense.BankAccountID = resolvedBankAccount
+	expense.Notes = input.Notes
+
+	if paymentChanged && input.Amount > 0 {
+		desc := fmt.Sprintf("Expense %s", expense.ExpenseNumber)
+		if input.Description != "" {
+			desc = input.Description
+		}
+		if err := recordExpenseCashOut(tx, userID, resolvedBankAccount, input.Amount, input.Date, expense.ExpenseNumber, desc); err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to deduct from account"})
+			return
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update expense"})
 		return
 	}
@@ -231,7 +325,18 @@ func DeleteExpense(c *gin.Context) {
 		return
 	}
 
-	if err := utils.DB.Delete(&expense).Error; err != nil {
+	tx := utils.DB.Begin()
+	if err := reverseExpenseCashOut(tx, userID, expense.ExpenseNumber); err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse account deduction"})
+		return
+	}
+	if err := tx.Delete(&expense).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete expense"})
+		return
+	}
+	if err := tx.Commit().Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete expense"})
 		return
 	}
@@ -267,4 +372,14 @@ func GetNextExpenseNumber(c *gin.Context) {
 
 	nextNum := fmt.Sprintf("EXP-%04d", count+1)
 	c.JSON(http.StatusOK, gin.H{"expense_number": nextNum})
+}
+
+func bankAccountIDsEqual(a, b *uuid.UUID) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }

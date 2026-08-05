@@ -186,6 +186,7 @@ func SetupRoutes(r *gin.Engine) {
 		reports.GET("/outstanding", controllers.GetOutstandingInvoicesReport)
 		reports.GET("/customers", controllers.GetCustomerWiseReport)
 		reports.GET("/products", controllers.GetProductWiseReport)
+		reports.GET("/categories", controllers.GetCategoryWiseReport)
 		reports.GET("/payments", controllers.GetPaymentsReport)
 		reports.GET("/inventory", controllers.GetInventoryReport)
 		reports.GET("/custom", controllers.GetCustomReport)

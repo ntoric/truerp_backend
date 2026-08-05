@@ -60,6 +60,7 @@ func applyPayrollPayment(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll,
 		Date:          payroll.PaymentDate,
 		Vendor:        staffName,
 		PaymentMode:   payroll.PaymentMode,
+		BankAccountID: payroll.BankAccountID,
 		Notes:         payroll.Notes,
 	}
 	if err := tx.Create(&expense).Error; err != nil {

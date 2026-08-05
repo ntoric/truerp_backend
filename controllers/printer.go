@@ -388,8 +388,8 @@ func generateSampleInvoiceThermal(userID uuid.UUID, printSize string) (string, i
 			GSTIN:   "29XYZAB5678C1D2",
 		},
 		Items: []models.InvoiceItem{
-			{Description: "Sample Item A", Quantity: 2, UnitPrice: 150, Total: 300},
-			{Description: "Sample Item B", Quantity: 1, UnitPrice: 150, Total: 150},
+			{Description: "Sample Item A", Quantity: 2, UnitPrice: 150, TaxRate: 18, Total: 354},
+			{Description: "Sample Item B", Quantity: 1, UnitPrice: 150, TaxRate: 18, Total: 177},
 		},
 	}
 
@@ -449,73 +449,33 @@ body { display: flex; align-items: center; justify-content: center; min-height: 
 	}
 
 	columns := business.LabelColumns
-	if columns < 1 || columns > 5 {
-		columns = 3
+	if columns < 1 || columns > 6 {
+		columns = 4
 	}
-	a4Width := business.LabelWidthMM
-	a4Height := business.LabelHeightMM
-	if a4Width < 10 {
-		a4Width = 50
-	}
-	if a4Height < 10 {
-		a4Height = 30
-	}
-	a4Size := BarcodeLabelSize{
-		Key: "a4", WidthMM: a4Width, HeightMM: a4Height,
-		NameFontPx: 11, SkuFontPx: 9, PriceFontPx: 12, MetaFontPx: 8,
-		BarcodeH: 28, BarcodeW: 1.2, PaddingMM: 3,
-	}
+	sheetLayout := a4LabelSheetLayoutFromBusiness(business)
+	a4Size := barcodeLabelSizeForA4Layout(sheetLayout)
 	singleLabel := buildProductLabelHTML(sample, a4Size, false)
-	previewCount := columns * 2
-	if previewCount > 6 {
-		previewCount = 6
+	previewCount := sheetLayout.labelsPerSheet()
+	if previewCount > 8 {
+		previewCount = 8
 	}
-	labelsHTML := strings.Repeat(singleLabel, previewCount)
-	colWidth := 100.0 / float64(columns)
+	labelHTMLs := make([]string, previewCount)
+	for i := range labelHTMLs {
+		labelHTMLs[i] = singleLabel
+	}
 
-	css := fmt.Sprintf(`
-body { font-family: Arial, sans-serif; margin: 0; padding: 8px; background: #f3f4f6; }
-.sheet {
-	background: white;
-	border: 1px solid #d1d5db;
-	padding: %.2fmm;
-	max-width: 210mm;
-	margin: 0 auto;
-}
-.labels-grid {
-	display: grid;
-	grid-template-columns: repeat(%d, %s);
-	gap: 5mm;
-}
-.label {
-	border: 1px solid #000;
-	padding: %.2fmm;
-	text-align: center;
-	box-sizing: border-box;
-	width: %.2fmm;
-	height: %.2fmm;
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-	justify-content: center;
-	overflow: hidden;
-}
-.product-name { font-size: %.1fpx; font-weight: bold; margin-bottom: 2px; max-width: 100%%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.product-sku { font-size: %.1fpx; margin-bottom: 2px; }
-.product-barcode { width: 100%%; line-height: 0; }
-.product-barcode svg { max-width: 100%%; height: auto; }
-.product-price { font-size: %.1fpx; font-weight: bold; }
-.product-mrp, .product-category { font-size: %.1fpx; color: #666; }
-.caption { font-size: 11px; color: #6b7280; text-align: center; margin-top: 8px; }
-`, business.LabelMarginMM, columns, fmt.Sprintf("%.2f%%", colWidth), a4Size.PaddingMM, a4Width, a4Height,
-		a4Size.NameFontPx, a4Size.SkuFontPx, a4Size.PriceFontPx, a4Size.MetaFontPx)
-
-	body := fmt.Sprintf(`<div class="sheet">
-<div class="labels-grid">%s</div>
-<p class="caption">A4 sheet · %d columns × %d rows (preview shows sample labels)</p>
-</div>`, labelsHTML, columns, business.LabelRows)
-
-	return wrapBarcodePreviewDocument(css, body)
+	bodyDoc := buildA4LabelsSheetDocument("A4 Label Preview", labelHTMLs, sheetLayout, 1, true)
+	caption := fmt.Sprintf(
+		`<p class="caption" style="font-size:11px;color:#6b7280;text-align:center;margin:8px 0;font-family:Arial,sans-serif">A4 sheet · %s · %d×%d grid · %d labels/sheet · %.1f×%.1f mm</p>`,
+		html.EscapeString(sheetLayout.PaperSize),
+		sheetLayout.Columns, sheetLayout.Rows, sheetLayout.labelsPerSheet(),
+		sheetLayout.LabelWidthMM, sheetLayout.LabelHeightMM,
+	)
+	// Inject caption before closing body in preview document.
+	if idx := strings.LastIndex(bodyDoc, "</body>"); idx >= 0 {
+		bodyDoc = bodyDoc[:idx] + caption + bodyDoc[idx:]
+	}
+	return bodyDoc
 }
 
 func generateInvoiceThermal(userID uuid.UUID, invoiceID uuid.UUID, printSize string) (string, int, string) {
@@ -690,6 +650,19 @@ func wrapThermalText(s string, cols int) []string {
 	return lines
 }
 
+// invoiceItemInclusiveUnitPrice returns the per-unit price including tax and line discount,
+// so qty × rate matches the printed line total on thermal receipts.
+func invoiceItemInclusiveUnitPrice(item models.InvoiceItem) float64 {
+	if item.Quantity > 0 {
+		return item.Total / item.Quantity
+	}
+	if item.TaxRate > 0 {
+		discounted := item.UnitPrice * (1 - item.Discount/100)
+		return discounted * (1 + item.TaxRate/100)
+	}
+	return item.UnitPrice
+}
+
 func formatStackedItemLine(qty, rate, total string, cols int) string {
 	body := fmt.Sprintf("%s x %s = %s", qty, rate, total)
 	if runeLen(body)+2 <= cols {
@@ -794,7 +767,7 @@ func prepareInvoiceData(invoice models.Invoice, business models.Business, printS
 	maxDescLen := thermalDescLen(printSize)
 	for i, item := range invoice.Items {
 		qty := fmt.Sprintf("%.0f", item.Quantity)
-		rate := fmt.Sprintf("%.2f", item.UnitPrice)
+		rate := fmt.Sprintf("%.2f", invoiceItemInclusiveUnitPrice(item))
 		total := fmt.Sprintf("%.2f", item.Total)
 		desc := truncateString(item.Description, maxDescLen)
 		entry := ItemTemplateData{

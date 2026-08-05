@@ -98,6 +98,8 @@ func CreateInvoice(c *gin.Context) {
 		InvoiceDiscount  float64   `json:"invoice_discount"`
 		AdditionalCharges float64  `json:"additional_charges"`
 		LoyaltyPointsRedeemed int64 `json:"loyalty_points_redeemed"`
+		IsPOS                 bool  `json:"is_pos"`
+		PosSessionID          *uuid.UUID `json:"pos_session_id"`
 		Signature        string                 `json:"signature"`
 		PDFTemplate      string                 `json:"pdf_template"`
 		CustomFields     map[string]interface{} `json:"custom_fields"`
@@ -182,6 +184,7 @@ func CreateInvoice(c *gin.Context) {
 		Signature:         input.Signature,
 		PDFTemplate:       input.PDFTemplate,
 		CustomFields:      encodeCustomFieldsMap(input.CustomFields),
+		IsPOS:             input.IsPOS,
 	}
 
 	if invoice.Status == "" {
@@ -313,10 +316,22 @@ func CreateInvoice(c *gin.Context) {
 	}
 
 	if invoice.AmountPaid > 0 {
-		desc := fmt.Sprintf("Sales invoice %s", invoice.InvoiceNumber)
-		if err := recordSalePaymentIn(utils.DB, userID, invoice.BankAccountID, invoice.AmountPaid, invoice.Date, invoice.InvoiceNumber, desc); err != nil {
-			fmt.Printf("[DEBUG] CreateInvoice - cash ledger error: %v\n", err)
+		notes := fmt.Sprintf("Auto-created from sales invoice %s", invoice.InvoiceNumber)
+		if invoice.IsPOS {
+			notes = fmt.Sprintf("Auto-created from POS sale %s", invoice.InvoiceNumber)
 		}
+		if err := createLinkedSalePaymentIn(utils.DB, userID, &invoice, invoice.AmountPaid, invoice.Date, notes); err != nil {
+			fmt.Printf("[DEBUG] CreateInvoice - payment in error: %v\n", err)
+		}
+	}
+
+	if input.IsPOS && input.PosSessionID != nil {
+		utils.DB.Model(&models.POSSession{}).
+			Where("user_id = ? AND id = ? AND status = ?", userID, *input.PosSessionID, "open").
+			Updates(map[string]interface{}{
+				"total_sales":    gorm.Expr("total_sales + ?", invoice.TotalAmount),
+				"total_invoices": gorm.Expr("total_invoices + 1"),
+			})
 	}
 
 	fmt.Printf("[DEBUG] CreateInvoice - Invoice created successfully: %s\n", invoice.ID)
@@ -529,9 +544,12 @@ func UpdateInvoice(c *gin.Context) {
 	applyInvoiceSaleStock(userID, &invoice)
 
 	if paymentDelta := invoice.AmountPaid - previousAmountPaid; paymentDelta > 0 {
-		desc := fmt.Sprintf("Sales invoice %s (payment update)", invoice.InvoiceNumber)
-		if err := recordSalePaymentIn(utils.DB, userID, invoice.BankAccountID, paymentDelta, invoice.Date, invoice.InvoiceNumber, desc); err != nil {
-			fmt.Printf("[DEBUG] UpdateInvoice - cash ledger error: %v\n", err)
+		notes := fmt.Sprintf("Auto-created from sales invoice %s (payment update)", invoice.InvoiceNumber)
+		if invoice.IsPOS {
+			notes = fmt.Sprintf("Auto-created from POS sale %s (payment update)", invoice.InvoiceNumber)
+		}
+		if err := createLinkedSalePaymentIn(utils.DB, userID, &invoice, paymentDelta, invoice.Date, notes); err != nil {
+			fmt.Printf("[DEBUG] UpdateInvoice - payment in error: %v\n", err)
 		}
 	}
 

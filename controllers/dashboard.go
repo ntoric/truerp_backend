@@ -76,13 +76,7 @@ func GetDashboardStats(c *gin.Context) {
 	// Catalog snapshot — same scope as GET /products (user_id, GORM soft-delete)
 	utils.DB.Model(&models.Product{}).Where("user_id = ?", userID).Count(&stats.TotalProducts)
 
-	lowStockQuery := `
-		SELECT COUNT(DISTINCT p.id)
-		FROM products p
-		INNER JOIN inventory_stocks s ON p.id = s.product_id
-		WHERE p.user_id = ? AND p.deleted_at IS NULL AND p.low_stock_alert = true AND s.quantity <= p.min_stock
-	`
-	utils.DB.Raw(lowStockQuery, userID).Scan(&stats.LowStockProducts)
+	stats.LowStockProducts = countConsolidatedLowStockProducts(userID, true)
 
 	// Pending receivables — issued invoices with remaining balance (excludes drafts/cancelled/paid)
 	utils.DB.Model(&models.Invoice{}).

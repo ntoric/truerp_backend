@@ -297,9 +297,9 @@ func createImportedInvoice(userID uuid.UUID, userName string, lines []invoiceImp
 	}
 
 	if invoice.AmountPaid > 0 {
-		desc := fmt.Sprintf("Sales invoice %s", invoice.InvoiceNumber)
-		if err := recordSalePaymentIn(utils.DB, userID, invoice.BankAccountID, invoice.AmountPaid, invoice.Date, invoice.InvoiceNumber, desc); err != nil {
-			fmt.Printf("[DEBUG] createImportedInvoice - cash ledger error: %v\n", err)
+		notes := fmt.Sprintf("Auto-created from sales invoice %s", invoice.InvoiceNumber)
+		if err := createLinkedSalePaymentIn(utils.DB, userID, &invoice, invoice.AmountPaid, invoice.Date, notes); err != nil {
+			fmt.Printf("[DEBUG] createImportedInvoice - payment in error: %v\n", err)
 		}
 	}
 

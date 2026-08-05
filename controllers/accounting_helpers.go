@@ -270,7 +270,9 @@ func postExpenseAccounting(tx *gorm.DB, userID uuid.UUID, expense *models.Expens
 	}
 	desc := fmt.Sprintf("Expense %s", expense.ExpenseNumber)
 	assetCode := acCodeCash
-	if bankID, err := resolveBankAccountForPaymentMode(userID, expense.PaymentMode, nil); err == nil && bankID != nil {
+	if expense.BankAccountID != nil {
+		assetCode = acCodeBank
+	} else if bankID, err := resolveBankAccountForPaymentMode(userID, expense.PaymentMode, nil); err == nil && bankID != nil {
 		assetCode = acCodeBank
 	}
 	return postAutoJournal(tx, userID, expense.Date, desc, "expense", expense.ID, expense.ExpenseNumber, []glLine{

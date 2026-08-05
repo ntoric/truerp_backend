@@ -15,7 +15,7 @@ func GetPayments(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var payments []models.Payment
-	query := utils.DB.Where("user_id = ?", userID).Preload("Party")
+	query := utils.DB.Where("user_id = ?", userID).Preload("Party").Preload("Invoice")
 
 	if invoiceID := c.Query("invoice_id"); invoiceID != "" {
 		query = query.Where("invoice_id = ?", invoiceID)

@@ -72,6 +72,59 @@ func recordPurchasePaymentOut(tx *gorm.DB, userID uuid.UUID, accountID *uuid.UUI
 	return postPurchasePaymentAccounting(tx, userID, transaction.ID, accountID, amount, date, reference, description)
 }
 
+// createLinkedSalePaymentIn records a Payment row for a sales invoice payment
+// and posts cash/bank + AR reduction. Invoice amount_paid/status must already be set.
+func createLinkedSalePaymentIn(tx *gorm.DB, userID uuid.UUID, invoice *models.Invoice, amount float64, date time.Time, notes string) error {
+	if amount <= 0 || invoice == nil {
+		return nil
+	}
+
+	var count int64
+	if err := tx.Model(&models.Payment{}).Where("user_id = ?", userID).Count(&count).Error; err != nil {
+		return err
+	}
+	number := fmt.Sprintf("PIN-%04d", count+1)
+
+	mode := invoice.PaymentMode
+	if mode == "" {
+		mode = "cash"
+	}
+
+	invoiceID := invoice.ID
+	payment := models.Payment{
+		ID:              uuid.New(),
+		UserID:          userID,
+		InvoiceID:       &invoiceID,
+		PartyID:         invoice.PartyID,
+		AmountReceived:  amount,
+		PaymentInNumber: number,
+		Mode:            mode,
+		Date:            date,
+		Reference:       invoice.InvoiceNumber,
+		Notes:           notes,
+	}
+	if err := tx.Create(&payment).Error; err != nil {
+		return err
+	}
+
+	desc := fmt.Sprintf("Sales invoice %s", invoice.InvoiceNumber)
+	if invoice.IsPOS {
+		desc = fmt.Sprintf("POS sale %s", invoice.InvoiceNumber)
+	}
+	if err := recordSalePaymentIn(tx, userID, invoice.BankAccountID, amount, date, invoice.InvoiceNumber, desc); err != nil {
+		return err
+	}
+
+	var party models.Party
+	if err := tx.Where("user_id = ? AND id = ?", userID, invoice.PartyID).First(&party).Error; err == nil {
+		if err := tx.Model(&party).Update("balance", party.Balance-amount).Error; err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // createLinkedPurchasePaymentOut records a PaymentOut row for a purchase bill payment
 // and posts cash/bank + AP reduction. Bill paid_amount/balance_due must already be updated.
 func createLinkedPurchasePaymentOut(tx *gorm.DB, userID uuid.UUID, bill *models.PurchaseBill, amount float64, date time.Time, notes string) error {
@@ -120,6 +173,64 @@ func createLinkedPurchasePaymentOut(tx *gorm.DB, userID uuid.UUID, bill *models.
 		}
 	}
 
+	return nil
+}
+
+// recordExpenseCashOut deducts an expense from a bank account or cash in-hand.
+func recordExpenseCashOut(tx *gorm.DB, userID uuid.UUID, accountID *uuid.UUID, amount float64, date time.Time, reference, description string) error {
+	if amount <= 0 {
+		return nil
+	}
+	if accountID != nil {
+		var account models.BankAccount
+		if err := tx.Where("user_id = ? AND id = ? AND is_active = ?", userID, *accountID, true).First(&account).Error; err != nil {
+			return err
+		}
+		account.Balance -= amount
+		if err := tx.Save(&account).Error; err != nil {
+			return err
+		}
+	}
+	transaction := models.CashTransaction{
+		ID:              uuid.New(),
+		UserID:          userID,
+		AccountID:       accountID,
+		TransactionType: "expense",
+		Amount:          amount,
+		Date:            date,
+		Description:     description,
+		Reference:       reference,
+		IsLinked:        true,
+	}
+	return tx.Create(&transaction).Error
+}
+
+// reverseExpenseCashOut restores cash/bank for an expense referenced by expense number.
+func reverseExpenseCashOut(tx *gorm.DB, userID uuid.UUID, reference string) error {
+	if reference == "" {
+		return nil
+	}
+	var transactions []models.CashTransaction
+	if err := tx.Where(
+		"user_id = ? AND reference = ? AND is_linked = ? AND transaction_type = ?",
+		userID, reference, true, "expense",
+	).Find(&transactions).Error; err != nil {
+		return err
+	}
+	for _, txn := range transactions {
+		if txn.AccountID != nil {
+			var account models.BankAccount
+			if err := tx.Where("user_id = ? AND id = ?", userID, *txn.AccountID).First(&account).Error; err == nil {
+				account.Balance += txn.Amount
+				if err := tx.Save(&account).Error; err != nil {
+					return err
+				}
+			}
+		}
+		if err := tx.Delete(&txn).Error; err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

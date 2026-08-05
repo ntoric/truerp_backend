@@ -134,12 +134,17 @@ type Business struct {
 	IFSCCode      string    `json:"ifsc_code"`
 	UPIID         string    `json:"upi_id"`
 	// Label printing settings
-	LabelPaperSize string  `json:"label_paper_size" gorm:"default:'A4'"`
-	LabelWidthMM   float64 `json:"label_width_mm" gorm:"default:50"`
-	LabelHeightMM  float64 `json:"label_height_mm" gorm:"default:30"`
-	LabelColumns   int     `json:"label_columns" gorm:"default:3"`
-	LabelRows      int     `json:"label_rows" gorm:"default:8"`
-	LabelMarginMM  float64 `json:"label_margin_mm" gorm:"default:10"`
+	LabelPaperSize     string  `json:"label_paper_size" gorm:"default:'A4'"`
+	LabelSheetPreset   string  `json:"label_sheet_preset" gorm:"default:'48.5x25.4'"`
+	LabelWidthMM       float64 `json:"label_width_mm" gorm:"default:48.5"`
+	LabelHeightMM      float64 `json:"label_height_mm" gorm:"default:25.4"`
+	LabelColumns       int     `json:"label_columns" gorm:"default:4"`
+	LabelRows          int     `json:"label_rows" gorm:"default:11"`
+	LabelMarginMM      float64 `json:"label_margin_mm" gorm:"default:5"`
+	LabelMarginTopMM   float64 `json:"label_margin_top_mm" gorm:"default:8.8"`
+	LabelMarginLeftMM  float64 `json:"label_margin_left_mm" gorm:"default:5"`
+	LabelGapHMM        float64 `json:"label_gap_h_mm" gorm:"default:2"`
+	LabelGapVMM        float64 `json:"label_gap_v_mm" gorm:"default:0"`
 	// AI HSN search settings
 	EnableAIHSNSearch   bool           `json:"enable_ai_hsn_search" gorm:"column:enable_aihsn_search;default:false"`
 	EnableAIBillParsing bool           `json:"enable_ai_bill_parsing" gorm:"default:false"`
@@ -190,6 +195,7 @@ type Invoice struct {
 	IRN                   string         `json:"irn"`                                       // Invoice Reference Number for e-invoicing
 	EInvoiceStatus        string         `json:"e_invoice_status" gorm:"default:'pending'"` // pending, generated, cancelled
 	EInvoiceGeneratedAt   *time.Time     `json:"e_invoice_generated_at,omitempty"`
+	IsPOS                 bool           `json:"is_pos" gorm:"default:false"`
 	Party                 Party          `json:"party,omitempty" gorm:"foreignKey:PartyID"`
 	Items                 []InvoiceItem  `json:"items" gorm:"foreignKey:InvoiceID;constraint:OnDelete:CASCADE;"`
 	CreatedAt             time.Time      `json:"created_at"`
@@ -224,6 +230,7 @@ type Payment struct {
 	ID                uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID            uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
 	InvoiceID         *uuid.UUID     `json:"invoice_id,omitempty" gorm:"type:uuid"`
+	Invoice           *Invoice       `json:"invoice,omitempty" gorm:"foreignKey:InvoiceID"`
 	PartyID           uuid.UUID      `json:"party_id" gorm:"type:uuid;not null"`
 	Party             Party          `json:"party,omitempty" gorm:"foreignKey:PartyID"`
 	AmountReceived    float64        `json:"amount_received" gorm:"default:0"`
@@ -272,6 +279,8 @@ type Expense struct {
 	Date               time.Time      `json:"date"`
 	Vendor             string         `json:"vendor"`
 	PaymentMode        string         `json:"payment_mode"`
+	BankAccountID      *uuid.UUID     `json:"bank_account_id,omitempty" gorm:"type:uuid;index"`
+	BankAccount        *BankAccount   `json:"bank_account,omitempty" gorm:"foreignKey:BankAccountID"`
 	Notes              string         `json:"notes"`
 	ReceiptURL         string         `json:"receipt_url"`
 	Items              []ExpenseItem  `json:"items" gorm:"foreignKey:ExpenseID;constraint:OnDelete:CASCADE;"`
@@ -330,6 +339,8 @@ type DailyReport struct {
 	AccountsPayableTotal float64 `json:"accounts_payable_total"`
 	GSTCollected         float64 `json:"gst_collected"`
 	NetCashFlow          float64 `json:"net_cash_flow"`
+	// DailyProfit = net sales − net purchases − operating expenses (accrual, not cash flow).
+	DailyProfit float64 `json:"daily_profit"`
 }
 
 type GSTReport struct {
@@ -433,8 +444,9 @@ type InventoryStock struct {
 	BatchNo      string     `json:"batch_no" gorm:"default:'';uniqueIndex:idx_inventory_stock_batch"`
 	MfgDate      *time.Time `json:"mfg_date,omitempty"`
 	ExpDate      *time.Time `json:"exp_date,omitempty"`
-	Quantity     float64    `json:"quantity" gorm:"default:0"`
-	ReservedQty  float64    `json:"reserved_qty" gorm:"default:0"`  // Reserved for orders
+	Quantity         float64    `json:"quantity" gorm:"default:0"`
+	InitialQuantity  float64    `json:"initial_quantity" gorm:"default:0"` // Qty when batch/outlet stock was first recorded
+	ReservedQty        float64    `json:"reserved_qty" gorm:"default:0"`  // Reserved for orders
 	AvailableQty float64    `json:"available_qty" gorm:"default:0"` // Quantity - Reserved
 	AverageCost  float64    `json:"average_cost" gorm:"default:0"`  // Weighted average cost
 	LastUpdated  time.Time  `json:"last_updated"`
