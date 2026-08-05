@@ -564,6 +564,7 @@ func PrintProductLabel(c *gin.Context) {
 	var input struct {
 		Quantity  int    `json:"quantity"`
 		LabelSize string `json:"label_size"`
+		Format    string `json:"format"` // html (default) or json for silent ESC/POS
 	}
 	if c.Request.Method == "POST" {
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -604,6 +605,36 @@ func PrintProductLabel(c *gin.Context) {
 		SalePrice: product.SalePrice,
 		MRP:       product.MRP,
 	}
+	format := strings.ToLower(strings.TrimSpace(input.Format))
+	if format == "" {
+		format = strings.ToLower(strings.TrimSpace(c.Query("format")))
+	}
+	if barcodeMode == "label" && (format == "json" || wantsJSONResponse(c)) {
+		code := barcodeValueForProduct(labelData)
+		entry := BarcodeLabelItemJSON{
+			Name:    labelData.Name,
+			Barcode: code,
+			SKU:     labelData.SKU,
+			Price:   labelData.SalePrice,
+		}
+		if !compact && labelData.MRP > 0 {
+			entry.MRP = labelData.MRP
+		}
+		labels := make([]BarcodeLabelItemJSON, 0, input.Quantity)
+		for i := 0; i < input.Quantity; i++ {
+			labels = append(labels, entry)
+		}
+		c.JSON(http.StatusOK, BarcodeLabelsResponse{
+			Title:    "Product Label",
+			Size:     labelSize.Key,
+			WidthMM:  labelSize.WidthMM,
+			HeightMM: labelSize.HeightMM,
+			Compact:  compact,
+			Labels:   labels,
+		})
+		return
+	}
+
 	singleLabel := buildProductLabelHTML(labelData, labelSize, compact)
 
 	labelsHTML := ""

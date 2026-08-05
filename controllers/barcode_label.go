@@ -151,28 +151,47 @@ func buildProductLabelHTML(p productLabelData, size BarcodeLabelSize, compact bo
 	sku := html.EscapeString(p.SKU)
 	category := html.EscapeString(p.Category)
 
-	parts := []string{fmt.Sprintf(`<div class="label">
-	<div class="product-name">%s</div>`, name)}
-
+	// Horizontal thermal layout: text block (left) + barcode (right), one label per row.
+	left := []string{fmt.Sprintf(`	<div class="label-left">
+		<div class="product-name">%s</div>`, name)}
 	if !compact && p.SKU != "" {
-		parts = append(parts, fmt.Sprintf(`	<div class="product-sku">SKU: %s</div>`, sku))
+		left = append(left, fmt.Sprintf(`		<div class="product-sku">SKU: %s</div>`, sku))
 	}
-
-	parts = append(parts, fmt.Sprintf(`	<div class="product-barcode">
-		%s
-	</div>
-	<div class="product-price">₹%.2f</div>`,
-		barcodeImageHTML(code, size.BarcodeW, size.BarcodeH, size.MetaFontPx), p.SalePrice))
-
+	left = append(left, fmt.Sprintf(`		<div class="product-price">₹%.2f</div>`, p.SalePrice))
 	if !compact && p.MRP > 0 {
-		parts = append(parts, fmt.Sprintf(`	<div class="product-mrp">MRP: ₹%.2f</div>`, p.MRP))
+		left = append(left, fmt.Sprintf(`		<div class="product-mrp">MRP: ₹%.2f</div>`, p.MRP))
 	}
 	if !compact && size.Key == "3inch" && p.Category != "" {
-		parts = append(parts, fmt.Sprintf(`	<div class="product-category">%s</div>`, category))
+		left = append(left, fmt.Sprintf(`		<div class="product-category">%s</div>`, category))
 	}
+	left = append(left, `	</div>`)
 
-	parts = append(parts, `</div>`)
-	return strings.Join(parts, "\n")
+	return fmt.Sprintf(`<div class="label">
+%s
+	<div class="product-barcode">
+		%s
+	</div>
+</div>`, strings.Join(left, "\n"),
+		barcodeImageHTML(code, size.BarcodeW, size.BarcodeH, size.MetaFontPx))
+}
+
+// BarcodeLabelItemJSON is one printable sticker for silent ESC/POS / client rendering.
+type BarcodeLabelItemJSON struct {
+	Name    string  `json:"name"`
+	Barcode string  `json:"barcode"`
+	SKU     string  `json:"sku,omitempty"`
+	Price   float64 `json:"price"`
+	MRP     float64 `json:"mrp,omitempty"`
+}
+
+// BarcodeLabelsResponse is the structured thermal-label payload (no OS print dialog path).
+type BarcodeLabelsResponse struct {
+	Title    string                 `json:"title"`
+	Size     string                 `json:"size"`
+	WidthMM  float64                `json:"width_mm"`
+	HeightMM float64                `json:"height_mm"`
+	Compact  bool                   `json:"compact"`
+	Labels   []BarcodeLabelItemJSON `json:"labels"`
 }
 
 func barcodeLabelPageCSS(size BarcodeLabelSize) string {
@@ -184,87 +203,128 @@ func barcodeLabelPageCSS(size BarcodeLabelSize) string {
 * { box-sizing: border-box; }
 html, body {
 	width: %.2fmm;
-	height: %.2fmm;
+	margin: 0;
+	padding: 0;
 }
 body {
 	font-family: Arial, Helvetica, sans-serif;
-	margin: 0;
-	padding: 0;
 	-webkit-print-color-adjust: exact;
 	print-color-adjust: exact;
 }
 .label {
 	width: %.2fmm;
 	height: %.2fmm;
+	max-width: %.2fmm;
+	max-height: %.2fmm;
 	padding: %.2fmm;
-	text-align: center;
 	display: flex;
-	flex-direction: column;
+	flex-direction: row;
 	align-items: center;
-	justify-content: center;
+	justify-content: space-between;
+	gap: %.2fmm;
 	overflow: hidden;
 	border: none;
 	page-break-after: always;
 	break-after: page;
+	page-break-inside: avoid;
+	break-inside: avoid;
 }
 .label:last-child {
 	page-break-after: auto;
 	break-after: auto;
 }
+.label-left {
+	flex: 1 1 auto;
+	min-width: 0;
+	max-width: 48%%;
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	justify-content: center;
+	text-align: left;
+	overflow: hidden;
+}
 .product-name {
 	font-size: %.1fpx;
 	font-weight: bold;
-	line-height: 1.15;
+	line-height: 1.1;
 	max-width: 100%%;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-	margin-bottom: 1px;
+	margin: 0 0 1px;
 }
 .product-sku {
 	font-size: %.1fpx;
-	line-height: 1.1;
-	margin-bottom: 1px;
+	line-height: 1.05;
+	margin: 0 0 1px;
 	color: #333;
+	max-width: 100%%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 .product-barcode {
-	width: 100%%;
+	flex: 0 1 52%%;
+	max-width: 52%%;
 	line-height: 1;
-	margin: 1px 0;
+	margin: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	overflow: hidden;
 }
 .product-barcode .barcode-img {
 	max-width: 100%%;
+	max-height: %.2fmm;
+	width: auto;
 	height: auto;
 	display: block;
-	margin: 0 auto;
+	object-fit: contain;
 }
 .product-barcode .barcode-text,
 .product-barcode-fallback {
 	font-family: "Courier New", Courier, monospace;
 	font-size: %.1fpx;
-	line-height: 1.1;
+	line-height: 1.05;
 	margin-top: 1px;
-	letter-spacing: 0.5px;
+	letter-spacing: 0.3px;
+	text-align: center;
+	max-width: 100%%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 .product-price {
 	font-size: %.1fpx;
 	font-weight: bold;
 	line-height: 1.1;
-	margin-top: 1px;
+	margin: 1px 0 0;
 }
 .product-mrp, .product-category {
 	font-size: %.1fpx;
 	color: #555;
-	line-height: 1.1;
+	line-height: 1.05;
+	margin: 0;
 }
 @media print {
-	html, body { width: %.2fmm; height: auto; }
-	.label { border: none; }
+	html, body {
+		width: %.2fmm !important;
+		margin: 0 !important;
+		padding: 0 !important;
+	}
+	.label {
+		border: none;
+		width: %.2fmm !important;
+		height: %.2fmm !important;
+	}
 }
-`, size.WidthMM, size.HeightMM, size.WidthMM, size.HeightMM,
-		size.WidthMM, size.HeightMM, size.PaddingMM,
-		size.NameFontPx, size.SkuFontPx, size.MetaFontPx, size.PriceFontPx, size.MetaFontPx,
-		size.WidthMM)
+`, size.WidthMM, size.HeightMM, size.WidthMM,
+		size.WidthMM, size.HeightMM, size.WidthMM, size.HeightMM, size.PaddingMM, size.PaddingMM,
+		size.NameFontPx, size.SkuFontPx, size.HeightMM*0.55,
+		size.MetaFontPx, size.PriceFontPx, size.MetaFontPx,
+		size.WidthMM, size.WidthMM, size.HeightMM)
 }
 
 func wrapBarcodeLabelDocument(title, css, bodyHTML string) string {

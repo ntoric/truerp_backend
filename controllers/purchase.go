@@ -1151,6 +1151,8 @@ type LabelRequest struct {
 	BillID         string             `json:"bill_id" binding:"required"`
 	ItemQuantities map[string]float64 `json:"item_quantities"` // item_id -> quantity (default to invoice quantity if not provided)
 	Config         LabelConfig        `json:"config"`
+	// Format: "html" (default) or "json" for silent desktop ESC/POS printing.
+	Format string `json:"format"`
 }
 
 func PrintPurchaseBillLabels(c *gin.Context) {
@@ -1244,11 +1246,66 @@ func PrintPurchaseBillLabels(c *gin.Context) {
 		return
 	}
 
+	format := strings.ToLower(strings.TrimSpace(req.Format))
+	if format == "" {
+		format = strings.ToLower(strings.TrimSpace(c.Query("format")))
+	}
+	if format == "json" || (isThermalLabelPaperSize(config.PaperSize) && wantsJSONResponse(c)) {
+		size := getBarcodeLabelSize(config.PaperSize)
+		compact := config.PaperSize == "1inch" || config.PaperSize == "1.5inch"
+		payload := BarcodeLabelsResponse{
+			Title:    "Labels - " + bill.BillNumber,
+			Size:     size.Key,
+			WidthMM:  size.WidthMM,
+			HeightMM: size.HeightMM,
+			Compact:  compact,
+			Labels:   purchaseItemsToBarcodeLabels(items, compact),
+		}
+		c.JSON(http.StatusOK, payload)
+		return
+	}
+
 	// Generate labels HTML
 	html := generateLabelsHTML(bill, req.ItemQuantities, config)
 
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(http.StatusOK, html)
+}
+
+func wantsJSONResponse(c *gin.Context) bool {
+	accept := strings.ToLower(c.GetHeader("Accept"))
+	return strings.Contains(accept, "application/json")
+}
+
+func purchaseItemsToBarcodeLabels(items []models.PurchaseBillItem, compact bool) []BarcodeLabelItemJSON {
+	out := make([]BarcodeLabelItemJSON, 0, len(items))
+	for _, item := range items {
+		barcodeVal := strings.TrimSpace(item.ItemCode)
+		if barcodeVal == "" {
+			barcodeVal = strings.TrimSpace(item.HSNCode)
+		}
+		if barcodeVal == "" {
+			barcodeVal = "0000000000"
+		}
+		salePrice := item.SalePrice
+		if salePrice == 0 {
+			salePrice = item.UnitPrice
+		}
+		mrp := item.MRP
+		if mrp == 0 {
+			mrp = item.UnitPrice
+		}
+		entry := BarcodeLabelItemJSON{
+			Name:    item.Description,
+			Barcode: barcodeVal,
+			Price:   salePrice,
+		}
+		if !compact && mrp > 0 && mrp != salePrice {
+			entry.MRP = mrp
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func collectPurchaseLabelItems(bill models.PurchaseBill, itemQuantities map[string]float64) []models.PurchaseBillItem {
@@ -1437,21 +1494,21 @@ func generateThermalPurchaseLabel(item models.PurchaseBillItem, size BarcodeLabe
 	}
 
 	name := html.EscapeString(item.Description)
-	parts := []string{fmt.Sprintf(`<div class="label">
-	<div class="product-name">%s</div>`, name)}
+	left := []string{fmt.Sprintf(`	<div class="label-left">
+		<div class="product-name">%s</div>
+		<div class="product-price">₹%.2f</div>`, name, salePrice)}
+	if !compact && mrp > 0 && mrp != salePrice {
+		left = append(left, fmt.Sprintf(`		<div class="product-mrp">MRP: ₹%.2f</div>`, mrp))
+	}
+	left = append(left, `	</div>`)
 
-	parts = append(parts, fmt.Sprintf(`	<div class="product-barcode">
+	return fmt.Sprintf(`<div class="label">
+%s
+	<div class="product-barcode">
 		%s
 	</div>
-	<div class="product-price">₹%.2f</div>`,
-		barcodeImageHTML(barcodeVal, size.BarcodeW, size.BarcodeH, size.MetaFontPx), salePrice))
-
-	if !compact && mrp > 0 && mrp != salePrice {
-		parts = append(parts, fmt.Sprintf(`	<div class="product-mrp">MRP: ₹%.2f</div>`, mrp))
-	}
-
-	parts = append(parts, `</div>`)
-	return strings.Join(parts, "\n")
+</div>`, strings.Join(left, "\n"),
+		barcodeImageHTML(barcodeVal, size.BarcodeW, size.BarcodeH, size.MetaFontPx))
 }
 
 func generateSingleLabel(item models.PurchaseBillItem, billNumber string) string {
