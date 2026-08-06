@@ -39,6 +39,7 @@ var defaultPageFeatureKeys = []string{
 	"/attendance",
 	"/payroll",
 	"/pos",
+	"/pos/sessions",
 	"/sms-marketing",
 	"/email-marketing",
 	"/whatsapp-marketing",

@@ -89,6 +89,7 @@ type User struct {
 	TotpSecret             string         `json:"-" gorm:"column:totp_secret"`
 	PasswordResetTokenHash string         `json:"-" gorm:"index"`
 	PasswordResetExpiresAt *time.Time     `json:"-"`
+	MustChangePassword     bool           `json:"must_change_password" gorm:"default:false"`
 	IsActive               bool           `json:"is_active" gorm:"default:true"`
 	Business               Business       `json:"business,omitempty" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
 	CreatedAt              time.Time      `json:"created_at"`
@@ -1971,43 +1972,43 @@ type DeveloperSettings struct {
 	SMTPHost       string `json:"smtp_host"`
 	SMTPPort       int    `json:"smtp_port"`
 	SMTPUsername   string `json:"smtp_username"`
-	SMTPPassword   string `json:"-"` // Decrypted value for API responses
+	SMTPPassword   string `json:"-" gorm:"-"`
 	FromEmail      string `json:"from_email"`
 	FromName       string `json:"from_name"`
-	SendGridAPIKey string `json:"-"` // Decrypted value for API responses
-	SESAccessKey   string `json:"-"` // Decrypted value for API responses
-	SESSecretKey   string `json:"-"` // Decrypted value for API responses
-	MailgunAPIKey  string `json:"-"` // Decrypted value for API responses
+	SendGridAPIKey string `json:"-" gorm:"-"`
+	SESAccessKey   string `json:"-" gorm:"-"`
+	SESSecretKey   string `json:"-" gorm:"-"`
+	MailgunAPIKey  string `json:"-" gorm:"-"`
 	MailgunDomain  string `json:"mailgun_domain"`
 
 	// WhatsApp Service Configuration
 	WhatsAppProvider          string `json:"whatsapp_provider" gorm:"default:'meta'"` // meta, twilio
-	WhatsAppAPIKey            string `json:"-"`                                       // Decrypted value for API responses
+	WhatsAppAPIKey            string `json:"-" gorm:"-"`
 	WhatsAppPhoneNumberID     string `json:"whatsapp_phone_number_id"`
 	WhatsAppBusinessAccountID string `json:"whatsapp_business_account_id"`
 
 	// Twilio Configuration
 	TwilioAccountSID  string `json:"twilio_account_sid"`
-	TwilioAuthToken   string `json:"-"` // Decrypted value for API responses
+	TwilioAuthToken   string `json:"-" gorm:"-"`
 	TwilioPhoneNumber string `json:"twilio_phone_number"`
 
 	// SMS Service Configuration
 	SMSProvider          string `json:"sms_provider" gorm:"default:'twilio'"` // twilio, msg91, textlocal, aws_sns, sendgrid
 	TwilioSMSAccountSID  string `json:"twilio_sms_account_sid"`
-	TwilioSMSAuthToken   string `json:"-"` // Decrypted value for API responses
+	TwilioSMSAuthToken   string `json:"-" gorm:"-"`
 	TwilioSMSPhoneNumber string `json:"twilio_sms_phone_number"`
 	Msg91SenderID        string `json:"msg91_sender_id"`
-	Msg91AuthKey         string `json:"-"` // Decrypted value for API responses
+	Msg91AuthKey         string `json:"-" gorm:"-"`
 	TextLocalSenderID    string `json:"textlocal_sender_id"`
-	TextLocalAPIKey      string `json:"-"` // Decrypted value for API responses
+	TextLocalAPIKey      string `json:"-" gorm:"-"`
 
 	// AWS SNS Configuration
 	AWSAccessKey string `json:"aws_access_key"`
-	AWSSecretKey string `json:"-"` // Decrypted value for API responses
+	AWSSecretKey string `json:"-" gorm:"-"`
 	AWSRegion    string `json:"aws_region"`
 
 	// SendGrid SMS Configuration
-	SendGridSMSAPIKey string `json:"-"` // Decrypted value for API responses
+	SendGridSMSAPIKey string `json:"-" gorm:"-"`
 
 	// Encrypted fields (database storage only)
 	EncryptedSMTPPassword        string `json:"-" gorm:"column:smtp_password"`
@@ -2016,9 +2017,9 @@ type DeveloperSettings struct {
 	EncryptedSESSecretKey        string `json:"-" gorm:"column:ses_secret_key"`
 	EncryptedMailgunAPIKey       string `json:"-" gorm:"column:mailgun_api_key"`
 	EncryptedWhatsAppAPIKey      string `json:"-" gorm:"column:whatsapp_api_key"`
-	EncryptedTwilioAccountSID    string `json:"-" gorm:"column:twilio_account_sid"`
+	EncryptedTwilioAccountSID    string `json:"-" gorm:"-"`
 	EncryptedTwilioAuthToken     string `json:"-" gorm:"column:twilio_auth_token"`
-	EncryptedTwilioSMSAccountSID string `json:"-" gorm:"column:twilio_sms_account_sid"`
+	EncryptedTwilioSMSAccountSID string `json:"-" gorm:"-"`
 	EncryptedTwilioSMSAuthToken  string `json:"-" gorm:"column:twilio_sms_auth_token"`
 	EncryptedMsg91AuthKey        string `json:"-" gorm:"column:msg91_auth_key"`
 	EncryptedTextLocalAPIKey     string `json:"-" gorm:"column:textlocal_api_key"`

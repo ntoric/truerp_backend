@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"html"
+	"math"
 	"net/http"
 	"strings"
 	"text/template"
@@ -650,6 +651,24 @@ func wrapThermalText(s string, cols int) []string {
 	return lines
 }
 
+// formatThermalQuantity prints fractional quantities (e.g. 1.5 KG) instead of rounding to integers.
+func formatThermalQuantity(qty float64, unit string) string {
+	if qty <= 0 {
+		return "0"
+	}
+	isWhole := math.Abs(qty-math.Round(qty)) < 0.0005
+	if isWeightBasedUnit(unit) || !isWhole {
+		s := fmt.Sprintf("%.3f", qty)
+		s = strings.TrimRight(s, "0")
+		s = strings.TrimRight(s, ".")
+		if s == "" {
+			return "0"
+		}
+		return s
+	}
+	return fmt.Sprintf("%.0f", qty)
+}
+
 // invoiceItemInclusiveUnitPrice returns the per-unit price including tax and line discount,
 // so qty × rate matches the printed line total on thermal receipts.
 func invoiceItemInclusiveUnitPrice(item models.InvoiceItem) float64 {
@@ -766,7 +785,7 @@ func prepareInvoiceData(invoice models.Invoice, business models.Business, printS
 	items := make([]ItemTemplateData, len(invoice.Items))
 	maxDescLen := thermalDescLen(printSize)
 	for i, item := range invoice.Items {
-		qty := fmt.Sprintf("%.0f", item.Quantity)
+		qty := formatThermalQuantity(item.Quantity, item.Unit)
 		rate := fmt.Sprintf("%.2f", invoiceItemInclusiveUnitPrice(item))
 		total := fmt.Sprintf("%.2f", item.Total)
 		desc := truncateString(item.Description, maxDescLen)
@@ -868,7 +887,7 @@ func prepareExpenseData(expense models.Expense, business models.Business, printS
 	items := make([]ItemTemplateData, len(expense.Items))
 	maxDescLen := thermalDescLen(printSize)
 	for i, item := range expense.Items {
-		qty := fmt.Sprintf("%.0f", item.Quantity)
+		qty := formatThermalQuantity(item.Quantity, "")
 		rate := fmt.Sprintf("%.2f", item.UnitPrice)
 		total := fmt.Sprintf("%.2f", item.Total)
 		entry := ItemTemplateData{

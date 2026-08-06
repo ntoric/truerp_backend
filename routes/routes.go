@@ -19,8 +19,9 @@ func SetupRoutes(r *gin.Engine) {
 		auth.POST("/register", controllers.Register)
 		auth.POST("/login", controllers.Login)
 		auth.POST("/forgot-password", controllers.ForgotPassword)
-		auth.GET("/reset-password/validate", controllers.ValidateResetToken)
+		auth.POST("/verify-reset-otp", controllers.VerifyResetOTP)
 		auth.POST("/reset-password", controllers.ResetPassword)
+		auth.POST("/set-password", middleware.AuthRequired(), controllers.SetPassword)
 		auth.GET("/profile", middleware.AuthRequired(), controllers.GetProfile)
 		auth.PUT("/profile", middleware.AuthRequired(), controllers.UpdateProfile)
 		auth.GET("/my-stores", middleware.AuthRequired(), controllers.MyStores)
@@ -701,7 +702,8 @@ func SetupRoutes(r *gin.Engine) {
 		
 		// Account Settings
 		settings.POST("/change-password", controllers.ChangePassword)
-		
+		settings.POST("/users/:id/reset-password", controllers.ResetUserPassword)
+
 		// User Management
 		settings.GET("/users", controllers.GetBusinessUsers)
 		settings.POST("/users", controllers.CreateBusinessUser)

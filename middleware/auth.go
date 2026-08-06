@@ -39,6 +39,27 @@ func AuthRequired() gin.HandlerFunc {
 		c.Set("email", claims.Email)
 		c.Set("role", claims.Role)
 
+		var actorFlags models.User
+		if err := utils.DB.Select("id", "must_change_password", "is_active").First(&actorFlags, "id = ?", actorID).Error; err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
+			c.Abort()
+			return
+		}
+		if !actorFlags.IsActive {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Account is deactivated"})
+			c.Abort()
+			return
+		}
+		c.Set("must_change_password", actorFlags.MustChangePassword)
+		if actorFlags.MustChangePassword && !isPasswordChangeAllowedPath(c) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":                    "You must change your password before continuing",
+				"requires_password_change": true,
+			})
+			c.Abort()
+			return
+		}
+
 		scopeUserID := actorID
 		var activeStoreID *uuid.UUID
 
@@ -71,13 +92,8 @@ func AuthRequired() gin.HandlerFunc {
 			}
 		} else {
 			var actor models.User
-			if err := utils.DB.Select("id", "store_id", "is_active", "is_store_owner").First(&actor, "id = ?", actorID).Error; err != nil {
+			if err := utils.DB.Select("id", "store_id", "is_store_owner").First(&actor, "id = ?", actorID).Error; err != nil {
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
-				c.Abort()
-				return
-			}
-			if !actor.IsActive {
-				c.JSON(http.StatusForbidden, gin.H{"error": "Account is deactivated"})
 				c.Abort()
 				return
 			}
@@ -112,6 +128,18 @@ func AuthRequired() gin.HandlerFunc {
 			c.Header("X-Active-Store-ID", activeStoreID.String())
 		}
 		c.Next()
+	}
+}
+
+func isPasswordChangeAllowedPath(c *gin.Context) bool {
+	path := c.Request.URL.Path
+	switch c.Request.Method {
+	case http.MethodPost:
+		return path == "/api/v1/auth/set-password"
+	case http.MethodGet:
+		return path == "/api/v1/auth/profile"
+	default:
+		return false
 	}
 }
 

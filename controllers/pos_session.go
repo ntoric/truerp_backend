@@ -22,10 +22,19 @@ func GetPOSSessions(c *gin.Context) {
 	}
 
 	if fromDate := c.Query("from_date"); fromDate != "" {
-		query = query.Where("opened_at >= ?", fromDate)
+		if parsed, err := time.Parse("2006-01-02", fromDate); err == nil {
+			query = query.Where("opened_at >= ?", parsed)
+		} else {
+			query = query.Where("opened_at >= ?", fromDate)
+		}
 	}
 	if toDate := c.Query("to_date"); toDate != "" {
-		query = query.Where("opened_at <= ?", toDate)
+		if parsed, err := time.Parse("2006-01-02", toDate); err == nil {
+			endOfDay := parsed.Add(24*time.Hour - time.Nanosecond)
+			query = query.Where("opened_at <= ?", endOfDay)
+		} else {
+			query = query.Where("opened_at <= ?", toDate)
+		}
 	}
 
 	if err := query.Order("opened_at DESC").Find(&sessions).Error; err != nil {

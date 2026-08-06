@@ -81,3 +81,23 @@ func ValidateAuthTotpCode(code string) string {
 	}
 	return ""
 }
+
+func NormalizeAuthOTP(code string) string {
+	return strings.TrimSpace(code)
+}
+
+func ValidateAuthResetOTP(code string) string {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return "Verification code is required"
+	}
+	if len(code) != 6 {
+		return "Verification code must be 6 digits"
+	}
+	for _, r := range code {
+		if r < '0' || r > '9' {
+			return "Verification code must contain only digits"
+		}
+	}
+	return ""
+}

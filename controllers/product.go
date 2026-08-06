@@ -353,9 +353,8 @@ func UpdateProduct(c *gin.Context) {
 	if input.Product.MinStock != 0 {
 		updates["min_stock"] = input.Product.MinStock
 	}
-	if input.Product.TaxRate != 0 {
-		updates["tax_rate"] = input.Product.TaxRate
-	}
+	// tax_rate can legitimately be 0 (exempt / zero-rated goods)
+	updates["tax_rate"] = input.Product.TaxRate
 	if input.Product.ItemType != "" {
 		updates["item_type"] = input.Product.ItemType
 	}

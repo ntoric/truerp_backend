@@ -190,8 +190,8 @@ func CreateStockEntry(c *gin.Context) {
 		CostPrice     float64    `json:"cost_price"`
 		BatchNo       string     `json:"batch_no"`
 		ItemCode      string     `json:"item_code"`
-		MfgDate       *time.Time `json:"mfg_date"`
-		ExpDate       *time.Time `json:"exp_date"`
+		MfgDate       string     `json:"mfg_date"`
+		ExpDate       string     `json:"exp_date"`
 		Notes         string     `json:"notes"`
 		ReferenceID   uuid.UUID  `json:"reference_id"`
 		ReferenceType string     `json:"reference_type"`
@@ -201,6 +201,18 @@ func CreateStockEntry(c *gin.Context) {
 		fmt.Printf("[DEBUG] CreateStockEntry - JSON bind error: %v\n", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	var mfgDate, expDate *time.Time
+	if input.MfgDate != "" {
+		if t, err := time.Parse("2006-01-02", input.MfgDate); err == nil {
+			mfgDate = &t
+		}
+	}
+	if input.ExpDate != "" {
+		if t, err := time.Parse("2006-01-02", input.ExpDate); err == nil {
+			expDate = &t
+		}
 	}
 
 	fmt.Printf("[DEBUG] CreateStockEntry - UserID: %s, ItemName: %s, EntryType: %s, Quantity: %f\n", userID, input.ItemName, input.EntryType, input.Quantity)
@@ -228,8 +240,8 @@ func CreateStockEntry(c *gin.Context) {
 		CostPrice:      input.CostPrice,
 		BatchNo:        input.BatchNo,
 		ItemCode:       input.ItemCode,
-		MfgDate:        input.MfgDate,
-		ExpDate:        input.ExpDate,
+		MfgDate:        mfgDate,
+		ExpDate:        expDate,
 		ReferenceID:    input.ReferenceID,
 		ReferenceType:  input.ReferenceType,
 		Notes:          input.Notes,
@@ -249,7 +261,7 @@ func CreateStockEntry(c *gin.Context) {
 
 	// Update inventory stock if product is linked
 	if input.ProductID != nil {
-		updateInventoryStock(userID, *input.ProductID, input.OutletID, input.EntryType, input.Quantity, input.CostPrice, input.BatchNo, input.MfgDate, input.ExpDate)
+		updateInventoryStock(userID, *input.ProductID, input.OutletID, input.EntryType, input.Quantity, input.CostPrice, input.BatchNo, mfgDate, expDate)
 	}
 
 	c.JSON(http.StatusCreated, entry)
@@ -1636,11 +1648,12 @@ func GetInventoryItems(c *gin.Context) {
 	fmt.Printf("[DEBUG] GetInventoryItems - UserID: %s\n", userID)
 
 	type InventoryItem struct {
-		ID       uuid.UUID `json:"id"`
-		Name     string    `json:"name"`
-		SKU      string    `json:"sku"`
-		Type     string    `json:"type"` // "product" or "standalone"
-		IsActive bool      `json:"is_active"`
+		ID              uuid.UUID `json:"id"`
+		Name            string    `json:"name"`
+		SKU             string    `json:"sku"`
+		Type            string    `json:"type"` // "product" or "standalone"
+		IsActive        bool      `json:"is_active"`
+		EnableBatching  bool      `json:"enable_batching"`
 	}
 
 	items := make([]InventoryItem, 0)
@@ -1652,11 +1665,12 @@ func GetInventoryItems(c *gin.Context) {
 	} else {
 		for _, p := range products {
 			items = append(items, InventoryItem{
-				ID:       p.ID,
-				Name:     p.Name,
-				SKU:      p.SKU,
-				Type:     "product",
-				IsActive: p.IsActive,
+				ID:             p.ID,
+				Name:           p.Name,
+				SKU:            p.SKU,
+				Type:           "product",
+				IsActive:       p.IsActive,
+				EnableBatching: p.EnableBatching,
 			})
 		}
 	}

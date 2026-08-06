@@ -61,14 +61,15 @@ func resolveManagedStoreID(c *gin.Context, actor models.User) (uuid.UUID, bool) 
 
 func userPublicResponse(u models.User) gin.H {
 	resp := gin.H{
-		"id":                 u.ID,
-		"name":               u.Name,
-		"email":              u.Email,
-		"phone":              u.Phone,
-		"role":               u.Role,
-		"is_active":          u.IsActive,
-		"two_factor_enabled": u.TwoFactorEnabled,
-		"created_at":         u.CreatedAt,
+		"id":                   u.ID,
+		"name":                 u.Name,
+		"email":                u.Email,
+		"phone":                u.Phone,
+		"role":                 u.Role,
+		"is_active":            u.IsActive,
+		"two_factor_enabled":   u.TwoFactorEnabled,
+		"must_change_password": u.MustChangePassword,
+		"created_at":           u.CreatedAt,
 	}
 	if u.StoreID != nil {
 		resp["store_id"] = u.StoreID
@@ -439,4 +440,81 @@ func normalizeAllowedRole(role string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// ResetUserPassword generates a temporary password for a user (super admin only).
+func ResetUserPassword(c *gin.Context) {
+	actor, err := loadActor(c)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	if !utils.IsSuperAdminRole(actor.Role) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Super admin access required"})
+		return
+	}
+
+	targetID, parseErr := uuid.Parse(c.Param("id"))
+	if parseErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	var target models.User
+	if err := utils.DB.First(&target, "id = ?", targetID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	if target.IsStoreOwner {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot reset password for internal store owner accounts"})
+		return
+	}
+
+	if isProtectedRole(target.Role) && target.ID != actor.ID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot reset password for super admin accounts"})
+		return
+	}
+
+	tempPassword, err := generateTemporaryPassword()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate temporary password"})
+		return
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(tempPassword), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
+		return
+	}
+
+	if err := utils.DB.Model(&target).Updates(map[string]interface{}{
+		"password":             string(hashedPassword),
+		"must_change_password": true,
+	}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+		return
+	}
+
+	CreateAuditLog(
+		actor.ID,
+		actor.Name,
+		"update",
+		"user",
+		&target.ID,
+		target.Email,
+		"Super admin generated temporary password for user",
+		c.ClientIP(),
+		c.GetHeader("User-Agent"),
+		nil,
+		"success",
+		"",
+	)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":             "Temporary password generated. Share it securely with the user.",
+		"temporary_password":  tempPassword,
+		"user":                storeUserResponse(target),
+	})
 }

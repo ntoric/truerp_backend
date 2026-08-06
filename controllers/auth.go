@@ -3,7 +3,9 @@ package controllers
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"time"
 	"truerp/models"
@@ -33,12 +35,18 @@ type ForgotPasswordInput struct {
 	Email string `json:"email" binding:"required,email"`
 }
 
+type VerifyResetOTPInput struct {
+	Email string `json:"email" binding:"required,email"`
+	OTP   string `json:"otp" binding:"required"`
+}
+
 type ResetPasswordInput struct {
-	Token       string `json:"token" binding:"required"`
+	Email       string `json:"email" binding:"required,email"`
+	OTP         string `json:"otp" binding:"required"`
 	NewPassword string `json:"new_password" binding:"required,min=6"`
 }
 
-const passwordResetTokenTTL = time.Hour
+const passwordResetOTPTTL = 15 * time.Minute
 
 func authValidationError(c *gin.Context, fields map[string]string) {
 	message := "Please fix the highlighted fields"
@@ -54,12 +62,49 @@ func hashPasswordResetToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func generatePasswordResetToken() (string, error) {
-	buf := make([]byte, 32)
+func generatePasswordResetOTP() (string, error) {
+	buf := make([]byte, 4)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(buf), nil
+	n := binary.BigEndian.Uint32(buf) % 1000000
+	return fmt.Sprintf("%06d", n), nil
+}
+
+func findUserByPasswordResetOTP(email, otp string) (*models.User, error) {
+	email, emailErr := utils.ValidateAuthEmail(email)
+	if emailErr != "" {
+		return nil, gorm.ErrRecordNotFound
+	}
+	otp = utils.NormalizeAuthOTP(otp)
+	if otp == "" {
+		return nil, gorm.ErrRecordNotFound
+	}
+
+	otpHash := hashPasswordResetToken(otp)
+	var user models.User
+	err := utils.DB.Where(
+		"email = ? AND password_reset_token_hash = ? AND password_reset_expires_at > ?",
+		email, otpHash, time.Now(),
+	).First(&user).Error
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func generateTemporaryPassword() (string, error) {
+	const chars = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	const length = 12
+	random := make([]byte, length)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	out := make([]byte, length)
+	for i := range out {
+		out[i] = chars[int(random[i])%len(chars)]
+	}
+	return string(out), nil
 }
 
 func ForgotPassword(c *gin.Context) {
@@ -95,29 +140,28 @@ func ForgotPassword(c *gin.Context) {
 		return
 	}
 
-	token, genErr := generatePasswordResetToken()
+	otp, genErr := generatePasswordResetOTP()
 	if genErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate reset token"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate verification code"})
 		return
 	}
 
-	expiresAt := time.Now().Add(passwordResetTokenTTL)
-	tokenHash := hashPasswordResetToken(token)
+	expiresAt := time.Now().Add(passwordResetOTPTTL)
+	otpHash := hashPasswordResetToken(otp)
 	if updateErr := utils.DB.Model(&user).Updates(map[string]interface{}{
-		"password_reset_token_hash":  tokenHash,
+		"password_reset_token_hash":  otpHash,
 		"password_reset_expires_at": expiresAt,
 	}).Error; updateErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save reset token"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save verification code"})
 		return
 	}
 
-	resetURL := utils.FrontendURL() + "/reset-password?token=" + token
 	if utils.EmailConfigured() {
-		if sendErr := utils.SendPasswordResetEmail(user.Email, resetURL); sendErr != nil {
-			utils.LogPasswordResetLink(user.Email, resetURL)
+		if sendErr := utils.SendPasswordResetOTPEmail(user.Email, otp); sendErr != nil {
+			utils.LogPasswordResetOTP(user.Email, otp)
 		}
 	} else {
-		utils.LogPasswordResetLink(user.Email, resetURL)
+		utils.LogPasswordResetOTP(user.Email, otp)
 	}
 
 	CreateAuditLog(
@@ -127,7 +171,7 @@ func ForgotPassword(c *gin.Context) {
 		"user",
 		&user.ID,
 		user.Email,
-		"Password reset requested",
+		"Password reset OTP requested",
 		c.ClientIP(),
 		c.GetHeader("User-Agent"),
 		nil,
@@ -136,27 +180,46 @@ func ForgotPassword(c *gin.Context) {
 	)
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Password reset link has been sent to your email.",
+		"message": "A 6-digit verification code has been sent to your email.",
 	})
 }
 
-func ValidateResetToken(c *gin.Context) {
-	token := c.Query("token")
-	if token == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"valid": false, "error": "Token is required"})
+func VerifyResetOTP(c *gin.Context) {
+	var input VerifyResetOTPInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	tokenHash := hashPasswordResetToken(token)
-	var user models.User
-	err := utils.DB.Where("password_reset_token_hash = ? AND password_reset_expires_at > ?", tokenHash, time.Now()).
-		First(&user).Error
+	fields := map[string]string{}
+	email, emailErr := utils.ValidateAuthEmail(input.Email)
+	if emailErr != "" {
+		fields["email"] = emailErr
+	}
+	if otpErr := utils.ValidateAuthResetOTP(input.OTP); otpErr != "" {
+		fields["otp"] = otpErr
+	}
+	if len(fields) > 0 {
+		authValidationError(c, fields)
+		return
+	}
+
+	user, err := findUserByPasswordResetOTP(email, input.OTP)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"valid": false})
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid or expired verification code", "fields": gin.H{"otp": "Invalid or expired verification code"}})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"valid": true})
+	if !user.IsActive {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Account is deactivated"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Verification code confirmed"})
 }
 
 func ResetPassword(c *gin.Context) {
@@ -166,13 +229,26 @@ func ResetPassword(c *gin.Context) {
 		return
 	}
 
-	tokenHash := hashPasswordResetToken(input.Token)
-	var user models.User
-	err := utils.DB.Where("password_reset_token_hash = ? AND password_reset_expires_at > ?", tokenHash, time.Now()).
-		First(&user).Error
+	fields := map[string]string{}
+	email, emailErr := utils.ValidateAuthEmail(input.Email)
+	if emailErr != "" {
+		fields["email"] = emailErr
+	}
+	if otpErr := utils.ValidateAuthResetOTP(input.OTP); otpErr != "" {
+		fields["otp"] = otpErr
+	}
+	if pwdErr := utils.ValidateAuthPassword(input.NewPassword); pwdErr != "" {
+		fields["new_password"] = pwdErr
+	}
+	if len(fields) > 0 {
+		authValidationError(c, fields)
+		return
+	}
+
+	user, err := findUserByPasswordResetOTP(email, input.OTP)
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid or expired reset link"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid or expired verification code", "fields": gin.H{"otp": "Invalid or expired verification code"}})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
@@ -206,7 +282,7 @@ func ResetPassword(c *gin.Context) {
 		"user",
 		&user.ID,
 		user.Email,
-		"Password reset via email link",
+		"Password reset via email OTP",
 		c.ClientIP(),
 		c.GetHeader("User-Agent"),
 		nil,
@@ -436,14 +512,18 @@ func Login(c *gin.Context) {
 	resp := gin.H{
 		"token": token,
 		"user": gin.H{
-			"id":                 user.ID,
-			"name":               user.Name,
-			"email":              user.Email,
-			"phone":              user.Phone,
-			"role":               user.Role,
-			"store_id":           user.StoreID,
-			"two_factor_enabled": user.TwoFactorEnabled,
+			"id":                   user.ID,
+			"name":                 user.Name,
+			"email":                user.Email,
+			"phone":                user.Phone,
+			"role":                 user.Role,
+			"store_id":             user.StoreID,
+			"two_factor_enabled":   user.TwoFactorEnabled,
+			"must_change_password": user.MustChangePassword,
 		},
+	}
+	if user.MustChangePassword {
+		resp["requires_password_change"] = true
 	}
 
 	if user.StoreID != nil {
@@ -476,14 +556,15 @@ func GetProfile(c *gin.Context) {
 	}
 
 	resp := gin.H{
-		"id":                 user.ID,
-		"name":               user.Name,
-		"email":              user.Email,
-		"phone":              user.Phone,
-		"role":               user.Role,
-		"store_id":           user.StoreID,
-		"two_factor_enabled": user.TwoFactorEnabled,
-		"business":           user.Business,
+		"id":                   user.ID,
+		"name":                 user.Name,
+		"email":                user.Email,
+		"phone":                user.Phone,
+		"role":                 user.Role,
+		"store_id":             user.StoreID,
+		"two_factor_enabled":   user.TwoFactorEnabled,
+		"must_change_password": user.MustChangePassword,
+		"business":             user.Business,
 	}
 
 	if storeID, ok := currentStoreID(c); ok {
@@ -534,4 +615,66 @@ func UpdateProfile(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Profile updated successfully"})
+}
+
+// SetPassword lets a user set a new password when MustChangePassword is true (no current password required).
+func SetPassword(c *gin.Context) {
+	userID := actorUserID(c)
+
+	var user models.User
+	if err := utils.DB.First(&user, "id = ?", userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	if !user.MustChangePassword {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Password change is not required for this account"})
+		return
+	}
+
+	var input struct {
+		NewPassword string `json:"new_password" binding:"required,min=6"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if pwdErr := utils.ValidateAuthPassword(input.NewPassword); pwdErr != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": pwdErr, "fields": gin.H{"new_password": pwdErr}})
+		return
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
+		return
+	}
+
+	if err := utils.DB.Model(&user).Updates(map[string]interface{}{
+		"password":               string(hashedPassword),
+		"must_change_password":   false,
+		"password_reset_token_hash": "",
+		"password_reset_expires_at": nil,
+	}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update password"})
+		return
+	}
+
+	CreateAuditLog(
+		userID,
+		user.Name,
+		"update",
+		"user",
+		&userID,
+		user.Email,
+		"User set new password after temporary login",
+		c.ClientIP(),
+		c.GetHeader("User-Agent"),
+		nil,
+		"success",
+		"",
+	)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Password updated successfully"})
 }

@@ -1,8 +1,10 @@
 package utils
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log"
+	"net"
 	"net/smtp"
 	"os"
 	"strconv"
@@ -55,6 +57,13 @@ func SendEmail(to, subject, body string) error {
 	if !EmailConfigured() {
 		return fmt.Errorf("email not configured")
 	}
+	return SendEmailWithConfig(cfg, to, subject, body)
+}
+
+func SendEmailWithConfig(cfg EmailConfig, to, subject, body string) error {
+	if cfg.Host == "" || cfg.From == "" {
+		return fmt.Errorf("email not configured")
+	}
 
 	from := cfg.From
 	if cfg.FromName != "" {
@@ -79,13 +88,51 @@ func SendEmail(to, subject, body string) error {
 	return nil
 }
 
-func SendPasswordResetEmail(to, resetURL string) error {
-	subject := "Reset your TruERP password"
+func TestSMTPConnection(cfg EmailConfig) error {
+	if cfg.Host == "" {
+		return fmt.Errorf("SMTP host is required")
+	}
+	if cfg.Port == 0 {
+		cfg.Port = 587
+	}
+
+	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to connect to SMTP server: %w", err)
+	}
+	defer conn.Close()
+
+	client, err := smtp.NewClient(conn, cfg.Host)
+	if err != nil {
+		return fmt.Errorf("failed to create SMTP client: %w", err)
+	}
+	defer client.Close()
+
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		tlsConfig := &tls.Config{ServerName: cfg.Host}
+		if err = client.StartTLS(tlsConfig); err != nil {
+			return fmt.Errorf("STARTTLS failed: %w", err)
+		}
+	}
+
+	if cfg.Username != "" {
+		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+		if err = client.Auth(auth); err != nil {
+			return fmt.Errorf("SMTP authentication failed: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func SendPasswordResetOTPEmail(to, otp string) error {
+	subject := "Your TruERP password reset code"
 	body := fmt.Sprintf(`<p>Hello,</p>
 <p>We received a request to reset your TruERP account password.</p>
-<p><a href="%s">Reset your password</a></p>
-<p>This link expires in 1 hour. If you did not request a password reset, you can ignore this email.</p>
-<p>— TruERP</p>`, resetURL)
+<p>Your verification code is: <strong style="font-size:24px;letter-spacing:4px;">%s</strong></p>
+<p>This code expires in 15 minutes. If you did not request a password reset, you can ignore this email.</p>
+<p>— TruERP</p>`, otp)
 
 	if err := SendEmail(to, subject, body); err != nil {
 		return err
@@ -93,6 +140,6 @@ func SendPasswordResetEmail(to, resetURL string) error {
 	return nil
 }
 
-func LogPasswordResetLink(email, resetURL string) {
-	log.Printf("[password-reset] email=%s reset_url=%s (SMTP not configured — use this link for testing)", email, resetURL)
+func LogPasswordResetOTP(email, otp string) {
+	log.Printf("[password-reset] email=%s otp=%s (SMTP not configured — use this code for testing)", email, otp)
 }
