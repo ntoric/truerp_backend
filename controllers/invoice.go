@@ -83,8 +83,8 @@ func CreateInvoice(c *gin.Context) {
 		InvoiceType       string     `json:"invoice_type"`
 		PartyID           uuid.UUID  `json:"party_id"`
 		CustomerID        uuid.UUID  `json:"customer_id"`
-		Date              time.Time  `json:"date" binding:"required"`
-		DueDate           *time.Time `json:"due_date"`
+		Date              time.Time             `json:"date" binding:"required"`
+		DueDate           *models.FlexibleTime  `json:"due_date"`
 		PaymentTerms      int        `json:"payment_terms"`
 		Status            string     `json:"status"`
 		PaymentMode       string     `json:"payment_mode"`
@@ -113,7 +113,7 @@ func CreateInvoice(c *gin.Context) {
 			Unit        string               `json:"unit"`
 			HSNCode     string               `json:"hsn_code"`
 			BatchNo     string               `json:"batch_no"`
-			ExpDate     *time.Time           `json:"exp_date"`
+			ExpDate     *models.FlexibleTime `json:"exp_date"`
 		} `json:"items" binding:"required,min=1"`
 	}
 
@@ -169,7 +169,7 @@ func CreateInvoice(c *gin.Context) {
 		InvoiceType:       input.InvoiceType,
 		PartyID:           input.PartyID,
 		Date:              input.Date,
-		DueDate:           input.DueDate,
+		DueDate:           input.DueDate.Ptr(),
 		PaymentTerms:      input.PaymentTerms,
 		Status:            input.Status,
 		PaymentMode:       input.PaymentMode,
@@ -227,7 +227,7 @@ func CreateInvoice(c *gin.Context) {
 			Total:       taxableAmount + cgst + sgst + igst,
 			HSNCode:     item.HSNCode,
 			BatchNo:     strings.TrimSpace(item.BatchNo),
-			ExpDate:     item.ExpDate,
+			ExpDate:     item.ExpDate.Ptr(),
 		})
 
 		subTotal += itemTotal
@@ -384,8 +384,8 @@ func UpdateInvoice(c *gin.Context) {
 		InvoiceNumber     string          `json:"invoice_number"`
 		PartyID           uuid.UUID       `json:"party_id"`
 		CustomerID        uuid.UUID       `json:"customer_id"`
-		Date              time.Time       `json:"date"`
-		DueDate           *time.Time      `json:"due_date"`
+		Date              time.Time            `json:"date"`
+		DueDate           *models.FlexibleTime `json:"due_date"`
 		PaymentTerms      int             `json:"payment_terms"`
 		Status            string          `json:"status"`
 		IsInterState      bool            `json:"is_inter_state"`
@@ -409,7 +409,7 @@ func UpdateInvoice(c *gin.Context) {
 			Unit        string               `json:"unit"`
 			HSNCode     string               `json:"hsn_code"`
 			BatchNo     string               `json:"batch_no"`
-			ExpDate     *time.Time           `json:"exp_date"`
+			ExpDate     *models.FlexibleTime `json:"exp_date"`
 		} `json:"items"`
 	}
 
@@ -455,7 +455,7 @@ func UpdateInvoice(c *gin.Context) {
 	invoice.InvoiceNumber = input.InvoiceNumber
 	invoice.PartyID = input.PartyID
 	invoice.Date = input.Date
-	invoice.DueDate = input.DueDate
+	invoice.DueDate = input.DueDate.Ptr()
 	invoice.PaymentTerms = input.PaymentTerms
 	invoice.Status = input.Status
 	invoice.IsInterState = input.IsInterState
@@ -508,7 +508,7 @@ func UpdateInvoice(c *gin.Context) {
 			Total:       taxable + cgst + sgst + igst,
 			HSNCode:     item.HSNCode,
 			BatchNo:     strings.TrimSpace(item.BatchNo),
-			ExpDate:     item.ExpDate,
+			ExpDate:     item.ExpDate.Ptr(),
 		})
 
 		subTotal += itemTotal

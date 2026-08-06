@@ -21,6 +21,10 @@ func (ft *FlexibleTime) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	s = s[1 : len(s)-1] // Remove quotes
+	if s == "" {
+		ft.Time = time.Time{}
+		return nil
+	}
 
 	// Try parsing as date-only format (YYYY-MM-DD)
 	if t, err := time.Parse("2006-01-02", s); err == nil {
