@@ -4,21 +4,28 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"io"
 	"os"
 )
 
-// GetEncryptionKey retrieves the encryption key from environment or generates a default one
-// In production, this should be set via environment variable
+// GetEncryptionKey retrieves the encryption key from environment or generates a default one.
+// AES accepts 16, 24, or 32-byte keys; any other length is hashed to 32 bytes.
 func GetEncryptionKey() ([]byte, error) {
 	key := os.Getenv("ENCRYPTION_KEY")
 	if key == "" {
-		// Default key for development (should be changed in production)
 		return []byte("truerp-encryption-key-32-bytes!!"), nil
 	}
-	return []byte(key), nil
+	kb := []byte(key)
+	switch len(kb) {
+	case 16, 24, 32:
+		return kb, nil
+	default:
+		sum := sha256.Sum256(kb)
+		return sum[:], nil
+	}
 }
 
 // Encrypt encrypts the plaintext using AES-GCM

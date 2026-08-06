@@ -64,6 +64,9 @@ func SendEmailWithConfig(cfg EmailConfig, to, subject, body string) error {
 	if cfg.Host == "" || cfg.From == "" {
 		return fmt.Errorf("email not configured")
 	}
+	if cfg.Port == 0 {
+		cfg.Port = 587
+	}
 
 	from := cfg.From
 	if cfg.FromName != "" {
@@ -80,41 +83,102 @@ func SendEmailWithConfig(cfg EmailConfig, to, subject, body string) error {
 		body,
 	}, "\r\n")
 
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
-	if err := smtp.SendMail(addr, auth, cfg.From, []string{to}, []byte(msg)); err != nil {
+	client, err := dialSMTPClient(cfg)
+	if err != nil {
 		return err
 	}
-	return nil
+	defer client.Close()
+
+	if cfg.Username != "" {
+		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+		if err = client.Auth(auth); err != nil {
+			return fmt.Errorf("SMTP authentication failed: %w", err)
+		}
+	}
+
+	if err = client.Mail(cfg.From); err != nil {
+		return fmt.Errorf("SMTP MAIL FROM failed: %w", err)
+	}
+	if err = client.Rcpt(to); err != nil {
+		return fmt.Errorf("SMTP RCPT TO failed: %w", err)
+	}
+
+	w, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("SMTP DATA failed: %w", err)
+	}
+	if _, err = w.Write([]byte(msg)); err != nil {
+		return fmt.Errorf("SMTP write failed: %w", err)
+	}
+	if err = w.Close(); err != nil {
+		return fmt.Errorf("SMTP message close failed: %w", err)
+	}
+
+	return client.Quit()
 }
 
-func TestSMTPConnection(cfg EmailConfig) error {
+// dialSMTPConn opens a TCP connection to the SMTP server.
+// Port 465 uses implicit TLS (SMTPS); other ports use plain TCP and STARTTLS when available.
+func dialSMTPConn(cfg EmailConfig) (net.Conn, error) {
+	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	if cfg.Port == 465 {
+		conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: cfg.Host})
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to SMTP server (TLS): %w", err)
+		}
+		return conn, nil
+	}
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to SMTP server: %w", err)
+	}
+	return conn, nil
+}
+
+func dialSMTPClient(cfg EmailConfig) (*smtp.Client, error) {
 	if cfg.Host == "" {
-		return fmt.Errorf("SMTP host is required")
+		return nil, fmt.Errorf("SMTP host is required")
 	}
 	if cfg.Port == 0 {
 		cfg.Port = 587
 	}
 
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	conn, err := net.Dial("tcp", addr)
+	conn, err := dialSMTPConn(cfg)
 	if err != nil {
-		return fmt.Errorf("failed to connect to SMTP server: %w", err)
+		return nil, err
 	}
-	defer conn.Close()
 
 	client, err := smtp.NewClient(conn, cfg.Host)
 	if err != nil {
-		return fmt.Errorf("failed to create SMTP client: %w", err)
+		conn.Close()
+		return nil, fmt.Errorf("failed to create SMTP client: %w", err)
 	}
-	defer client.Close()
 
-	if ok, _ := client.Extension("STARTTLS"); ok {
-		tlsConfig := &tls.Config{ServerName: cfg.Host}
-		if err = client.StartTLS(tlsConfig); err != nil {
-			return fmt.Errorf("STARTTLS failed: %w", err)
+	// Port 465 is already TLS-wrapped; other ports upgrade via STARTTLS when supported.
+	if cfg.Port != 465 {
+		if ok, _ := client.Extension("STARTTLS"); ok {
+			tlsConfig := &tls.Config{ServerName: cfg.Host}
+			if err = client.StartTLS(tlsConfig); err != nil {
+				client.Close()
+				return nil, fmt.Errorf("STARTTLS failed: %w", err)
+			}
 		}
 	}
+
+	return client, nil
+}
+
+func TestSMTPConnection(cfg EmailConfig) error {
+	if cfg.Port == 0 {
+		cfg.Port = 587
+	}
+
+	client, err := dialSMTPClient(cfg)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
 
 	if cfg.Username != "" {
 		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
