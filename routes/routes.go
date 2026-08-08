@@ -728,6 +728,8 @@ func SetupRoutes(r *gin.Engine) {
 	{
 		products.GET("", controllers.GetProducts)
 		products.POST("", controllers.CreateProduct)
+		products.GET("/generate-item-code", controllers.GenerateProductItemCode)
+		products.GET("/check-item-code", controllers.CheckProductItemCode)
 		products.GET("/:id", controllers.GetProduct)
 		products.PUT("/:id", controllers.UpdateProduct)
 		products.DELETE("/:id", controllers.DeleteProduct)

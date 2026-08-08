@@ -16,7 +16,7 @@ import (
 	"github.com/tealeg/xlsx/v3"
 )
 
-const weighingItemCodeMaxLen = 5
+const itemCodeMaxLen = 14
 
 func isWeightBasedUnit(unit string) bool {
 	switch strings.ToUpper(strings.TrimSpace(unit)) {
@@ -33,13 +33,13 @@ func normalizeProductGst(product *models.Product) {
 	}
 }
 
-func weighingItemCodeFieldError(unit, itemCode string) string {
+func itemCodeFieldError(itemCode string) string {
 	code := strings.TrimSpace(itemCode)
-	if !isWeightBasedUnit(unit) || code == "" {
+	if code == "" {
 		return ""
 	}
-	if len(code) > weighingItemCodeMaxLen {
-		return fmt.Sprintf("Item code for weighing items must be at most %d characters", weighingItemCodeMaxLen)
+	if len(code) > itemCodeMaxLen {
+		return fmt.Sprintf("Item code must be at most %d characters", itemCodeMaxLen)
 	}
 	return ""
 }
@@ -135,12 +135,24 @@ func CreateProduct(c *gin.Context) {
 		return
 	}
 
-	if msg := weighingItemCodeFieldError(input.Product.Unit, input.Product.ItemCode); msg != "" {
+	if msg := itemCodeFieldError(input.Product.ItemCode); msg != "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":  msg,
 			"fields": gin.H{"item_code": msg},
 		})
 		return
+	}
+
+	itemCode := strings.TrimSpace(input.Product.ItemCode)
+	if itemCode != "" {
+		var existingProduct models.Product
+		if err := utils.DB.Where("user_id = ? AND TRIM(item_code) = ?", userID, itemCode).First(&existingProduct).Error; err == nil {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":  fmt.Sprintf("Item code already used by %s", existingProduct.Name),
+				"fields": gin.H{"item_code": fmt.Sprintf("Already assigned to %s", existingProduct.Name)},
+			})
+			return
+		}
 	}
 
 	input.Product.ID = uuid.New()
@@ -307,15 +319,11 @@ func UpdateProduct(c *gin.Context) {
 		return
 	}
 
-	unit := product.Unit
-	if strings.TrimSpace(input.Product.Unit) != "" {
-		unit = input.Product.Unit
-	}
 	itemCode := product.ItemCode
 	if input.Product.ItemCode != "" {
 		itemCode = input.Product.ItemCode
 	}
-	if msg := weighingItemCodeFieldError(unit, itemCode); msg != "" {
+	if msg := itemCodeFieldError(itemCode); msg != "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":  msg,
 			"fields": gin.H{"item_code": msg},
@@ -1052,4 +1060,51 @@ func getTaxRateFromHSN(hsnCode string) float64 {
 
 	fmt.Printf("[DEBUG] getTaxRateFromHSN - HSN code not found: %s\n", hsnCode)
 	return 0
+}
+
+func GenerateProductItemCode(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	unit := c.DefaultQuery("unit", "PCS")
+
+	code, err := utils.GenerateUniqueProductItemCode(userID, isWeightBasedUnit(unit))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate item code. Please try again."})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"item_code": code})
+}
+
+func CheckProductItemCode(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	itemCode := strings.TrimSpace(c.Query("item_code"))
+	if itemCode == "" {
+		c.JSON(http.StatusOK, gin.H{"exists": false, "products": []gin.H{}})
+		return
+	}
+
+	var products []models.Product
+	if err := utils.DB.Where("user_id = ? AND TRIM(item_code) = ?", userID, itemCode).
+		Order("name ASC").
+		Find(&products).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check item code"})
+		return
+	}
+
+	if len(products) == 0 {
+		c.JSON(http.StatusOK, gin.H{"exists": false, "products": []gin.H{}})
+		return
+	}
+
+	out := make([]gin.H, 0, len(products))
+	for _, product := range products {
+		out = append(out, gin.H{
+			"id":        product.ID,
+			"name":      product.Name,
+			"sku":       product.SKU,
+			"item_code": product.ItemCode,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"exists": true, "products": out})
 }
