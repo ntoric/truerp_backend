@@ -194,6 +194,14 @@ func runRawMigrations(db *gorm.DB) {
 	backfillExpenseCategories(db)
 	SeedDefaultCategoriesForAllUsers(db)
 	migrateWarehouseCodeUnique(db)
+	backfillProductGstEnabled(db)
+}
+
+func backfillProductGstEnabled(db *gorm.DB) {
+	if !db.Migrator().HasColumn(&models.Product{}, "gst_enabled") {
+		return
+	}
+	db.Exec(`UPDATE products SET gst_enabled = false WHERE tax_rate <= 0`)
 }
 
 // migrateWarehouseCodeUnique drops the legacy global unique index on

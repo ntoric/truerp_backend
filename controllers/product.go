@@ -27,6 +27,16 @@ func isWeightBasedUnit(unit string) bool {
 	}
 }
 
+func normalizeProductGst(product *models.Product) {
+	if !product.GstEnabled {
+		product.TaxRate = 0
+		return
+	}
+	if product.TaxRate <= 0 {
+		product.TaxRate = 18
+	}
+}
+
 func weighingItemCodeFieldError(unit, itemCode string) string {
 	code := strings.TrimSpace(itemCode)
 	if !isWeightBasedUnit(unit) || code == "" {
@@ -143,12 +153,14 @@ func CreateProduct(c *gin.Context) {
 	_ = utils.EnsureDefaultCategories(utils.DB, userID)
 
 	// Auto-populate tax rate from HSN code if not provided
-	if input.Product.HSNCode != "" && input.Product.TaxRate == 0 {
+	if input.Product.GstEnabled && input.Product.HSNCode != "" && input.Product.TaxRate == 0 {
 		if taxRate := getTaxRateFromHSN(input.Product.HSNCode); taxRate > 0 {
 			input.Product.TaxRate = taxRate
 			fmt.Printf("[DEBUG] CreateProduct - Auto-populated tax rate from HSN: %s -> %.2f%%\n", input.Product.HSNCode, taxRate)
 		}
 	}
+
+	normalizeProductGst(&input.Product)
 
 	input.Product.SKU = strings.TrimSpace(input.Product.SKU)
 	if input.Product.SKU == "" {
@@ -317,12 +329,14 @@ func UpdateProduct(c *gin.Context) {
 
 	// Auto-populate tax rate from HSN code if HSN is being changed and tax rate is not provided
 	hsnChanged := input.Product.HSNCode != "" && input.Product.HSNCode != product.HSNCode
-	if hsnChanged && input.Product.TaxRate == 0 {
+	if input.Product.GstEnabled && hsnChanged && input.Product.TaxRate == 0 {
 		if taxRate := getTaxRateFromHSN(input.Product.HSNCode); taxRate > 0 {
 			input.Product.TaxRate = taxRate
 			fmt.Printf("[DEBUG] UpdateProduct - Auto-populated tax rate from HSN: %s -> %.2f%%\n", input.Product.HSNCode, taxRate)
 		}
 	}
+
+	normalizeProductGst(&input.Product)
 
 	// Build updates map with only non-zero/non-empty fields
 	updates := map[string]interface{}{}
@@ -355,6 +369,7 @@ func UpdateProduct(c *gin.Context) {
 	}
 	// tax_rate can legitimately be 0 (exempt / zero-rated goods)
 	updates["tax_rate"] = input.Product.TaxRate
+	updates["gst_enabled"] = input.Product.GstEnabled
 	if input.Product.ItemType != "" {
 		updates["item_type"] = input.Product.ItemType
 	}
