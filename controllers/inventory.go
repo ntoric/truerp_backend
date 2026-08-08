@@ -845,14 +845,14 @@ func applyInvoiceSaleStock(userID uuid.UUID, invoice *models.Invoice) {
 	}
 }
 
-// reverseInvoiceSaleStock restores inventory for stock entries previously posted for an invoice.
-func reverseInvoiceSaleStock(userID, invoiceID uuid.UUID) {
+// restoreInvoiceSaleStockQuantities puts sold quantities back without removing stock entries.
+func restoreInvoiceSaleStockQuantities(userID, invoiceID uuid.UUID) {
 	var entries []models.StockEntry
 	if err := utils.DB.Where(
 		"user_id = ? AND reference_id = ? AND reference_type = ?",
 		userID, invoiceID, "invoice",
 	).Find(&entries).Error; err != nil {
-		fmt.Printf("[DEBUG] reverseInvoiceSaleStock - Failed to load entries: %v\n", err)
+		fmt.Printf("[DEBUG] restoreInvoiceSaleStockQuantities - Failed to load entries: %v\n", err)
 		return
 	}
 
@@ -861,9 +861,17 @@ func reverseInvoiceSaleStock(userID, invoiceID uuid.UUID) {
 			// Sale entries store negative quantity; -entry.Quantity restores stock.
 			updateInventoryStock(userID, *entry.ProductID, entry.OutletID, "adjustment", -entry.Quantity, entry.CostPrice, entry.BatchNo, entry.MfgDate, entry.ExpDate)
 		}
-		if err := utils.DB.Delete(&entry).Error; err != nil {
-			fmt.Printf("[DEBUG] reverseInvoiceSaleStock - Failed to delete entry %s: %v\n", entry.ID, err)
-		}
+	}
+}
+
+// reverseInvoiceSaleStock restores inventory and removes stock entries (used when editing an invoice).
+func reverseInvoiceSaleStock(userID, invoiceID uuid.UUID) {
+	restoreInvoiceSaleStockQuantities(userID, invoiceID)
+	if err := utils.DB.Where(
+		"user_id = ? AND reference_id = ? AND reference_type = ?",
+		userID, invoiceID, "invoice",
+	).Delete(&models.StockEntry{}).Error; err != nil {
+		fmt.Printf("[DEBUG] reverseInvoiceSaleStock - Failed to delete entries: %v\n", err)
 	}
 }
 

@@ -599,23 +599,66 @@ func DeleteInvoice(c *gin.Context) {
 		return
 	}
 
-	if invoice.Status == "paid" {
-		fmt.Printf("[DEBUG] DeleteInvoice - Cannot delete paid invoice\n")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot delete a paid invoice"})
+	var linkedCreditNotes int64
+	utils.DB.Model(&models.CreditNote{}).Where("user_id = ? AND invoice_id = ?", userID, invoice.ID).Count(&linkedCreditNotes)
+	if linkedCreditNotes > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot delete invoice with linked credit notes"})
 		return
 	}
 
-	reverseInvoiceSaleStock(userID, invoice.ID)
+	var linkedSalesReturns int64
+	utils.DB.Model(&models.SalesReturn{}).Where("user_id = ? AND invoice_id = ?", userID, invoice.ID).Count(&linkedSalesReturns)
+	if linkedSalesReturns > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot delete invoice with linked sales returns"})
+		return
+	}
 
-	if err := utils.DB.Delete(&invoice).Error; err != nil {
+	var party models.Party
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, invoice.PartyID).First(&party).Error; err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invoice party not found"})
+		return
+	}
+
+	// Restore sold stock quantities but keep stock transaction history.
+	restoreInvoiceSaleStockQuantities(userID, invoice.ID)
+
+	tx := utils.DB.Begin()
+	if err := reverseLinkedInvoicePayments(tx, userID, &invoice); err != nil {
+		tx.Rollback()
+		fmt.Printf("[DEBUG] DeleteInvoice - payment reversal error: %v\n", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse linked payments"})
+		return
+	}
+	if err := reverseInvoiceAccounting(tx, userID, invoice.ID); err != nil {
+		tx.Rollback()
+		fmt.Printf("[DEBUG] DeleteInvoice - accounting reversal error: %v\n", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse accounting entries"})
+		return
+	}
+	if err := reverseLoyaltyForInvoice(tx, userID, &party, &invoice); err != nil {
+		tx.Rollback()
+		fmt.Printf("[DEBUG] DeleteInvoice - loyalty reversal error: %v\n", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse loyalty points"})
+		return
+	}
+	if err := tx.Model(&party).Update("balance", party.Balance-invoice.TotalAmount).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update party balance"})
+		return
+	}
+	if err := tx.Delete(&invoice).Error; err != nil {
+		tx.Rollback()
 		fmt.Printf("[DEBUG] DeleteInvoice - DB delete error: %v\n", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete invoice"})
+		return
+	}
+	if err := tx.Commit().Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete invoice"})
 		return
 	}
 
 	fmt.Printf("[DEBUG] DeleteInvoice - Invoice deleted successfully: %s\n", id)
 
-	// Log invoice deletion
 	CreateAuditLog(
 		userID,
 		userName,
@@ -628,7 +671,9 @@ func DeleteInvoice(c *gin.Context) {
 		c.GetHeader("User-Agent"),
 		map[string]interface{}{
 			"total_amount": invoice.TotalAmount,
+			"amount_paid":  invoice.AmountPaid,
 			"status":       invoice.Status,
+			"is_pos":       invoice.IsPOS,
 		},
 		"success",
 		"",

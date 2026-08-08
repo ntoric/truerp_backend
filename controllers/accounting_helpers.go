@@ -227,6 +227,35 @@ func postInvoiceAccounting(tx *gorm.DB, userID uuid.UUID, invoice *models.Invoic
 	})
 }
 
+// reverseAccountingByRef undoes ledger postings and account balance updates for a reference.
+func reverseAccountingByRef(tx *gorm.DB, userID uuid.UUID, refType string, refID uuid.UUID) error {
+	var ledgers []models.Ledger
+	if err := tx.Where(
+		"user_id = ? AND transaction_type = ? AND reference_id = ?",
+		userID, refType, refID,
+	).Find(&ledgers).Error; err != nil {
+		return err
+	}
+	for _, lg := range ledgers {
+		var account models.Account
+		if err := tx.Where("user_id = ? AND id = ?", userID, lg.AccountID).First(&account).Error; err != nil {
+			return err
+		}
+		newBalance := applyAccountBalance(&account, lg.Credit, lg.Debit)
+		if err := tx.Model(&account).Update("balance", newBalance).Error; err != nil {
+			return err
+		}
+		if err := tx.Delete(&lg).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func reverseInvoiceAccounting(tx *gorm.DB, userID uuid.UUID, invoiceID uuid.UUID) error {
+	return reverseAccountingByRef(tx, userID, "invoice", invoiceID)
+}
+
 func postSalePaymentAccounting(tx *gorm.DB, userID uuid.UUID, refID uuid.UUID, bankAccountID *uuid.UUID, amount float64, date time.Time, refNumber, description string) error {
 	if amount <= 0 {
 		return nil

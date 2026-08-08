@@ -125,6 +125,68 @@ func createLinkedSalePaymentIn(tx *gorm.DB, userID uuid.UUID, invoice *models.In
 	return nil
 }
 
+// reverseLinkedInvoicePayments removes payment-ins created for a sales invoice and
+// restores cash/bank balances plus linked GL postings.
+func reverseLinkedInvoicePayments(tx *gorm.DB, userID uuid.UUID, invoice *models.Invoice) error {
+	if invoice == nil {
+		return nil
+	}
+
+	var payments []models.Payment
+	if err := tx.Where("user_id = ? AND invoice_id = ?", userID, invoice.ID).Find(&payments).Error; err != nil {
+		return err
+	}
+
+	var totalPaid float64
+	for _, payment := range payments {
+		totalPaid += payment.AmountReceived - payment.PaymentInDiscount
+	}
+
+	var txns []models.CashTransaction
+	if err := tx.Where(
+		"user_id = ? AND reference = ? AND is_linked = ? AND transaction_type = ?",
+		userID, invoice.InvoiceNumber, true, "add",
+	).Find(&txns).Error; err != nil {
+		return err
+	}
+
+	for _, txn := range txns {
+		if txn.AccountID != nil {
+			var account models.BankAccount
+			if err := tx.Where("user_id = ? AND id = ?", userID, *txn.AccountID).First(&account).Error; err == nil {
+				account.Balance -= txn.Amount
+				if err := tx.Save(&account).Error; err != nil {
+					return err
+				}
+			}
+		}
+		if err := reverseAccountingByRef(tx, userID, "payment_in", txn.ID); err != nil {
+			return err
+		}
+		if err := tx.Delete(&txn).Error; err != nil {
+			return err
+		}
+	}
+
+	for _, payment := range payments {
+		if err := tx.Delete(&payment).Error; err != nil {
+			return err
+		}
+	}
+
+	if totalPaid > 0 {
+		var party models.Party
+		if err := tx.Where("user_id = ? AND id = ?", userID, invoice.PartyID).First(&party).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&party).Update("balance", party.Balance+totalPaid).Error; err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // createLinkedPurchasePaymentOut records a PaymentOut row for a purchase bill payment
 // and posts cash/bank + AP reduction. Bill paid_amount/balance_due must already be updated.
 func createLinkedPurchasePaymentOut(tx *gorm.DB, userID uuid.UUID, bill *models.PurchaseBill, amount float64, date time.Time, notes string) error {

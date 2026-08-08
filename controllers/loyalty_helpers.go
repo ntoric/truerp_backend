@@ -136,6 +136,41 @@ func applyLoyaltyForInvoice(tx *gorm.DB, userID uuid.UUID, party *models.Party, 
 	}).Error
 }
 
+func reverseLoyaltyForInvoice(tx *gorm.DB, userID uuid.UUID, party *models.Party, invoice *models.Invoice) error {
+	if party == nil || invoice == nil {
+		return nil
+	}
+	if invoice.LoyaltyPointsRedeemed == 0 && invoice.LoyaltyPointsEarned == 0 {
+		return nil
+	}
+
+	balance := party.LoyaltyPoints
+	if invoice.LoyaltyPointsEarned > 0 {
+		balance -= invoice.LoyaltyPointsEarned
+		if err := recordLoyaltyTransaction(
+			tx, userID, party.ID, "adjust", -invoice.LoyaltyPointsEarned, balance,
+			"invoice", &invoice.ID, invoice.InvoiceNumber, "Reversed earned points on invoice deletion",
+		); err != nil {
+			return err
+		}
+	}
+	if invoice.LoyaltyPointsRedeemed > 0 {
+		balance += invoice.LoyaltyPointsRedeemed
+		if err := recordLoyaltyTransaction(
+			tx, userID, party.ID, "adjust", invoice.LoyaltyPointsRedeemed, balance,
+			"invoice", &invoice.ID, invoice.InvoiceNumber, "Restored redeemed points on invoice deletion",
+		); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Model(party).Update("loyalty_points", balance).Error; err != nil {
+		return err
+	}
+	party.LoyaltyPoints = balance
+	return nil
+}
+
 func AdjustPartyLoyaltyPoints(tx *gorm.DB, userID uuid.UUID, party *models.Party, pointsDelta int64, notes string) error {
 	newBalance := party.LoyaltyPoints + pointsDelta
 	if newBalance < 0 {
