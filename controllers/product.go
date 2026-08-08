@@ -44,6 +44,26 @@ func itemCodeFieldError(itemCode string) string {
 	return ""
 }
 
+func pluValidationError(userID uuid.UUID, plu string, excludeID *uuid.UUID, required bool) string {
+	return utils.ValidateProductPLU(userID, plu, excludeID, required)
+}
+
+func pluConflictProduct(userID uuid.UUID, plu string, excludeID *uuid.UUID) (*models.Product, bool) {
+	code := strings.TrimSpace(plu)
+	if code == "" {
+		return nil, false
+	}
+	query := utils.DB.Where("user_id = ? AND TRIM(plu) = ?", userID, code)
+	if excludeID != nil {
+		query = query.Where("id <> ?", *excludeID)
+	}
+	var existing models.Product
+	if err := query.First(&existing).Error; err != nil {
+		return nil, false
+	}
+	return &existing, true
+}
+
 func GetProducts(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
@@ -55,7 +75,7 @@ func GetProducts(c *gin.Context) {
 	}
 
 	if search := c.Query("search"); search != "" {
-		query = query.Where("name LIKE ? OR sku LIKE ? OR item_code LIKE ?", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+		query = query.Where("name LIKE ? OR sku LIKE ? OR item_code LIKE ? OR plu LIKE ?", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%")
 	}
 
 	if err := query.Order("created_at DESC").Find(&products).Error; err != nil {
@@ -139,6 +159,26 @@ func CreateProduct(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":  msg,
 			"fields": gin.H{"item_code": msg},
+		})
+		return
+	}
+
+	input.Product.PLU = strings.TrimSpace(input.Product.PLU)
+	if err := utils.AssignProductPLU(userID, &input.Product); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to assign PLU. Please try again."})
+		return
+	}
+	if msg := pluValidationError(userID, input.Product.PLU, nil, true); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":  msg,
+			"fields": gin.H{"plu": msg},
+		})
+		return
+	}
+	if existing, conflict := pluConflictProduct(userID, input.Product.PLU, nil); conflict {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":  fmt.Sprintf("PLU already used by %s", existing.Name),
+			"fields": gin.H{"plu": fmt.Sprintf("Already assigned to %s", existing.Name)},
 		})
 		return
 	}
@@ -331,6 +371,33 @@ func UpdateProduct(c *gin.Context) {
 		return
 	}
 
+	plu := strings.TrimSpace(product.PLU)
+	if input.Product.PLU != "" {
+		plu = strings.TrimSpace(input.Product.PLU)
+	}
+	if plu == "" {
+		next, err := utils.NextProductPLU(userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to assign PLU. Please try again."})
+			return
+		}
+		plu = next
+	}
+	if msg := pluValidationError(userID, plu, &product.ID, true); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":  msg,
+			"fields": gin.H{"plu": msg},
+		})
+		return
+	}
+	if existing, conflict := pluConflictProduct(userID, plu, &product.ID); conflict {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":  fmt.Sprintf("PLU already used by %s", existing.Name),
+			"fields": gin.H{"plu": fmt.Sprintf("Already assigned to %s", existing.Name)},
+		})
+		return
+	}
+
 	// Auto-populate tax rate from HSN code if HSN is being changed and tax rate is not provided
 	hsnChanged := input.Product.HSNCode != "" && input.Product.HSNCode != product.HSNCode
 	if input.Product.GstEnabled && hsnChanged && input.Product.TaxRate == 0 {
@@ -353,6 +420,7 @@ func UpdateProduct(c *gin.Context) {
 	if input.Product.ItemCode != "" {
 		updates["item_code"] = input.Product.ItemCode
 	}
+	updates["plu"] = plu
 	if input.Product.Category != "" {
 		updates["category"] = input.Product.Category
 	}
@@ -505,7 +573,7 @@ func ExportProductsCSV(c *gin.Context) {
 	}
 
 	if search := c.Query("search"); search != "" {
-		query = query.Where("name LIKE ? OR sku LIKE ? OR item_code LIKE ?", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+		query = query.Where("name LIKE ? OR sku LIKE ? OR item_code LIKE ? OR plu LIKE ?", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%")
 	}
 
 	if err := query.Order("created_at DESC").Find(&products).Error; err != nil {
@@ -520,7 +588,7 @@ func ExportProductsCSV(c *gin.Context) {
 	defer writer.Flush()
 
 	headers := []string{
-		"Name", "SKU", "Item Code", "Category", "Stock Qty", "Unit",
+		"Name", "SKU", "Item Code", "PLU", "Category", "Stock Qty", "Unit",
 		"Purchase Price", "Sale Price", "MRP", "Tax Rate %", "Discount %",
 		"HSN Code", "Description", "Min Stock", "Is Service", "Low Stock Alert",
 		"Enable Batching", "Sale Price With Tax", "Purchase Price With Tax",
@@ -535,6 +603,7 @@ func ExportProductsCSV(c *gin.Context) {
 			p.Name,
 			p.SKU,
 			p.ItemCode,
+			p.PLU,
 			p.Category,
 			"", // Stock Qty (live stock lives in inventory entries)
 			p.Unit,
@@ -570,7 +639,7 @@ func ExportProductsExcel(c *gin.Context) {
 	}
 
 	if search := c.Query("search"); search != "" {
-		query = query.Where("name LIKE ? OR sku LIKE ? OR item_code LIKE ?", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+		query = query.Where("name LIKE ? OR sku LIKE ? OR item_code LIKE ? OR plu LIKE ?", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%")
 	}
 
 	if err := query.Order("created_at DESC").Find(&products).Error; err != nil {
@@ -586,7 +655,7 @@ func ExportProductsExcel(c *gin.Context) {
 	}
 
 	headers := []string{
-		"Name", "SKU", "Item Code", "Category", "Stock Qty", "Unit",
+		"Name", "SKU", "Item Code", "PLU", "Category", "Stock Qty", "Unit",
 		"Purchase Price", "Sale Price", "MRP", "Tax Rate %", "Discount %",
 		"HSN Code", "Description", "Min Stock", "Is Service", "Low Stock Alert",
 		"Enable Batching", "Sale Price With Tax", "Purchase Price With Tax",
@@ -604,6 +673,7 @@ func ExportProductsExcel(c *gin.Context) {
 		row.AddCell().SetValue(p.Name)
 		row.AddCell().SetValue(p.SKU)
 		row.AddCell().SetValue(p.ItemCode)
+		row.AddCell().SetValue(p.PLU)
 		row.AddCell().SetValue(p.Category)
 		row.AddCell().SetValue("") // Stock Qty (live stock lives in inventory entries)
 		row.AddCell().SetValue(p.Unit)
@@ -817,6 +887,7 @@ func ImportProductsCSV(c *gin.Context) {
 			Name:     getCSVValue(record, headers, "Name"),
 			SKU:      getCSVValue(record, headers, "SKU"),
 			ItemCode: firstCSVValue(record, headers, "Item Code", "Itemcode", "Barcode"),
+			PLU:      strings.TrimSpace(getCSVValue(record, headers, "PLU")),
 			Category: utils.ResolveCategoryName(getCSVValue(record, headers, "Category")),
 			Unit:     getCSVValue(record, headers, "Unit"),
 			HSNCode:  getCSVValue(record, headers, "HSN Code"),
@@ -842,6 +913,15 @@ func ImportProductsCSV(c *gin.Context) {
 		product.SKU = strings.TrimSpace(product.SKU)
 		if product.SKU == "" {
 			product.SKU = utils.GenerateUniqueProductSKU(product.Name)
+		}
+
+		if err := utils.AssignProductPLU(userID, &product); err != nil {
+			errors = append(errors, fmt.Sprintf("Row %d: %v", i+2, err))
+			continue
+		}
+		if msg := pluValidationError(userID, product.PLU, nil, true); msg != "" {
+			errors = append(errors, fmt.Sprintf("Row %d: %s", i+2, msg))
+			continue
 		}
 
 		if err := utils.DB.Create(&product).Error; err != nil {
@@ -920,6 +1000,7 @@ func ImportProductsExcel(c *gin.Context) {
 			Name:     getExcelValue(row, headers, "Name"),
 			SKU:      getExcelValue(row, headers, "SKU"),
 			ItemCode: firstExcelValue(row, headers, "Item Code", "Itemcode", "Barcode"),
+			PLU:      strings.TrimSpace(getExcelValue(row, headers, "PLU")),
 			Category: utils.ResolveCategoryName(getExcelValue(row, headers, "Category")),
 			Unit:     getExcelValue(row, headers, "Unit"),
 			HSNCode:  getExcelValue(row, headers, "HSN Code"),
@@ -945,6 +1026,15 @@ func ImportProductsExcel(c *gin.Context) {
 		product.SKU = strings.TrimSpace(product.SKU)
 		if product.SKU == "" {
 			product.SKU = utils.GenerateUniqueProductSKU(product.Name)
+		}
+
+		if err := utils.AssignProductPLU(userID, &product); err != nil {
+			errors = append(errors, fmt.Sprintf("Row %d: %v", i+1, err))
+			continue
+		}
+		if msg := pluValidationError(userID, product.PLU, nil, true); msg != "" {
+			errors = append(errors, fmt.Sprintf("Row %d: %s", i+1, msg))
+			continue
 		}
 
 		if err := utils.DB.Create(&product).Error; err != nil {
@@ -1075,6 +1165,18 @@ func GenerateProductItemCode(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"item_code": code})
 }
 
+func NextProductPLU(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	plu, err := utils.NextProductPLU(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate PLU. Please try again."})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"plu": plu})
+}
+
 func CheckProductItemCode(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 	itemCode := strings.TrimSpace(c.Query("item_code"))
@@ -1103,6 +1205,41 @@ func CheckProductItemCode(c *gin.Context) {
 			"name":      product.Name,
 			"sku":       product.SKU,
 			"item_code": product.ItemCode,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"exists": true, "products": out})
+}
+
+func CheckProductPLU(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	plu := strings.TrimSpace(c.Query("plu"))
+	if plu == "" {
+		c.JSON(http.StatusOK, gin.H{"exists": false, "products": []gin.H{}})
+		return
+	}
+
+	var products []models.Product
+	if err := utils.DB.Where("user_id = ? AND TRIM(plu) = ?", userID, plu).
+		Order("name ASC").
+		Find(&products).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check PLU"})
+		return
+	}
+
+	if len(products) == 0 {
+		c.JSON(http.StatusOK, gin.H{"exists": false, "products": []gin.H{}})
+		return
+	}
+
+	out := make([]gin.H, 0, len(products))
+	for _, product := range products {
+		out = append(out, gin.H{
+			"id":        product.ID,
+			"name":      product.Name,
+			"sku":       product.SKU,
+			"item_code": product.ItemCode,
+			"plu":       product.PLU,
 		})
 	}
 

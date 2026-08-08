@@ -195,6 +195,7 @@ func runRawMigrations(db *gorm.DB) {
 	SeedDefaultCategoriesForAllUsers(db)
 	migrateWarehouseCodeUnique(db)
 	backfillProductGstEnabled(db)
+	BackfillProductPLUs(db)
 }
 
 func backfillProductGstEnabled(db *gorm.DB) {

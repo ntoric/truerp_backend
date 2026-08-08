@@ -1137,8 +1137,9 @@ type WeighingScaleSettings struct {
 	CsvImportEnabled         bool      `json:"csv_import_enabled" gorm:"default:true"`
 	CsvHasHeader             bool      `json:"csv_has_header" gorm:"default:true"`
 	CsvDelimiter             string    `json:"csv_delimiter" gorm:"default:','"`                // comma, semicolon, tab
-	CsvItemMatchField        string    `json:"csv_item_match_field" gorm:"default:'item_code'"` // auto, sku, item_code
+	CsvItemMatchField        string    `json:"csv_item_match_field" gorm:"default:'item_code'"` // auto, sku, item_code, plu
 	CsvItemCodeColumn        string    `json:"csv_item_code_column"`
+	CsvPluColumn             string    `json:"csv_plu_column"`
 	CsvSlugColumn            string    `json:"csv_slug_column"`
 	CsvNameColumn            string    `json:"csv_name_column"`
 	CsvUnitColumn            string    `json:"csv_unit_column"`
@@ -1146,6 +1147,8 @@ type WeighingScaleSettings struct {
 	CsvExportWeightItemsOnly bool      `json:"csv_export_weight_items_only" gorm:"default:true"`
 	// CsvExtraFields is a JSON array of optional product field keys to append to scale catalog CSV.
 	CsvExtraFields       string         `json:"csv_extra_fields" gorm:"type:text;default:'[]'"`
+	CsvExportPath        string         `json:"csv_export_path"`
+	CsvExportFilename    string         `json:"csv_export_filename"`
 	CsvWeightColumn      string         `json:"csv_weight_column,omitempty"` // legacy DB column; use csv_price_column
 	BarcodeScanEnabled   bool           `json:"barcode_scan_enabled" gorm:"default:true"`
 	BarcodePrefix        string         `json:"barcode_prefix" gorm:"default:'w'"`      // leading char(s), e.g. "w" → w0000112500
@@ -1246,6 +1249,7 @@ type Product struct {
 	Name                 string           `json:"name" gorm:"not null"`
 	SKU                  string           `json:"sku" gorm:"uniqueIndex"`
 	ItemCode             string           `json:"item_code"`
+	PLU                  string           `json:"plu"` // scale PLU — auto-assigned ascending; editable per product
 	Category             string           `json:"category"`
 	PurchasePrice        float64          `json:"purchase_price" gorm:"default:0"`
 	SalePrice            float64          `json:"sale_price" gorm:"default:0"`

@@ -1264,8 +1264,8 @@ func SearchByItemCode(c *gin.Context) {
 	if len(entries) == 0 {
 		var products []models.Product
 		if err := utils.DB.Where(
-			"user_id = ? AND (TRIM(item_code) = ? OR TRIM(sku) = ?)",
-			userID, itemCode, itemCode,
+			"user_id = ? AND (TRIM(item_code) = ? OR TRIM(sku) = ? OR TRIM(plu) = ?)",
+			userID, itemCode, itemCode, itemCode,
 		).Find(&products).Error; err != nil {
 			fmt.Printf("[DEBUG] SearchByItemCode - Product fallback error: %v\n", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to search by item code"})
@@ -1282,6 +1282,7 @@ func SearchByItemCode(c *gin.Context) {
 				"product_name":   product.Name,
 				"sku":            product.SKU,
 				"item_code":      product.ItemCode,
+				"plu":            product.PLU,
 				"unit":           product.Unit,
 				"purchase_price": product.PurchasePrice,
 				"sale_price":     product.SalePrice,

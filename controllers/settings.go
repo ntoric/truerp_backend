@@ -486,12 +486,15 @@ func defaultWeighingScaleSettings(userID uuid.UUID) models.WeighingScaleSettings
 		CsvDelimiter:           ",",
 		CsvItemMatchField:      "item_code",
 		CsvItemCodeColumn:      "",
+		CsvPluColumn:           "",
 		CsvSlugColumn:          "",
 		CsvNameColumn:          "",
 		CsvUnitColumn:          "",
 		CsvPriceColumn:         "",
 		CsvExportWeightItemsOnly: true,
 		CsvExtraFields:         "[]",
+		CsvExportPath:          "",
+		CsvExportFilename:      "",
 		BarcodeScanEnabled:     true,
 		BarcodePrefix:          "w",
 		BarcodePrefixStart:     20,
@@ -557,6 +560,7 @@ func UpdateWeighingScaleSettings(c *gin.Context) {
 		settings.CsvDelimiter = input.CsvDelimiter
 		settings.CsvItemMatchField = input.CsvItemMatchField
 		settings.CsvItemCodeColumn = input.CsvItemCodeColumn
+		settings.CsvPluColumn = input.CsvPluColumn
 		settings.CsvSlugColumn = input.CsvSlugColumn
 		settings.CsvNameColumn = input.CsvNameColumn
 		settings.CsvUnitColumn = input.CsvUnitColumn
@@ -566,6 +570,8 @@ func UpdateWeighingScaleSettings(c *gin.Context) {
 		}
 		settings.CsvExportWeightItemsOnly = input.CsvExportWeightItemsOnly
 		settings.CsvExtraFields = extraFieldsJSON
+		settings.CsvExportPath = input.CsvExportPath
+		settings.CsvExportFilename = input.CsvExportFilename
 		settings.BarcodeScanEnabled = input.BarcodeScanEnabled
 		settings.BarcodePrefix = normalizeBarcodePrefix(input.BarcodePrefix)
 		settings.BarcodePrefixStart = input.BarcodePrefixStart
@@ -599,12 +605,15 @@ func UpdateWeighingScaleSettings(c *gin.Context) {
 			"csv_delimiter":                input.CsvDelimiter,
 			"csv_item_match_field":         input.CsvItemMatchField,
 			"csv_item_code_column":         input.CsvItemCodeColumn,
+			"csv_plu_column":               input.CsvPluColumn,
 			"csv_slug_column":              input.CsvSlugColumn,
 			"csv_name_column":              input.CsvNameColumn,
 			"csv_unit_column":              input.CsvUnitColumn,
 			"csv_price_column":             input.CsvPriceColumn,
 			"csv_export_weight_items_only": input.CsvExportWeightItemsOnly,
 			"csv_extra_fields":             extraFieldsJSON,
+			"csv_export_path":              input.CsvExportPath,
+			"csv_export_filename":          input.CsvExportFilename,
 			"barcode_scan_enabled":         input.BarcodeScanEnabled,
 			"barcode_prefix":               normalizeBarcodePrefix(input.BarcodePrefix),
 			"barcode_prefix_start":         input.BarcodePrefixStart,
@@ -646,6 +655,7 @@ type weighingScaleSettingsInput struct {
 	CsvDelimiter             string          `json:"csv_delimiter"`
 	CsvItemMatchField        string          `json:"csv_item_match_field"`
 	CsvItemCodeColumn        string          `json:"csv_item_code_column"`
+	CsvPluColumn             string          `json:"csv_plu_column"`
 	CsvSlugColumn            string          `json:"csv_slug_column"`
 	CsvNameColumn            string          `json:"csv_name_column"`
 	CsvUnitColumn            string          `json:"csv_unit_column"`
@@ -653,6 +663,8 @@ type weighingScaleSettingsInput struct {
 	CsvWeightColumn          string          `json:"csv_weight_column"`
 	CsvExportWeightItemsOnly bool            `json:"csv_export_weight_items_only"`
 	CsvExtraFields           json.RawMessage `json:"csv_extra_fields"`
+	CsvExportPath            string          `json:"csv_export_path"`
+	CsvExportFilename        string          `json:"csv_export_filename"`
 	BarcodeScanEnabled       bool            `json:"barcode_scan_enabled"`
 	BarcodePrefix            string          `json:"barcode_prefix"`
 	BarcodePrefixStart       int             `json:"barcode_prefix_start"`
@@ -734,12 +746,15 @@ func weighingScaleSettingsResponse(settings models.WeighingScaleSettings) gin.H 
 		"csv_delimiter":                settings.CsvDelimiter,
 		"csv_item_match_field":         settings.CsvItemMatchField,
 		"csv_item_code_column":         settings.CsvItemCodeColumn,
+		"csv_plu_column":               settings.CsvPluColumn,
 		"csv_slug_column":              settings.CsvSlugColumn,
 		"csv_name_column":              settings.CsvNameColumn,
 		"csv_unit_column":              settings.CsvUnitColumn,
 		"csv_price_column":             settings.CsvPriceColumn,
 		"csv_export_weight_items_only": settings.CsvExportWeightItemsOnly,
 		"csv_extra_fields":             extraFields,
+		"csv_export_path":              settings.CsvExportPath,
+		"csv_export_filename":          settings.CsvExportFilename,
 		"barcode_scan_enabled":         settings.BarcodeScanEnabled,
 		"barcode_prefix":               settings.BarcodePrefix,
 		"barcode_prefix_start":         settings.BarcodePrefixStart,
