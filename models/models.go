@@ -218,7 +218,7 @@ type InvoiceItem struct {
 	Unit        string     `json:"unit"`
 	UnitPrice   float64    `json:"unit_price" gorm:"default:0"`
 	Discount    float64    `json:"discount" gorm:"default:0"`
-	TaxRate     float64    `json:"tax_rate" gorm:"default:18"`
+	TaxRate     float64    `json:"tax_rate" gorm:"default:0"`
 	CGST        float64    `json:"cgst" gorm:"default:0"`
 	SGST        float64    `json:"sgst" gorm:"default:0"`
 	IGST        float64    `json:"igst" gorm:"default:0"`
@@ -280,7 +280,7 @@ type Expense struct {
 	SubTotal           float64        `json:"sub_total" gorm:"default:0"`
 	TaxTotal           float64        `json:"tax_total" gorm:"default:0"`
 	WithGST            bool           `json:"with_gst" gorm:"default:false"`
-	TaxRate            float64        `json:"tax_rate" gorm:"default:18"`
+	TaxRate            float64        `json:"tax_rate" gorm:"default:0"`
 	Date               time.Time      `json:"date"`
 	Vendor             string         `json:"vendor"`
 	PaymentMode        string         `json:"payment_mode"`
@@ -300,7 +300,7 @@ type ExpenseItem struct {
 	Description string    `json:"description" gorm:"not null"`
 	Quantity    float64   `json:"quantity" gorm:"default:1"`
 	UnitPrice   float64   `json:"unit_price" gorm:"default:0"`
-	TaxRate     float64   `json:"tax_rate" gorm:"default:18"`
+	TaxRate     float64   `json:"tax_rate" gorm:"default:0"`
 	TaxAmount   float64   `json:"tax_amount" gorm:"default:0"`
 	Total       float64   `json:"total" gorm:"default:0"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -596,7 +596,7 @@ type PurchaseBillItem struct {
 	Unit        string     `json:"unit"`
 	UnitPrice   float64    `json:"unit_price" gorm:"default:0"`
 	Discount    float64    `json:"discount" gorm:"default:0"`
-	TaxRate     float64    `json:"tax_rate" gorm:"default:18"`
+	TaxRate     float64    `json:"tax_rate" gorm:"default:0"`
 	TaxAmount   float64    `json:"tax_amount" gorm:"default:0"`
 	Total       float64    `json:"total" gorm:"default:0"`
 	MRP         float64    `json:"mrp" gorm:"default:0"`
@@ -1913,7 +1913,7 @@ type QuotationItem struct {
 	Unit        string    `json:"unit"`
 	UnitPrice   float64   `json:"unit_price" gorm:"default:0"`
 	Discount    float64   `json:"discount" gorm:"default:0"`
-	TaxRate     float64   `json:"tax_rate" gorm:"default:18"`
+	TaxRate     float64   `json:"tax_rate" gorm:"default:0"`
 	CGST        float64   `json:"cgst" gorm:"default:0"`
 	SGST        float64   `json:"sgst" gorm:"default:0"`
 	IGST        float64   `json:"igst" gorm:"default:0"`
