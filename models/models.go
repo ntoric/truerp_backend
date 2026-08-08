@@ -1252,8 +1252,8 @@ type Product struct {
 	MRP                  float64          `json:"mrp"`
 	Unit                 string           `json:"unit" gorm:"default:'PCS'"`
 	MinStock             float64          `json:"min_stock" gorm:"default:0"`
-	TaxRate              float64          `json:"tax_rate" gorm:"default:18"`
-	GstEnabled           bool             `json:"gst_enabled" gorm:"default:true"`
+	TaxRate              float64          `json:"tax_rate" gorm:"default:0"`
+	GstEnabled           bool             `json:"gst_enabled" gorm:"default:false"`
 	ItemType             string           `json:"item_type" gorm:"default:'product'"`
 	LowStockAlert        bool             `json:"low_stock_alert" gorm:"default:true"`
 	HSNCode              string           `json:"hsn_code"`

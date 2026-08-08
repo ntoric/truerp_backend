@@ -30,10 +30,6 @@ func isWeightBasedUnit(unit string) bool {
 func normalizeProductGst(product *models.Product) {
 	if !product.GstEnabled {
 		product.TaxRate = 0
-		return
-	}
-	if product.TaxRate <= 0 {
-		product.TaxRate = 18
 	}
 }
 
