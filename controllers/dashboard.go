@@ -1,10 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
+	"fmt"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -137,18 +138,12 @@ func GetSalesReport(c *gin.Context) {
 	}
 
 	var results []ReportItem
-	var query string
-
-	switch period {
-	case "daily":
-		query = "SELECT DATE(date) as period, COALESCE(SUM(total_amount), 0) as sales, COUNT(*) as count FROM invoices WHERE user_id = ? AND status = 'paid' GROUP BY DATE(date) ORDER BY period DESC LIMIT 30"
-	case "weekly":
-		query = "SELECT strftime('%Y-W%W', date) as period, COALESCE(SUM(total_amount), 0) as sales, COUNT(*) as count FROM invoices WHERE user_id = ? AND status = 'paid' GROUP BY strftime('%Y-W%W', date) ORDER BY period DESC LIMIT 12"
-	case "yearly":
-		query = "SELECT strftime('%Y', date) as period, COALESCE(SUM(total_amount), 0) as sales, COUNT(*) as count FROM invoices WHERE user_id = ? AND status = 'paid' GROUP BY strftime('%Y', date) ORDER BY period DESC LIMIT 5"
-	default: // monthly
-		query = "SELECT strftime('%Y-%m', date) as period, COALESCE(SUM(total_amount), 0) as sales, COUNT(*) as count FROM invoices WHERE user_id = ? AND status = 'paid' GROUP BY strftime('%Y-%m', date) ORDER BY period DESC LIMIT 12"
-	}
+	periodExpr := utils.SQLPeriodExpr("date", period)
+	limit := utils.SQLPeriodLimit(period)
+	query := fmt.Sprintf(
+		"SELECT %s as period, COALESCE(SUM(total_amount), 0) as sales, COUNT(*) as count FROM invoices WHERE user_id = ? AND status = 'paid' GROUP BY %s ORDER BY period DESC LIMIT %s",
+		periodExpr, periodExpr, limit,
+	)
 
 	if err := utils.DB.Raw(query, userID).Scan(&results).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate sales report"})
@@ -162,9 +157,10 @@ func GetGSTReport(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var reports []models.GSTReport
-	query := `
+	periodExpr := utils.SQLPeriodExpr("date", "monthly")
+	query := fmt.Sprintf(`
 		SELECT 
-			strftime('%Y-%m', date) as month,
+			%s as month,
 			COALESCE(SUM(cgst_total), 0) as cgst,
 			COALESCE(SUM(sgst_total), 0) as sgst,
 			COALESCE(SUM(igst_total), 0) as igst,
@@ -172,10 +168,10 @@ func GetGSTReport(c *gin.Context) {
 			COALESCE(SUM(total_amount), 0) as total_value
 		FROM invoices 
 		WHERE user_id = ? AND status IN ('paid', 'sent')
-		GROUP BY strftime('%Y-%m', date)
+		GROUP BY %s
 		ORDER BY month DESC
 		LIMIT 12
-	`
+	`, periodExpr, periodExpr)
 
 	if err := utils.DB.Raw(query, userID).Scan(&reports).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate GST report"})

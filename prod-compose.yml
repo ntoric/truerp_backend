@@ -4,20 +4,39 @@
 #   /opt/truerp-backend/
 #     prod-compose.yml
 #     .env                 # secrets (never commit)
-#     truerp-data/         # SQLite volume
 #     truerp-uploads/      # local uploads volume
 #
 # First-time / manual:
-#   cp .env.example .env   # edit secrets
+#   cp .env.example .env   # edit secrets (set DATABASE_URL or POSTGRES_*)
 #   docker compose -f prod-compose.yml pull
 #   docker compose -f prod-compose.yml up -d
 #
 # CD (GitHub Actions) runs scripts/deploy.sh after a successful image push.
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: truerp-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-truerp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-truerp}
+    volumes:
+      - ./truerp-pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-truerp} -d ${POSTGRES_DB:-truerp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   api:
     image: ${DOCKERHUB_USERNAME:-ntoric}/truerp-api:${IMAGE_TAG:-latest}
     container_name: truerp-api
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "${API_PUBLISH_PORT:-8088}:8088"
     env_file:
@@ -26,7 +45,7 @@ services:
     environment:
       API_TRANSPORT: rest
       API_ADDR: ":8088"
-      DATABASE_PATH: /app/data/truerp.db
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-truerp}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-truerp}?sslmode=disable}
       STORAGE_TYPE: ${STORAGE_TYPE:-local}
       LOCAL_STORAGE_PATH: /app/uploads
       # Set to your public API URL so desktop clients can load uploaded assets:
@@ -38,7 +57,6 @@ services:
       SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
     volumes:
-      - ./truerp-data:/app/data
       - ./truerp-uploads:/app/uploads
     restart: unless-stopped
     healthcheck:

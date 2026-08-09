@@ -15,6 +15,8 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+// countSQLiteTableRows is used only for legacy SQLite path resolution.
+
 var DB *gorm.DB
 
 func countSQLiteTableRows(dbPath, table string) int {
@@ -65,26 +67,15 @@ func resolveDatabasePath() string {
 	return truerpPath
 }
 
-func InitDatabase() *gorm.DB {
-	dbPath := resolveDatabasePath()
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-		log.Fatal("Failed to create data directory:", err)
-	}
-
-	log.Printf("Opening database: %s", dbPath)
-
-	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
-	})
-	if err != nil {
-		log.Fatal("Failed to connect to database:", err)
-	}
-
-	// Rename legacy label gap columns before AutoMigrate adds duplicates.
+// MigrateSchema runs GORM AutoMigrate for all application models without seeding data.
+// Used by the SQLite → PostgreSQL migration tool to prepare an empty Postgres database.
+func MigrateSchema(db *gorm.DB) error {
 	migrateLabelGapColumns(db)
+	return db.AutoMigrate(allApplicationModels()...)
+}
 
-	// Auto-migrate models
-	err = db.AutoMigrate(
+func allApplicationModels() []interface{} {
+	return []interface{}{
 		&models.User{},
 		&models.Store{},
 		&models.Business{},
@@ -142,6 +133,9 @@ func InitDatabase() *gorm.DB {
 		&models.NotificationPreference{},
 		&models.CAReportSharing{},
 		&models.Product{},
+		&models.ProductImage{},
+		&models.ProductVariant{},
+		&models.SerialNumber{},
 		&models.Draft{},
 		&models.OfflineQueue{},
 		&models.POSDraft{},
@@ -154,12 +148,17 @@ func InitDatabase() *gorm.DB {
 		&models.UserRole{},
 		&models.Warehouse{},
 		&models.InventoryStock{},
-		// GST Compliance Models
 		&models.TaxPeriod{},
 		&models.InputTaxCredit{},
 		&models.GSTFilingStatus{},
 		&models.GSTR1Data{},
 		&models.GSTR3BData{},
+		&models.TaxExemption{},
+		&models.TaxRule{},
+		&models.TaxRate{},
+		&models.Quotation{},
+		&models.QuotationItem{},
+		&models.QuotationVersion{},
 		&models.CustomerStatement{},
 		&models.StatementTransaction{},
 		&models.CustomerPortalSettings{},
@@ -168,7 +167,26 @@ func InitDatabase() *gorm.DB {
 		&models.SavedInvoiceTemplate{},
 		&models.InvoiceCustomFieldDefinition{},
 		&models.InvoiceStatusHistory{},
-	)
+		&models.SMSMarketing{},
+		&models.SMSRecipient{},
+		&models.EmailMarketing{},
+		&models.EmailRecipient{},
+		&models.WhatsAppMarketing{},
+		&models.WhatsAppRecipient{},
+		&models.IPRestriction{},
+		&models.DataBackup{},
+		&models.GDPRRequest{},
+	}
+}
+
+func InitDatabase() *gorm.DB {
+	db, dialect, err := openDatabase()
+	if err != nil {
+		log.Fatal("Failed to connect to database:", err)
+	}
+	SetDialect(dialect)
+
+	err = MigrateSchema(db)
 	if err != nil {
 		log.Fatal("Failed to migrate database:", err)
 	}
@@ -182,12 +200,11 @@ func InitDatabase() *gorm.DB {
 }
 
 func runRawMigrations(db *gorm.DB) {
-	// SQLite doesn't support DROP COLUMN directly; we handle legacy NOT NULL columns
-	// by recreating tables if the old column causes issues.
-	// Workaround: set vendor_id = party_id for existing purchase_bills rows
 	db.Exec(`UPDATE purchase_bills SET vendor_id = party_id WHERE vendor_id IS NULL AND party_id IS NOT NULL`)
 
-	migrateInvoicesDropLegacyCustomerID(db)
+	if IsSQLite() {
+		migrateInvoicesDropLegacyCustomerID(db)
+	}
 	migrateBarcodeColumnsToItemCode(db)
 	migratePayrollLabels(db)
 	reclassifyExpenseCategoryGLAccounts(db)
@@ -221,38 +238,8 @@ func migrateWarehouseCodeUnique(db *gorm.DB) {
 		}
 	}
 
-	// SQLite may still hold an anonymous unique index created from the old
-	// gorm:"uniqueIndex" tag. Rebuild if needed by checking table indexes.
-	var indexNames []string
-	rows, err := db.Raw(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'warehouses'`).Rows()
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var name string
-			if scanErr := rows.Scan(&name); scanErr == nil {
-				indexNames = append(indexNames, name)
-			}
-		}
-	}
-	for _, name := range indexNames {
-		// Drop any leftover single-column unique index on code only.
-		if name == "idx_warehouses_user_code" || strings.HasPrefix(name, "sqlite_autoindex_") {
-			continue
-		}
-		var sql string
-		if err := db.Raw(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&sql).Error; err != nil {
-			continue
-		}
-		lower := strings.ToLower(sql)
-		if strings.Contains(lower, "unique") &&
-			strings.Contains(lower, "code") &&
-			!strings.Contains(lower, "user_id") {
-			if err := db.Exec(`DROP INDEX IF EXISTS "` + strings.ReplaceAll(name, `"`, `""`) + `"`).Error; err != nil {
-				log.Printf("migrateWarehouseCodeUnique: drop leftover index %s failed: %v", name, err)
-			} else {
-				log.Printf("migrateWarehouseCodeUnique: dropped leftover index %s", name)
-			}
-		}
+	if IsSQLite() {
+		migrateWarehouseCodeUniqueSQLiteLegacy(db)
 	}
 
 	if !db.Migrator().HasIndex(&models.Warehouse{}, "idx_warehouses_user_code") {
@@ -277,7 +264,7 @@ func migratePayrollLabels(db *gorm.DB) {
 	if err := db.Exec(`
 		UPDATE cash_transactions
 		SET transaction_type = 'payroll'
-		WHERE is_linked = 1
+		WHERE is_linked = true
 		  AND transaction_type = 'reduce'
 		  AND reference LIKE 'PAY-%'
 	`).Error; err != nil {
@@ -659,15 +646,37 @@ func consolidateLabelGapColumn(db *gorm.DB, legacyCol, canonicalCol string) {
 	renameColumnIfExists(db, "businesses", legacyCol, canonicalCol)
 }
 
-func tableColumnExists(db *gorm.DB, table, col string) bool {
-	var name string
-	if err := db.Raw(
-		`SELECT name FROM pragma_table_info(?) WHERE name = ?`,
-		table, col,
-	).Scan(&name).Error; err != nil {
-		return false
+func migrateWarehouseCodeUniqueSQLiteLegacy(db *gorm.DB) {
+	var indexNames []string
+	rows, err := db.Raw(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'warehouses'`).Rows()
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			if scanErr := rows.Scan(&name); scanErr == nil {
+				indexNames = append(indexNames, name)
+			}
+		}
 	}
-	return name != ""
+	for _, name := range indexNames {
+		if name == "idx_warehouses_user_code" || strings.HasPrefix(name, "sqlite_autoindex_") {
+			continue
+		}
+		var sql string
+		if err := db.Raw(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&sql).Error; err != nil {
+			continue
+		}
+		lower := strings.ToLower(sql)
+		if strings.Contains(lower, "unique") &&
+			strings.Contains(lower, "code") &&
+			!strings.Contains(lower, "user_id") {
+			if err := db.Exec(`DROP INDEX IF EXISTS "` + strings.ReplaceAll(name, `"`, `""`) + `"`).Error; err != nil {
+				log.Printf("migrateWarehouseCodeUnique: drop leftover index %s failed: %v", name, err)
+			} else {
+				log.Printf("migrateWarehouseCodeUnique: dropped leftover index %s", name)
+			}
+		}
+	}
 }
 
 func migrateBarcodeColumnsToItemCode(db *gorm.DB) {
@@ -678,18 +687,10 @@ func migrateBarcodeColumnsToItemCode(db *gorm.DB) {
 }
 
 func renameColumnIfExists(db *gorm.DB, table, fromCol, toCol string) {
-	var legacyCol string
-	if err := db.Raw(
-		`SELECT name FROM pragma_table_info(?) WHERE name = ?`,
-		table, fromCol,
-	).Scan(&legacyCol).Error; err != nil || legacyCol == "" {
+	if !tableColumnExists(db, table, fromCol) {
 		return
 	}
-	var newCol string
-	if err := db.Raw(
-		`SELECT name FROM pragma_table_info(?) WHERE name = ?`,
-		table, toCol,
-	).Scan(&newCol).Error; err == nil && newCol != "" {
+	if tableColumnExists(db, table, toCol) {
 		return
 	}
 	log.Printf("Migrating %s: renaming column %s to %s", table, fromCol, toCol)
@@ -702,10 +703,9 @@ func renameColumnIfExists(db *gorm.DB, table, fromCol, toCol string) {
 }
 
 // migrateInvoicesDropLegacyCustomerID removes the pre-parties customer_id column from invoices.
-// Older schemas required customer_id (FK to customers) while the app now uses party_id only.
+// Older SQLite schemas required customer_id (FK to customers) while the app now uses party_id only.
 func migrateInvoicesDropLegacyCustomerID(db *gorm.DB) {
-	var legacyCol string
-	if err := db.Raw(`SELECT name FROM pragma_table_info('invoices') WHERE name = 'customer_id'`).Scan(&legacyCol).Error; err != nil || legacyCol == "" {
+	if !tableColumnExists(db, "invoices", "customer_id") {
 		return
 	}
 

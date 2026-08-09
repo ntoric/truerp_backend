@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 	"truerp/models"
@@ -142,50 +143,17 @@ func GetRevenueReport(c *gin.Context) {
 	}
 
 	var results []RevenueItem
-	var query string
-
-	switch period {
-	case "daily":
-		query = `
-			SELECT DATE(date) as period,
-				COALESCE(SUM(total_amount), 0) as gross,
-				COALESCE(SUM(sub_total - discount_total - invoice_discount), 0) as net,
-				COALESCE(SUM(tax_total), 0) as tax,
-				COUNT(*) as invoice_count,
-				COALESCE(AVG(total_amount), 0) as avg_invoice
-			FROM invoices WHERE user_id = ? AND status = 'paid'
-			GROUP BY DATE(date) ORDER BY period DESC LIMIT 30`
-	case "weekly":
-		query = `
-			SELECT strftime('%Y-W%W', date) as period,
-				COALESCE(SUM(total_amount), 0) as gross,
-				COALESCE(SUM(sub_total - discount_total - invoice_discount), 0) as net,
-				COALESCE(SUM(tax_total), 0) as tax,
-				COUNT(*) as invoice_count,
-				COALESCE(AVG(total_amount), 0) as avg_invoice
-			FROM invoices WHERE user_id = ? AND status = 'paid'
-			GROUP BY strftime('%Y-W%W', date) ORDER BY period DESC LIMIT 12`
-	case "yearly":
-		query = `
-			SELECT strftime('%Y', date) as period,
-				COALESCE(SUM(total_amount), 0) as gross,
-				COALESCE(SUM(sub_total - discount_total - invoice_discount), 0) as net,
-				COALESCE(SUM(tax_total), 0) as tax,
-				COUNT(*) as invoice_count,
-				COALESCE(AVG(total_amount), 0) as avg_invoice
-			FROM invoices WHERE user_id = ? AND status = 'paid'
-			GROUP BY strftime('%Y', date) ORDER BY period DESC LIMIT 5`
-	default:
-		query = `
-			SELECT strftime('%Y-%m', date) as period,
-				COALESCE(SUM(total_amount), 0) as gross,
-				COALESCE(SUM(sub_total - discount_total - invoice_discount), 0) as net,
-				COALESCE(SUM(tax_total), 0) as tax,
-				COUNT(*) as invoice_count,
-				COALESCE(AVG(total_amount), 0) as avg_invoice
-			FROM invoices WHERE user_id = ? AND status = 'paid'
-			GROUP BY strftime('%Y-%m', date) ORDER BY period DESC LIMIT 12`
-	}
+	periodExpr := utils.SQLPeriodExpr("date", period)
+	limit := utils.SQLPeriodLimit(period)
+	query := fmt.Sprintf(`
+		SELECT %s as period,
+			COALESCE(SUM(total_amount), 0) as gross,
+			COALESCE(SUM(sub_total - discount_total - invoice_discount), 0) as net,
+			COALESCE(SUM(tax_total), 0) as tax,
+			COUNT(*) as invoice_count,
+			COALESCE(AVG(total_amount), 0) as avg_invoice
+		FROM invoices WHERE user_id = ? AND status = 'paid'
+		GROUP BY %s ORDER BY period DESC LIMIT %s`, periodExpr, periodExpr, limit)
 
 	if err := utils.DB.Raw(query, userID).Scan(&results).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate revenue report"})
@@ -231,34 +199,13 @@ func GetSalesReportDetailed(c *gin.Context) {
 	}
 
 	var series []SalesItem
-	var query string
-
-	switch period {
-	case "daily":
-		query = `
-			SELECT DATE(date) as period, COALESCE(SUM(total_amount), 0) as sales, COUNT(*) as count,
-				COALESCE(AVG(total_amount), 0) as avg_invoice
-			FROM invoices WHERE user_id = ? AND status = 'paid'
-			GROUP BY DATE(date) ORDER BY period DESC LIMIT 30`
-	case "weekly":
-		query = `
-			SELECT strftime('%Y-W%W', date) as period, COALESCE(SUM(total_amount), 0) as sales, COUNT(*) as count,
-				COALESCE(AVG(total_amount), 0) as avg_invoice
-			FROM invoices WHERE user_id = ? AND status = 'paid'
-			GROUP BY strftime('%Y-W%W', date) ORDER BY period DESC LIMIT 12`
-	case "yearly":
-		query = `
-			SELECT strftime('%Y', date) as period, COALESCE(SUM(total_amount), 0) as sales, COUNT(*) as count,
-				COALESCE(AVG(total_amount), 0) as avg_invoice
-			FROM invoices WHERE user_id = ? AND status = 'paid'
-			GROUP BY strftime('%Y', date) ORDER BY period DESC LIMIT 5`
-	default:
-		query = `
-			SELECT strftime('%Y-%m', date) as period, COALESCE(SUM(total_amount), 0) as sales, COUNT(*) as count,
-				COALESCE(AVG(total_amount), 0) as avg_invoice
-			FROM invoices WHERE user_id = ? AND status = 'paid'
-			GROUP BY strftime('%Y-%m', date) ORDER BY period DESC LIMIT 12`
-	}
+	periodExpr := utils.SQLPeriodExpr("date", period)
+	limit := utils.SQLPeriodLimit(period)
+	query := fmt.Sprintf(`
+		SELECT %s as period, COALESCE(SUM(total_amount), 0) as sales, COUNT(*) as count,
+			COALESCE(AVG(total_amount), 0) as avg_invoice
+		FROM invoices WHERE user_id = ? AND status = 'paid'
+		GROUP BY %s ORDER BY period DESC LIMIT %s`, periodExpr, periodExpr, limit)
 
 	if err := utils.DB.Raw(query, userID).Scan(&series).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate sales report"})
@@ -323,65 +270,21 @@ func GetTaxReport(c *gin.Context) {
 	period := c.DefaultQuery("period", "monthly")
 
 	var months []models.GSTReport
-	var query string
-	switch period {
-	case "daily":
-		query = `
-			SELECT
-				DATE(date) as month,
-				COALESCE(SUM(cgst_total), 0) as cgst,
-				COALESCE(SUM(sgst_total), 0) as sgst,
-				COALESCE(SUM(igst_total), 0) as igst,
-				COALESCE(SUM(cgst_total + sgst_total + igst_total), 0) as total_tax,
-				COALESCE(SUM(total_amount), 0) as total_value
-			FROM invoices
-			WHERE user_id = ? AND status IN ('paid', 'sent')
-			GROUP BY DATE(date)
-			ORDER BY month DESC
-			LIMIT 30`
-	case "weekly":
-		query = `
-			SELECT
-				strftime('%Y-W%W', date) as month,
-				COALESCE(SUM(cgst_total), 0) as cgst,
-				COALESCE(SUM(sgst_total), 0) as sgst,
-				COALESCE(SUM(igst_total), 0) as igst,
-				COALESCE(SUM(cgst_total + sgst_total + igst_total), 0) as total_tax,
-				COALESCE(SUM(total_amount), 0) as total_value
-			FROM invoices
-			WHERE user_id = ? AND status IN ('paid', 'sent')
-			GROUP BY strftime('%Y-W%W', date)
-			ORDER BY month DESC
-			LIMIT 12`
-	case "yearly":
-		query = `
-			SELECT
-				strftime('%Y', date) as month,
-				COALESCE(SUM(cgst_total), 0) as cgst,
-				COALESCE(SUM(sgst_total), 0) as sgst,
-				COALESCE(SUM(igst_total), 0) as igst,
-				COALESCE(SUM(cgst_total + sgst_total + igst_total), 0) as total_tax,
-				COALESCE(SUM(total_amount), 0) as total_value
-			FROM invoices
-			WHERE user_id = ? AND status IN ('paid', 'sent')
-			GROUP BY strftime('%Y', date)
-			ORDER BY month DESC
-			LIMIT 5`
-	default:
-		query = `
-			SELECT
-				strftime('%Y-%m', date) as month,
-				COALESCE(SUM(cgst_total), 0) as cgst,
-				COALESCE(SUM(sgst_total), 0) as sgst,
-				COALESCE(SUM(igst_total), 0) as igst,
-				COALESCE(SUM(cgst_total + sgst_total + igst_total), 0) as total_tax,
-				COALESCE(SUM(total_amount), 0) as total_value
-			FROM invoices
-			WHERE user_id = ? AND status IN ('paid', 'sent')
-			GROUP BY strftime('%Y-%m', date)
-			ORDER BY month DESC
-			LIMIT 12`
-	}
+	periodExpr := utils.SQLPeriodExpr("date", period)
+	limit := utils.SQLPeriodLimit(period)
+	query := fmt.Sprintf(`
+		SELECT
+			%s as month,
+			COALESCE(SUM(cgst_total), 0) as cgst,
+			COALESCE(SUM(sgst_total), 0) as sgst,
+			COALESCE(SUM(igst_total), 0) as igst,
+			COALESCE(SUM(cgst_total + sgst_total + igst_total), 0) as total_tax,
+			COALESCE(SUM(total_amount), 0) as total_value
+		FROM invoices
+		WHERE user_id = ? AND status IN ('paid', 'sent')
+		GROUP BY %s
+		ORDER BY month DESC
+		LIMIT %s`, periodExpr, periodExpr, limit)
 	if err := utils.DB.Raw(query, userID).Scan(&months).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate tax report"})
 		return
@@ -825,22 +728,8 @@ func GetPaymentsReport(c *gin.Context) {
 		Count     int64   `json:"count"`
 	}
 
-	var periodExpr string
-	var limit string
-	switch period {
-	case "daily":
-		periodExpr = "DATE(date)"
-		limit = "30"
-	case "weekly":
-		periodExpr = "strftime('%Y-W%W', date)"
-		limit = "12"
-	case "yearly":
-		periodExpr = "strftime('%Y', date)"
-		limit = "5"
-	default:
-		periodExpr = "strftime('%Y-%m', date)"
-		limit = "12"
-	}
+	periodExpr := utils.SQLPeriodExpr("date", period)
+	limit := utils.SQLPeriodLimit(period)
 
 	var timeline []PeriodRow
 	inQuery := `

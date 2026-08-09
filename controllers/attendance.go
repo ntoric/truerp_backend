@@ -58,19 +58,17 @@ func resolveWorkHours(status string, checkIn, checkOut *time.Time, provided floa
 	}
 }
 
-// attendanceOnDate scopes rows to a calendar day. SQLite stores Go time.Time as a full
-// datetime string (e.g. "2026-08-04 00:00:00+00:00"), so equality/range checks against
-// a bare "YYYY-MM-DD" never match.
+// attendanceOnDate scopes rows to a calendar day across SQLite and PostgreSQL.
 func attendanceOnDate(db *gorm.DB, dateStr string) *gorm.DB {
-	return db.Where("DATE(date) = ?", dateStr)
+	return db.Where(utils.SQLDateEquals("date"), dateStr)
 }
 
 func attendanceBetweenDates(db *gorm.DB, startDate, endDate string) *gorm.DB {
 	if startDate != "" {
-		db = db.Where("DATE(date) >= ?", startDate)
+		db = db.Where(utils.SQLDateGTE("date"), startDate)
 	}
 	if endDate != "" {
-		db = db.Where("DATE(date) <= ?", endDate)
+		db = db.Where(utils.SQLDateLTE("date"), endDate)
 	}
 	return db
 }

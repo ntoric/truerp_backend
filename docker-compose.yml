@@ -5,12 +5,32 @@
 #   docker compose up --build
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: truerp-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-truerp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-truerp}
+      POSTGRES_DB: ${POSTGRES_DB:-truerp}
+    volumes:
+      - truerp-pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-truerp} -d ${POSTGRES_DB:-truerp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   api:
     build:
       context: .
       dockerfile: Dockerfile
     image: truerp-api:latest
     container_name: truerp-api
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "${API_PUBLISH_PORT:-8088}:8088"
     env_file:
@@ -19,6 +39,7 @@ services:
     environment:
       API_TRANSPORT: rest
       API_ADDR: ":8088"
+      # DATABASE_URL: postgres://${POSTGRES_USER:-truerp}:${POSTGRES_PASSWORD:-truerp}@postgres:5432/${POSTGRES_DB:-truerp}?sslmode=disable
       DATABASE_PATH: /app/data/truerp.db
       STORAGE_TYPE: ${STORAGE_TYPE:-local}
       LOCAL_STORAGE_PATH: /app/uploads
@@ -31,8 +52,8 @@ services:
       SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
     volumes:
-      - truerp-data:/app/data
       - truerp-uploads:/app/uploads
+      - ../truerp-data:/app/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8088/health"]
@@ -42,5 +63,5 @@ services:
       start_period: 20s
 
 volumes:
-  truerp-data:
+  truerp-pgdata:
   truerp-uploads:
