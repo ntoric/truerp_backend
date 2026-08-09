@@ -383,7 +383,7 @@ func CreatePurchaseBill(c *gin.Context) {
 		BillDate          time.Time  `json:"bill_date" binding:"required"`
 		DueDate           *time.Time `json:"due_date"`
 		WarehouseID       *uuid.UUID `json:"warehouse_id"`
-		TotalAmount       float64    `json:"total_amount" binding:"required"`
+		TotalAmount       float64    `json:"total_amount"` // 0 allowed (esp. drafts / zero-priced lines)
 		PaidAmount        float64    `json:"paid_amount"`
 		BalanceDue        float64    `json:"balance_due"`
 		PaymentMode       string     `json:"payment_mode"`
@@ -413,10 +413,18 @@ func CreatePurchaseBill(c *gin.Context) {
 		return
 	}
 
-	for _, item := range input.Items {
-		if err := validateBatchedProductRequiresBatch(userID, item.ProductID, item.BatchNo, item.Description); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
+	status := input.Status
+	if status == "" {
+		status = "unpaid"
+	}
+
+	// Draft bills may omit batch numbers so line items can be autosaved while editing.
+	if status != "draft" {
+		for _, item := range input.Items {
+			if err := validateBatchedProductRequiresBatch(userID, item.ProductID, item.BatchNo, item.Description); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
 		}
 	}
 
@@ -456,12 +464,7 @@ func CreatePurchaseBill(c *gin.Context) {
 		DueDate:           input.DueDate,
 		WarehouseID:       warehouseID,
 		StockStatus:       "none",
-		Status: func() string {
-			if input.Status != "" {
-				return input.Status
-			}
-			return "unpaid"
-		}(),
+		Status:            status,
 		TotalAmount: input.TotalAmount,
 		PaidAmount:  input.PaidAmount,
 		BalanceDue: func() float64 {
@@ -544,7 +547,7 @@ func CreatePurchaseBill(c *gin.Context) {
 	}
 
 	if err := createPendingPurchaseStockEntries(userID, &bill); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill saved but failed to create pending stock entries"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill saved but failed to update inventory stock"})
 		return
 	}
 
@@ -610,10 +613,13 @@ func UpdatePurchaseBill(c *gin.Context) {
 		return
 	}
 
-	for _, item := range input.Items {
-		if err := validateBatchedProductRequiresBatch(userID, item.ProductID, item.BatchNo, item.Description); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
+	// Draft bills may omit batch numbers so line items can be autosaved while editing.
+	if input.Status != "draft" {
+		for _, item := range input.Items {
+			if err := validateBatchedProductRequiresBatch(userID, item.ProductID, item.BatchNo, item.Description); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
 		}
 	}
 
@@ -741,7 +747,7 @@ func UpdatePurchaseBill(c *gin.Context) {
 	bill.SubTotal = subTotal
 	bill.TaxTotal = taxTotal
 
-	// Reset linked stock entries so edits re-enter pending approval
+	// Reset linked stock entries so edits re-apply inventory immediately
 	if err := removePurchaseStockEntries(userID, bill.ID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset stock entries for bill"})
 		return
@@ -761,7 +767,7 @@ func UpdatePurchaseBill(c *gin.Context) {
 	}
 
 	if err := createPendingPurchaseStockEntries(userID, &bill); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to create pending stock entries"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to update inventory stock"})
 		return
 	}
 
@@ -803,9 +809,10 @@ func GetPurchaseBillStats(c *gin.Context) {
 
 	// Fresh queries each time — reusing one GORM chain stacked status
 	// filters and under-counted paid/unpaid (especially partial bills).
-	qTotal := utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ?", userID)
-	qPaid := utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ?", userID)
-	qUnpaid := utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ?", userID)
+	// Exclude drafts from financial stats so incomplete invoices don't inflate totals.
+	qTotal := utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ? AND status <> ?", userID, "draft")
+	qPaid := utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ? AND status <> ?", userID, "draft")
+	qUnpaid := utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ? AND status <> ?", userID, "draft")
 
 	if fromDate := c.Query("from_date"); fromDate != "" {
 		qTotal = qTotal.Where("bill_date >= ?", fromDate)

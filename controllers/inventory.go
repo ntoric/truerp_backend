@@ -414,6 +414,7 @@ func createPendingPurchaseStockEntries(userID uuid.UUID, bill *models.PurchaseBi
 		return utils.DB.Model(bill).Update("stock_status", "none").Error
 	}
 
+	now := time.Now()
 	created := 0
 	for _, item := range bill.Items {
 		if item.ProductID == nil || item.Quantity <= 0 {
@@ -435,19 +436,22 @@ func createPendingPurchaseStockEntries(userID uuid.UUID, bill *models.PurchaseBi
 			ExpDate:        item.ExpDate,
 			ReferenceID:    bill.ID,
 			ReferenceType:  "purchase_bill",
-			Notes:          fmt.Sprintf("Pending approval from purchase bill %s", bill.BillNumber),
-			ApprovalStatus: "pending",
+			Notes:          fmt.Sprintf("From purchase bill %s", bill.BillNumber),
+			ApprovalStatus: "approved",
+			ApprovedBy:     &userID,
+			ApprovedAt:     &now,
 			EntryDate:      bill.BillDate,
 		}
 		if err := utils.DB.Create(&entry).Error; err != nil {
 			return err
 		}
+		updateInventoryStock(userID, *item.ProductID, warehouseID, "purchase", item.Quantity, item.UnitPrice, item.BatchNo, item.MfgDate, item.ExpDate)
 		created++
 	}
 
 	stockStatus := "none"
 	if created > 0 {
-		stockStatus = "pending"
+		stockStatus = "approved"
 	}
 	bill.StockStatus = stockStatus
 	return utils.DB.Model(bill).Update("stock_status", stockStatus).Error
