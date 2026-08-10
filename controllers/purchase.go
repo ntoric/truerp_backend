@@ -1222,7 +1222,8 @@ func PrintPurchaseBillLabels(c *gin.Context) {
 		return
 	}
 
-	// Override item codes with the latest stock entry item code (not product SKU)
+	// Override item codes with the latest stock entry item code (not product SKU),
+	// and fill missing MRP / sale price from the linked product (never use purchase unit price as MRP).
 	for i := range bill.Items {
 		var stock models.StockEntry
 		var err error
@@ -1250,6 +1251,8 @@ func PrintPurchaseBillLabels(c *gin.Context) {
 		if err == nil && stock.ItemCode != "" {
 			bill.Items[i].ItemCode = stock.ItemCode
 		}
+
+		enrichPurchaseItemLabelPrices(&bill.Items[i], userID)
 	}
 
 	// Set default config if not provided
@@ -1353,6 +1356,44 @@ func wantsJSONResponse(c *gin.Context) bool {
 	return strings.Contains(accept, "application/json")
 }
 
+// enrichPurchaseItemLabelPrices fills missing MRP / sale price from the product catalog.
+// UnitPrice is purchase cost and must never be used as MRP on labels.
+func enrichPurchaseItemLabelPrices(item *models.PurchaseBillItem, userID uuid.UUID) {
+	if item == nil {
+		return
+	}
+	if item.MRP > 0 && item.SalePrice > 0 {
+		return
+	}
+
+	var product models.Product
+	var err error
+	if item.ProductID != nil {
+		err = utils.DB.Select("id", "mrp", "sale_price").
+			Where("user_id = ? AND id = ?", userID, *item.ProductID).
+			First(&product).Error
+	}
+	if err != nil && strings.TrimSpace(item.ItemCode) != "" {
+		err = utils.DB.Select("id", "mrp", "sale_price").
+			Where("user_id = ? AND (item_code = ? OR sku = ?)", userID, item.ItemCode, item.ItemCode).
+			First(&product).Error
+	}
+	if err != nil && strings.TrimSpace(item.Description) != "" {
+		err = utils.DB.Select("id", "mrp", "sale_price").
+			Where("user_id = ? AND name = ?", userID, item.Description).
+			First(&product).Error
+	}
+	if err != nil {
+		return
+	}
+	if item.MRP <= 0 && product.MRP > 0 {
+		item.MRP = product.MRP
+	}
+	if item.SalePrice <= 0 && product.SalePrice > 0 {
+		item.SalePrice = product.SalePrice
+	}
+}
+
 func purchaseItemsToBarcodeLabels(items []models.PurchaseBillItem, _ bool) []BarcodeLabelItemJSON {
 	out := make([]BarcodeLabelItemJSON, 0, len(items))
 	for _, item := range items {
@@ -1363,21 +1404,13 @@ func purchaseItemsToBarcodeLabels(items []models.PurchaseBillItem, _ bool) []Bar
 		if barcodeVal == "" {
 			barcodeVal = "0000000000"
 		}
-		salePrice := item.SalePrice
-		if salePrice == 0 {
-			salePrice = item.UnitPrice
-		}
-		mrp := item.MRP
-		if mrp == 0 {
-			mrp = item.UnitPrice
-		}
 		entry := BarcodeLabelItemJSON{
 			Name:    item.Description,
 			Barcode: barcodeVal,
-			Price:   salePrice,
+			Price:   item.SalePrice,
 		}
-		if mrp > 0 {
-			entry.MRP = mrp
+		if item.MRP > 0 {
+			entry.MRP = item.MRP
 		}
 		out = append(out, entry)
 	}
@@ -1442,20 +1475,12 @@ func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]floa
 		if barcodeVal == "" {
 			barcodeVal = "0000000000"
 		}
-		salePrice := item.SalePrice
-		if salePrice == 0 {
-			salePrice = item.UnitPrice
-		}
-		mrp := item.MRP
-		if mrp == 0 {
-			mrp = item.UnitPrice
-		}
 		labelHTMLs = append(labelHTMLs, buildProductLabelHTML(productLabelData{
 			Name:      item.Description,
 			SKU:       item.ItemCode,
 			ItemCode:  barcodeVal,
-			SalePrice: salePrice,
-			MRP:       mrp,
+			SalePrice: item.SalePrice,
+			MRP:       item.MRP,
 		}, a4Size, false))
 	}
 
@@ -1484,19 +1509,10 @@ func generateThermalPurchaseLabel(item models.PurchaseBillItem, size BarcodeLabe
 		barcodeVal = "0000000000"
 	}
 
-	salePrice := item.SalePrice
-	if salePrice == 0 {
-		salePrice = item.UnitPrice
-	}
-	mrp := item.MRP
-	if mrp == 0 {
-		mrp = item.UnitPrice
-	}
-
 	name := html.EscapeString(item.Description)
 	mrpCell := ""
-	if mrp > 0 {
-		mrpCell = fmt.Sprintf(`<span class="product-mrp">MRP: ₹%.2f</span>`, mrp)
+	if item.MRP > 0 {
+		mrpCell = fmt.Sprintf(`<span class="product-mrp">MRP: ₹%.2f</span>`, item.MRP)
 	}
 
 	return fmt.Sprintf(`<div class="label">
@@ -1510,7 +1526,7 @@ func generateThermalPurchaseLabel(item models.PurchaseBillItem, size BarcodeLabe
 	</div>
 </div>`, name,
 		barcodeImageHTML(barcodeVal, size.BarcodeW, size.BarcodeH, size.MetaFontPx),
-		mrpCell, salePrice)
+		mrpCell, item.SalePrice)
 }
 
 // ParseBillWithAI uses Gemini to parse purchase bill/invoice from image
