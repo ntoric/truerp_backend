@@ -390,6 +390,7 @@ func CreatePurchaseBill(c *gin.Context) {
 		BankAccountID     *uuid.UUID `json:"bank_account_id"`
 		Status            string     `json:"status"`
 		Notes             string     `json:"notes"`
+		TaxExempt         bool       `json:"tax_exempt"`
 		Items             []struct {
 			ProductID   *uuid.UUID           `json:"product_id"`
 			ItemCode    string               `json:"item_code"`
@@ -465,6 +466,7 @@ func CreatePurchaseBill(c *gin.Context) {
 		WarehouseID:       warehouseID,
 		StockStatus:       "none",
 		Status:            status,
+		TaxExempt:         input.TaxExempt,
 		TotalAmount: input.TotalAmount,
 		PaidAmount:  input.PaidAmount,
 		BalanceDue: func() float64 {
@@ -485,6 +487,9 @@ func CreatePurchaseBill(c *gin.Context) {
 		unitPrice := item.UnitPrice.Float64()
 		discount := item.Discount.Float64()
 		taxRate := item.TaxRate.Float64()
+		if input.TaxExempt {
+			taxRate = 0
+		}
 		if qty <= 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Item quantity must be greater than 0"})
 			return
@@ -590,6 +595,7 @@ func UpdatePurchaseBill(c *gin.Context) {
 		BankAccountID *uuid.UUID `json:"bank_account_id"`
 		Status        string     `json:"status"`
 		Notes         string     `json:"notes"`
+		TaxExempt     bool       `json:"tax_exempt"`
 		Items         []struct {
 			ProductID   *uuid.UUID           `json:"product_id"`
 			ItemCode    string               `json:"item_code"`
@@ -697,6 +703,7 @@ func UpdatePurchaseBill(c *gin.Context) {
 	bill.BankAccountID = resolvedBankAccount
 	bill.Status = input.Status
 	bill.Notes = input.Notes
+	bill.TaxExempt = input.TaxExempt
 
 	// Delete old items and recreate
 	utils.DB.Where("bill_id = ?", bill.ID).Delete(&models.PurchaseBillItem{})
@@ -708,6 +715,9 @@ func UpdatePurchaseBill(c *gin.Context) {
 		unitPrice := item.UnitPrice.Float64()
 		discount := item.Discount.Float64()
 		taxRate := item.TaxRate.Float64()
+		if input.TaxExempt {
+			taxRate = 0
+		}
 		if qty <= 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Item quantity must be greater than 0"})
 			return

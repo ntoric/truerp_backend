@@ -574,6 +574,7 @@ type PurchaseBill struct {
 	StockStatus       string             `json:"stock_status" gorm:"default:'none'"` // none, pending, approved, rejected, partial
 	SubTotal          float64            `json:"sub_total" gorm:"default:0"`
 	TaxTotal          float64            `json:"tax_total" gorm:"default:0"`
+	TaxExempt         bool               `json:"tax_exempt" gorm:"default:false"`
 	TotalAmount       float64            `json:"total_amount" gorm:"default:0"`
 	PaidAmount        float64            `json:"paid_amount" gorm:"default:0"`
 	BalanceDue        float64            `json:"balance_due" gorm:"default:0"`
