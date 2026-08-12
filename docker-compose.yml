@@ -9,18 +9,23 @@ services:
     image: postgres:16-alpine
     container_name: truerp-postgres
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-truerp}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-truerp}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-truerp}
     volumes:
-      - truerp-pgdata:/var/lib/postgresql/data
+      - ./truerp-pgdata:/var/lib/postgresql/data
+    ports:
+      # Host access for local tools (migrate_sqlite_to_pg.py, psql, Adminer via TCP)
+      - "${POSTGRES_PUBLISH_PORT:-5432}:5432"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-truerp} -d ${POSTGRES_DB:-truerp}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-truerp}"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
+    networks:
+      - generic-network
 
   api:
     build:
@@ -39,8 +44,8 @@ services:
     environment:
       API_TRANSPORT: rest
       API_ADDR: ":8088"
-      # DATABASE_URL: postgres://${POSTGRES_USER:-truerp}:${POSTGRES_PASSWORD:-truerp}@postgres:5432/${POSTGRES_DB:-truerp}?sslmode=disable
-      DATABASE_PATH: /app/data/truerp.db
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-truerp}?sslmode=disable
+      # DATABASE_PATH: /app/data/truerp.db
       STORAGE_TYPE: ${STORAGE_TYPE:-local}
       LOCAL_STORAGE_PATH: /app/uploads
       # Set to your public API URL so desktop clients can load uploaded assets:
@@ -52,7 +57,7 @@ services:
       SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
     volumes:
-      - truerp-uploads:/app/uploads
+      - ./truerp-uploads:/app/uploads
       - ../truerp-data:/app/data
     restart: unless-stopped
     healthcheck:
@@ -61,7 +66,24 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    networks:
+      - generic-network
 
-volumes:
-  truerp-pgdata:
-  truerp-uploads:
+  adminer:
+    image: adminer:latest
+    container_name: adminer
+    restart: unless-stopped
+    networks:
+      - generic-network
+    ports:
+      - "8086:8080"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+networks:
+  generic-network:
+    name: generic-network
+    external: true
+
