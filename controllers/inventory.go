@@ -1250,35 +1250,23 @@ func SearchByItemCode(c *gin.Context) {
 		return
 	}
 
-	var entries []models.StockEntry
-	query := utils.DB.Where("user_id = ? AND TRIM(item_code) = ?", userID, itemCode).Preload("Product")
+	itemClause, itemArgs := utils.ItemCodeLookupClause("item_code", itemCode)
+	skuClause, skuArgs := utils.ItemCodeLookupClause("sku", itemCode)
+	pluClause, pluArgs := utils.ItemCodeLookupClause("plu", itemCode)
 
-	if outletID != "" {
-		query = query.Where("outlet_id = ?", outletID)
-	}
-
-	if err := query.Find(&entries).Error; err != nil {
-		fmt.Printf("[DEBUG] SearchByItemCode - DB error: %v\n", err)
+	// Prefer live product.item_code so updated/generated barcodes resolve
+	// even when stock entries still hold an old or empty code.
+	var products []models.Product
+	productQuery := utils.DB.Where(
+		"user_id = ? AND ("+itemClause+" OR "+skuClause+" OR "+pluClause+")",
+		append([]interface{}{userID}, append(itemArgs, append(skuArgs, pluArgs...)...)...)...,
+	)
+	if err := productQuery.Find(&products).Error; err != nil {
+		fmt.Printf("[DEBUG] SearchByItemCode - Product lookup error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to search by item code"})
 		return
 	}
-
-	fmt.Printf("[DEBUG] SearchByItemCode - Found %d entries\n", len(entries))
-
-	if len(entries) == 0 {
-		var products []models.Product
-		if err := utils.DB.Where(
-			"user_id = ? AND (TRIM(item_code) = ? OR TRIM(sku) = ? OR TRIM(plu) = ?)",
-			userID, itemCode, itemCode, itemCode,
-		).Find(&products).Error; err != nil {
-			fmt.Printf("[DEBUG] SearchByItemCode - Product fallback error: %v\n", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to search by item code"})
-			return
-		}
-		if len(products) == 0 {
-			c.JSON(http.StatusNotFound, gin.H{"error": "No products found with this item code"})
-			return
-		}
+	if len(products) > 0 {
 		results := make([]map[string]interface{}, 0, len(products))
 		for _, product := range products {
 			results = append(results, map[string]interface{}{
@@ -1298,23 +1286,44 @@ func SearchByItemCode(c *gin.Context) {
 		return
 	}
 
+	var entries []models.StockEntry
+	stockClause, stockArgs := utils.ItemCodeLookupClause("item_code", itemCode)
+	query := utils.DB.Where("user_id = ? AND "+stockClause, append([]interface{}{userID}, stockArgs...)...).Preload("Product")
+
+	if outletID != "" {
+		query = query.Where("outlet_id = ?", outletID)
+	}
+
+	if err := query.Find(&entries).Error; err != nil {
+		fmt.Printf("[DEBUG] SearchByItemCode - DB error: %v\n", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to search by item code"})
+		return
+	}
+
+	fmt.Printf("[DEBUG] SearchByItemCode - Found %d entries\n", len(entries))
+
+	if len(entries) == 0 {
+		c.JSON(http.StatusOK, gin.H{"data": []map[string]interface{}{}})
+		return
+	}
+
 	// Transform to product list with entry information
 	results := make([]map[string]interface{}, 0)
 	for _, entry := range entries {
 		result := map[string]interface{}{
-			"product_id":   entry.ProductID,
-			"product_name": entry.Product.Name,
-			"sku":          entry.Product.SKU,
-			"item_code":    entry.ItemCode,
-			"outlet_id":    entry.OutletID,
-			"quantity":     entry.Quantity,
-			"cost_price":   entry.CostPrice,
-			"batch_no":     entry.BatchNo,
-			"unit":         entry.Product.Unit,
+			"product_id":     entry.ProductID,
+			"product_name":   entry.Product.Name,
+			"sku":            entry.Product.SKU,
+			"item_code":      entry.ItemCode,
+			"outlet_id":      entry.OutletID,
+			"quantity":       entry.Quantity,
+			"cost_price":     entry.CostPrice,
+			"batch_no":       entry.BatchNo,
+			"unit":           entry.Product.Unit,
 			"purchase_price": entry.Product.PurchasePrice,
-			"sale_price":   entry.Product.SalePrice,
-			"tax_rate":     entry.Product.TaxRate,
-			"hsn_code":     entry.Product.HSNCode,
+			"sale_price":     entry.Product.SalePrice,
+			"tax_rate":       entry.Product.TaxRate,
+			"hsn_code":       entry.Product.HSNCode,
 		}
 		results = append(results, result)
 	}

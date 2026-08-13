@@ -1199,7 +1199,7 @@ func isThermalLabelPaperSize(size string) bool {
 
 type LabelRequest struct {
 	BillID         string             `json:"bill_id" binding:"required"`
-	ItemQuantities map[string]float64 `json:"item_quantities"` // item_id -> quantity (default to invoice quantity if not provided)
+	ItemQuantities map[string]float64 `json:"item_quantities"` // item_id -> quantity (0 skips item; default to invoice quantity if omitted)
 	Config         LabelConfig        `json:"config"`
 	// Format: "html" (default) or "json" for silent desktop ESC/POS printing.
 	Format string `json:"format"`
@@ -1222,36 +1222,9 @@ func PrintPurchaseBillLabels(c *gin.Context) {
 		return
 	}
 
-	// Override item codes with the latest stock entry item code (not product SKU),
-	// and fill missing MRP / sale price from the linked product (never use purchase unit price as MRP).
+	// Use the live product item code so generated/updated barcodes print and scan.
 	for i := range bill.Items {
-		var stock models.StockEntry
-		var err error
-
-		// 1. Try lookup by ProductID (new bills with proper linkage)
-		if bill.Items[i].ProductID != nil {
-			err = utils.DB.Where("product_id = ? AND user_id = ? AND item_code != ''", bill.Items[i].ProductID, userID).
-				Order("created_at DESC").First(&stock).Error
-		} else {
-			err = fmt.Errorf("no product_id")
-		}
-
-		// 2. Fallback: lookup by item name matching description (old bills / receipt-based bills)
-		if err != nil && bill.Items[i].Description != "" {
-			err = utils.DB.Where("item_name = ? AND user_id = ? AND item_code != ''", bill.Items[i].Description, userID).
-				Order("created_at DESC").First(&stock).Error
-		}
-
-		// 3. Fallback: lookup by batch number if available
-		if err != nil && bill.Items[i].BatchNo != "" {
-			err = utils.DB.Where("batch_no = ? AND user_id = ? AND item_code != ''", bill.Items[i].BatchNo, userID).
-				Order("created_at DESC").First(&stock).Error
-		}
-
-		if err == nil && stock.ItemCode != "" {
-			bill.Items[i].ItemCode = stock.ItemCode
-		}
-
+		bill.Items[i].ItemCode = resolvePurchaseLabelBarcode(bill.Items[i], userID)
 		enrichPurchaseItemLabelPrices(&bill.Items[i], userID)
 	}
 
@@ -1356,6 +1329,59 @@ func wantsJSONResponse(c *gin.Context) bool {
 	return strings.Contains(accept, "application/json")
 }
 
+func resolvePurchaseLabelBarcode(item models.PurchaseBillItem, userID uuid.UUID) string {
+	if item.ProductID != nil {
+		var product models.Product
+		if err := utils.DB.Select("item_code", "sku").
+			Where("user_id = ? AND id = ?", userID, *item.ProductID).
+			First(&product).Error; err == nil {
+			if code := strings.TrimSpace(product.ItemCode); code != "" {
+				return code
+			}
+			if code := strings.TrimSpace(product.SKU); code != "" && strings.TrimSpace(item.ItemCode) == "" {
+				return code
+			}
+		}
+	}
+	if code := strings.TrimSpace(item.ItemCode); code != "" {
+		return code
+	}
+
+	var stock models.StockEntry
+	var err error
+	if item.ProductID != nil {
+		err = utils.DB.Where("product_id = ? AND user_id = ? AND item_code != ''", item.ProductID, userID).
+			Order("created_at DESC").First(&stock).Error
+	} else {
+		err = fmt.Errorf("no product_id")
+	}
+	if err != nil && item.Description != "" {
+		err = utils.DB.Where("item_name = ? AND user_id = ? AND item_code != ''", item.Description, userID).
+			Order("created_at DESC").First(&stock).Error
+	}
+	if err != nil && item.BatchNo != "" {
+		err = utils.DB.Where("batch_no = ? AND user_id = ? AND item_code != ''", item.BatchNo, userID).
+			Order("created_at DESC").First(&stock).Error
+	}
+	if err == nil {
+		if code := strings.TrimSpace(stock.ItemCode); code != "" {
+			return code
+		}
+	}
+
+	if item.ProductID != nil {
+		var product models.Product
+		if err := utils.DB.Select("sku").
+			Where("user_id = ? AND id = ?", userID, *item.ProductID).
+			First(&product).Error; err == nil {
+			if code := strings.TrimSpace(product.SKU); code != "" {
+				return code
+			}
+		}
+	}
+	return "0000000000"
+}
+
 // enrichPurchaseItemLabelPrices fills missing MRP / sale price from the product catalog.
 // UnitPrice is purchase cost and must never be used as MRP on labels.
 func enrichPurchaseItemLabelPrices(item *models.PurchaseBillItem, userID uuid.UUID) {
@@ -1399,9 +1425,6 @@ func purchaseItemsToBarcodeLabels(items []models.PurchaseBillItem, _ bool) []Bar
 	for _, item := range items {
 		barcodeVal := strings.TrimSpace(item.ItemCode)
 		if barcodeVal == "" {
-			barcodeVal = strings.TrimSpace(item.HSNCode)
-		}
-		if barcodeVal == "" {
 			barcodeVal = "0000000000"
 		}
 		entry := BarcodeLabelItemJSON{
@@ -1421,15 +1444,18 @@ func collectPurchaseLabelItems(bill models.PurchaseBill, itemQuantities map[stri
 	var items []models.PurchaseBillItem
 	for _, item := range bill.Items {
 		qtyFloat, ok := itemQuantities[item.ID.String()]
-		if !ok || qtyFloat == 0 {
+		if !ok {
 			qtyFloat = item.Quantity
 		}
 		quantity := int(qtyFloat + 0.5) // round
-		if quantity < 1 {
-			quantity = 1
+		if quantity < 0 {
+			quantity = 0
 		}
 		if quantity > 500 {
 			quantity = 500
+		}
+		if quantity == 0 {
+			continue
 		}
 		for i := 0; i < quantity; i++ {
 			items = append(items, item)
@@ -1470,9 +1496,6 @@ func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]floa
 	for _, item := range items {
 		barcodeVal := strings.TrimSpace(item.ItemCode)
 		if barcodeVal == "" {
-			barcodeVal = strings.TrimSpace(item.HSNCode)
-		}
-		if barcodeVal == "" {
 			barcodeVal = "0000000000"
 		}
 		labelHTMLs = append(labelHTMLs, buildProductLabelHTML(productLabelData{
@@ -1502,9 +1525,6 @@ func generateThermalPurchaseLabelsHTML(billNumber string, items []models.Purchas
 func generateThermalPurchaseLabel(item models.PurchaseBillItem, size BarcodeLabelSize, compact bool) string {
 	_ = compact
 	barcodeVal := strings.TrimSpace(item.ItemCode)
-	if barcodeVal == "" {
-		barcodeVal = strings.TrimSpace(item.HSNCode)
-	}
 	if barcodeVal == "" {
 		barcodeVal = "0000000000"
 	}

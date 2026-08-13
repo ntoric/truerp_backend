@@ -304,6 +304,7 @@ func CreateProduct(c *gin.Context) {
 			BalanceQty: 0,
 			CostPrice:  input.Inventory.CostPrice,
 			BatchNo:    input.Inventory.BatchNo,
+			ItemCode:   strings.TrimSpace(input.Product.ItemCode),
 			MfgDate:    mfgDate,
 			ExpDate:    expDate,
 			EntryDate:  time.Now(),
@@ -469,6 +470,20 @@ func UpdateProduct(c *gin.Context) {
 		return
 	}
 
+	newItemCode := strings.TrimSpace(itemCode)
+	oldItemCode := strings.TrimSpace(product.ItemCode)
+	if newItemCode != "" && newItemCode != oldItemCode {
+		sync := utils.DB.Model(&models.StockEntry{}).Where("user_id = ? AND product_id = ?", userID, product.ID)
+		if oldItemCode == "" {
+			sync = sync.Where("item_code = '' OR item_code IS NULL")
+		} else {
+			sync = sync.Where("TRIM(item_code) = ? OR item_code = '' OR item_code IS NULL", oldItemCode)
+		}
+		if err := sync.Update("item_code", newItemCode).Error; err != nil {
+			fmt.Printf("[DEBUG] UpdateProduct - Failed to sync stock item codes: %v\n", err)
+		}
+	}
+
 	// Update inventory stock entry if inventory data is provided
 	if input.Inventory != nil && input.Inventory.Quantity > 0 {
 		outletID := uuid.Nil
@@ -527,6 +542,7 @@ func UpdateProduct(c *gin.Context) {
 			BalanceQty: 0,
 			CostPrice:  input.Inventory.CostPrice,
 			BatchNo:    input.Inventory.BatchNo,
+			ItemCode:   strings.TrimSpace(itemCode),
 			MfgDate:    mfgDate,
 			ExpDate:    expDate,
 			EntryDate:  time.Now(),
