@@ -189,6 +189,38 @@ func UploadLogo(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"logo_url": publicURL})
 }
 
+func RemoveLogo(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	business, err := ensureBusinessForUser(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load business"})
+		return
+	}
+
+	if business.LogoURL == "" {
+		c.JSON(http.StatusOK, gin.H{"logo_url": ""})
+		return
+	}
+
+	logoURL := business.LogoURL
+	if err := utils.DB.Model(&business).Update("logo_url", "").Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove logo"})
+		return
+	}
+
+	var mediaFile models.MediaFile
+	if err := utils.DB.Where("user_id = ? AND entity_type = ? AND public_url = ?", userID, "logo", logoURL).
+		Order("created_at DESC").
+		First(&mediaFile).Error; err == nil {
+		storageService := services.GetDefaultStorageService()
+		_ = storageService.DeleteFile(mediaFile.FilePath)
+		_ = utils.DB.Delete(&mediaFile).Error
+	}
+
+	c.JSON(http.StatusOK, gin.H{"logo_url": ""})
+}
+
 func UploadSignature(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 

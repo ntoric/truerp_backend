@@ -350,6 +350,15 @@ type DailyReport struct {
 	ProductProfit float64 `json:"product_profit"`
 }
 
+// PeriodReport is a DailyReport-style summary over an arbitrary date range.
+type PeriodReport struct {
+	DailyReport
+	Period    string `json:"period"`     // daily | weekly | monthly | yearly | custom
+	StartDate string `json:"start_date"` // YYYY-MM-DD inclusive
+	EndDate   string `json:"end_date"`   // YYYY-MM-DD inclusive
+	Label     string `json:"label"`      // human-readable period label
+}
+
 type GSTReport struct {
 	Month      string  `json:"month"`
 	CGST       float64 `json:"cgst"`

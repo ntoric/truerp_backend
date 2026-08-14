@@ -48,6 +48,7 @@ func SetupRoutes(r *gin.Engine) {
 		business.GET("", controllers.GetBusiness)
 		business.PUT("", controllers.UpdateBusiness)
 		business.POST("/upload-logo", controllers.UploadLogo)
+		business.DELETE("/logo", controllers.RemoveLogo)
 		business.POST("/upload-signature", controllers.UploadSignature)
 	}
 
@@ -175,6 +176,9 @@ func SetupRoutes(r *gin.Engine) {
 		dashboard.GET("/daily-report", controllers.GetDailyReport)
 		dashboard.GET("/daily-report/export", controllers.ExportDailyReportCSV)
 		dashboard.GET("/daily-report/pdf", controllers.ExportDailyReportPDF)
+		dashboard.GET("/periodic-report", controllers.GetPeriodicReport)
+		dashboard.GET("/periodic-report/export", controllers.ExportPeriodicReportCSV)
+		dashboard.GET("/periodic-report/pdf", controllers.ExportPeriodicReportPDF)
 	}
 
 	reports := r.Group("/api/v1/reports")
