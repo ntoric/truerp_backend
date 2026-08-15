@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -74,6 +74,7 @@ func OpenPOSSession(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
+		ID          uuid.UUID `json:"id"`
 		OutletID    uuid.UUID `json:"outlet_id"`
 		OpeningCash float64   `json:"opening_cash"`
 	}
@@ -89,8 +90,13 @@ func OpenPOSSession(c *gin.Context) {
 		return
 	}
 
+	sessionID := uuid.New()
+	if input.ID != uuid.Nil {
+		sessionID = input.ID
+	}
+
 	session := models.POSSession{
-		ID:          uuid.New(),
+		ID:          sessionID,
 		UserID:      userID,
 		CashierID:   userID,
 		OutletID:    input.OutletID,
@@ -112,8 +118,8 @@ func ClosePOSSession(c *gin.Context) {
 	id := c.Param("id")
 
 	var input struct {
-		ClosingCash float64  `json:"closing_cash"`
-		Notes       string   `json:"notes"`
+		ClosingCash float64 `json:"closing_cash"`
+		Notes       string  `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -157,7 +163,7 @@ func GetPOSSessionSummary(c *gin.Context) {
 	}
 
 	var invoiceCount int64
-	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND created_at >= ? AND created_at <= ?", 
+	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND created_at >= ? AND created_at <= ?",
 		userID, session.OpenedAt, session.ClosedAt).Count(&invoiceCount)
 
 	c.JSON(http.StatusOK, gin.H{

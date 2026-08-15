@@ -1,13 +1,13 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"math"
 	"net/http"
 	"strings"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -79,31 +79,34 @@ func CreateInvoice(c *gin.Context) {
 	}
 
 	var input struct {
-		InvoiceNumber     string     `json:"invoice_number"`
-		InvoiceType       string     `json:"invoice_type"`
-		PartyID           uuid.UUID  `json:"party_id"`
-		CustomerID        uuid.UUID  `json:"customer_id"`
-		Date              time.Time             `json:"date" binding:"required"`
-		DueDate           *models.FlexibleTime  `json:"due_date"`
-		PaymentTerms      int        `json:"payment_terms"`
-		Status            string     `json:"status"`
-		PaymentMode       string     `json:"payment_mode"`
-		AmountPaid        float64    `json:"amount_paid"`
-		ReceivedAmount    float64    `json:"received_amount"`
-		BankAccountID     *uuid.UUID `json:"bank_account_id"`
-		Notes            string     `json:"notes"`
-		Terms            string    `json:"terms"`
-		IsInterState     bool      `json:"is_inter_state"`
-		EWayBillRequired bool      `json:"eway_bill_required"`
-		InvoiceDiscount  float64   `json:"invoice_discount"`
-		AdditionalCharges float64  `json:"additional_charges"`
-		LoyaltyPointsRedeemed int64 `json:"loyalty_points_redeemed"`
-		IsPOS                 bool  `json:"is_pos"`
-		PosSessionID          *uuid.UUID `json:"pos_session_id"`
-		Signature        string                 `json:"signature"`
-		PDFTemplate      string                 `json:"pdf_template"`
-		CustomFields     map[string]interface{} `json:"custom_fields"`
-		Items            []struct {
+		InvoiceNumber         string                 `json:"invoice_number"`
+		InvoiceType           string                 `json:"invoice_type"`
+		PartyID               uuid.UUID              `json:"party_id"`
+		CustomerID            uuid.UUID              `json:"customer_id"`
+		Date                  time.Time              `json:"date" binding:"required"`
+		DueDate               *models.FlexibleTime   `json:"due_date"`
+		PaymentTerms          int                    `json:"payment_terms"`
+		Status                string                 `json:"status"`
+		PaymentMode           string                 `json:"payment_mode"`
+		AmountPaid            float64                `json:"amount_paid"`
+		ReceivedAmount        float64                `json:"received_amount"`
+		BankAccountID         *uuid.UUID             `json:"bank_account_id"`
+		Notes                 string                 `json:"notes"`
+		Terms                 string                 `json:"terms"`
+		IsInterState          bool                   `json:"is_inter_state"`
+		EWayBillRequired      bool                   `json:"eway_bill_required"`
+		InvoiceDiscount       float64                `json:"invoice_discount"`
+		AdditionalCharges     float64                `json:"additional_charges"`
+		LoyaltyPointsRedeemed int64                  `json:"loyalty_points_redeemed"`
+		IsPOS                 bool                   `json:"is_pos"`
+		ClientSaleID          *uuid.UUID             `json:"client_sale_id"`
+		PosSessionID          *uuid.UUID             `json:"pos_session_id"`
+		SessionOpeningCash    float64                `json:"session_opening_cash"`
+		Party                 *posPartySnapshot      `json:"party"`
+		Signature             string                 `json:"signature"`
+		PDFTemplate           string                 `json:"pdf_template"`
+		CustomFields          map[string]interface{} `json:"custom_fields"`
+		Items                 []struct {
 			ProductID   *uuid.UUID           `json:"product_id"`
 			Description string               `json:"description"`
 			Quantity    models.FlexibleFloat `json:"quantity"`
@@ -123,24 +126,40 @@ func CreateInvoice(c *gin.Context) {
 		return
 	}
 
+	if input.ClientSaleID == nil || *input.ClientSaleID == uuid.Nil {
+		if headerID := parseOptionalUUID(c.GetHeader("Idempotency-Key")); headerID != uuid.Nil {
+			input.ClientSaleID = &headerID
+		}
+	}
+	if input.ClientSaleID != nil && *input.ClientSaleID != uuid.Nil {
+		if existing, ok := findInvoiceByClientSaleID(userID, *input.ClientSaleID); ok {
+			c.JSON(http.StatusOK, existing)
+			return
+		}
+	}
+
 	if input.PartyID == uuid.Nil {
 		input.PartyID = input.CustomerID
 	}
-	if input.PartyID == uuid.Nil {
+	if input.PartyID == uuid.Nil && input.Party == nil && !input.IsPOS {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "party_id is required"})
 		return
 	}
+
+	party, err := resolvePOSParty(userID, input.PartyID, input.Party)
+	if err != nil {
+		fmt.Printf("[DEBUG] CreateInvoice - Party resolve error: %v\n", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid party"})
+		return
+	}
+	input.PartyID = party.ID
 
 	if err := validateCustomFields(userID, input.CustomFields); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	if input.InvoiceNumber == "" {
-		var count int64
-		utils.DB.Model(&models.Invoice{}).Where("user_id = ?", userID).Count(&count)
-		input.InvoiceNumber = fmt.Sprintf("INV-%04d", count+1)
-	}
+	input.InvoiceNumber = allocateUniqueInvoiceNumber(userID, input.InvoiceNumber)
 
 	if input.AmountPaid == 0 && input.ReceivedAmount > 0 {
 		input.AmountPaid = input.ReceivedAmount
@@ -154,13 +173,7 @@ func CreateInvoice(c *gin.Context) {
 
 	fmt.Printf("[DEBUG] CreateInvoice - UserID: %s, InvoiceNumber: %s, PartyID: %s, Items: %d\n", userID, input.InvoiceNumber, input.PartyID, len(input.Items))
 
-	// Validate party
-	var party models.Party
-	if err := utils.DB.Where("user_id = ? AND id = ?", userID, input.PartyID).First(&party).Error; err != nil {
-		fmt.Printf("[DEBUG] CreateInvoice - Party not found: %v\n", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid party"})
-		return
-	}
+	resolvedSessionID := resolvePOSSessionID(userID, input.PosSessionID, input.SessionOpeningCash)
 
 	invoice := models.Invoice{
 		ID:                uuid.New(),
@@ -185,6 +198,8 @@ func CreateInvoice(c *gin.Context) {
 		PDFTemplate:       input.PDFTemplate,
 		CustomFields:      encodeCustomFieldsMap(input.CustomFields),
 		IsPOS:             input.IsPOS,
+		ClientSaleID:      input.ClientSaleID,
+		PosSessionID:      resolvedSessionID,
 	}
 
 	if invoice.Status == "" {
@@ -332,9 +347,9 @@ func CreateInvoice(c *gin.Context) {
 		}
 	}
 
-	if input.IsPOS && input.PosSessionID != nil {
+	if input.IsPOS && resolvedSessionID != nil {
 		utils.DB.Model(&models.POSSession{}).
-			Where("user_id = ? AND id = ? AND status = ?", userID, *input.PosSessionID, "open").
+			Where("user_id = ? AND id = ? AND status = ?", userID, *resolvedSessionID, "open").
 			Updates(map[string]interface{}{
 				"total_sales":    gorm.Expr("total_sales + ?", invoice.TotalAmount),
 				"total_invoices": gorm.Expr("total_invoices + 1"),
@@ -388,23 +403,23 @@ func UpdateInvoice(c *gin.Context) {
 	}
 
 	var input struct {
-		InvoiceNumber     string          `json:"invoice_number"`
-		PartyID           uuid.UUID       `json:"party_id"`
-		CustomerID        uuid.UUID       `json:"customer_id"`
-		Date              time.Time            `json:"date"`
-		DueDate           *models.FlexibleTime `json:"due_date"`
-		PaymentTerms      int             `json:"payment_terms"`
-		Status            string          `json:"status"`
-		IsInterState      bool            `json:"is_inter_state"`
-		PaymentMode       string          `json:"payment_mode"`
-		AmountPaid        float64         `json:"amount_paid"`
-		BankAccountID     *uuid.UUID      `json:"bank_account_id"`
-		Notes             string          `json:"notes"`
-		Terms             string          `json:"terms"`
-		InvoiceDiscount   float64         `json:"invoice_discount"`
-		AdditionalCharges float64         `json:"additional_charges"`
-		Signature         string          `json:"signature"`
-		PDFTemplate       string          `json:"pdf_template"`
+		InvoiceNumber     string                 `json:"invoice_number"`
+		PartyID           uuid.UUID              `json:"party_id"`
+		CustomerID        uuid.UUID              `json:"customer_id"`
+		Date              time.Time              `json:"date"`
+		DueDate           *models.FlexibleTime   `json:"due_date"`
+		PaymentTerms      int                    `json:"payment_terms"`
+		Status            string                 `json:"status"`
+		IsInterState      bool                   `json:"is_inter_state"`
+		PaymentMode       string                 `json:"payment_mode"`
+		AmountPaid        float64                `json:"amount_paid"`
+		BankAccountID     *uuid.UUID             `json:"bank_account_id"`
+		Notes             string                 `json:"notes"`
+		Terms             string                 `json:"terms"`
+		InvoiceDiscount   float64                `json:"invoice_discount"`
+		AdditionalCharges float64                `json:"additional_charges"`
+		Signature         string                 `json:"signature"`
+		PDFTemplate       string                 `json:"pdf_template"`
 		CustomFields      map[string]interface{} `json:"custom_fields"`
 		Items             []struct {
 			ProductID   *uuid.UUID           `json:"product_id"`

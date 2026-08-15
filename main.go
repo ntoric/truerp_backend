@@ -33,7 +33,7 @@ func main() {
 	config := cors.DefaultConfig()
 	// Desktop Tauri WebView (local UI) and any web clients call this cloud API cross-origin.
 	config.AllowOrigins = []string{"*"}
-	config.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Store-ID"}
+	config.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Store-ID", "Idempotency-Key"}
 	config.ExposeHeaders = []string{"X-Active-Store-ID"}
 	r.Use(cors.New(config))
 

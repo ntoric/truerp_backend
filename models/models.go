@@ -161,7 +161,7 @@ type Business struct {
 
 type Invoice struct {
 	ID                    uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID                uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	UserID                uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index;uniqueIndex:idx_invoice_user_client_sale"`
 	InvoiceNumber         string         `json:"invoice_number" gorm:"not null;index"`
 	InvoiceType           string         `json:"invoice_type" gorm:"default:'tax_invoice'"` // tax_invoice, bill_of_supply, export
 	PartyID               uuid.UUID      `json:"party_id" gorm:"type:uuid;not null"`
@@ -201,6 +201,8 @@ type Invoice struct {
 	EInvoiceStatus        string         `json:"e_invoice_status" gorm:"default:'pending'"` // pending, generated, cancelled
 	EInvoiceGeneratedAt   *time.Time     `json:"e_invoice_generated_at,omitempty"`
 	IsPOS                 bool           `json:"is_pos" gorm:"default:false"`
+	ClientSaleID          *uuid.UUID     `json:"client_sale_id,omitempty" gorm:"type:uuid;index;uniqueIndex:idx_invoice_user_client_sale"`
+	PosSessionID          *uuid.UUID     `json:"pos_session_id,omitempty" gorm:"type:uuid;index"`
 	Party                 Party          `json:"party,omitempty" gorm:"foreignKey:PartyID"`
 	Items                 []InvoiceItem  `json:"items" gorm:"foreignKey:InvoiceID;constraint:OnDelete:CASCADE;"`
 	CreatedAt             time.Time      `json:"created_at"`
