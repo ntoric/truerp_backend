@@ -125,6 +125,7 @@ func allApplicationModels() []interface{} {
 		&models.StaffDeduction{},
 		&models.StaffAdvancePayment{},
 		&models.InvoiceSettings{},
+		&models.AppearanceSettings{},
 		&models.PrintSettings{},
 		&models.WeighingScaleSettings{},
 		&models.Reminder{},
