@@ -829,6 +829,16 @@ func prepareInvoiceData(invoice models.Invoice, business models.Business, printS
 	if invoice.AdditionalCharges > 0 {
 		totalLines = append(totalLines, formatLabelValue("Addl Charges", fmt.Sprintf("%.2f", invoice.AdditionalCharges), cols))
 	}
+	if invoice.LoyaltyDiscount > 0 {
+		totalLines = append(totalLines, formatLabelValue("Loyalty", fmt.Sprintf("-%.2f", invoice.LoyaltyDiscount), cols))
+	}
+	if invoice.RoundOff != 0 {
+		roundOffLabel := fmt.Sprintf("%.2f", invoice.RoundOff)
+		if invoice.RoundOff > 0 {
+			roundOffLabel = "+" + roundOffLabel
+		}
+		totalLines = append(totalLines, formatLabelValue("Round Off", roundOffLabel, cols))
+	}
 	totalLines = append(totalLines, sepWeak)
 	totalLines = append(totalLines, formatLabelValue("TOTAL", fmt.Sprintf("%.2f", invoice.TotalAmount), cols))
 	if invoice.AmountPaid > 0 {

@@ -255,6 +255,13 @@ func CreateInvoice(c *gin.Context) {
 
 	roundedTotal := math.Round(total*100) / 100
 	roundOff := roundedTotal - total
+	if input.IsPOS {
+		roundedTotal = math.Round(total)
+		if roundedTotal < 0 {
+			roundedTotal = 0
+		}
+		roundOff = roundedTotal - total
+	}
 
 	invoice.SubTotal = subTotal
 	invoice.DiscountTotal = discountTotal
