@@ -23,7 +23,7 @@ func GetPaymentOuts(c *gin.Context) {
 		query = query.Where("purchase_bill_id = ?", purchaseBillID)
 	}
 
-	if err := query.Order("date DESC").Find(&paymentOuts).Error; err != nil {
+	if err := query.Order("updated_at DESC").Find(&paymentOuts).Error; err != nil {
 		// Fall back without preloads so a relation/schema mismatch still returns data.
 		fallback := utils.DB.Where("user_id = ?", userID)
 		if partyID := c.Query("party_id"); partyID != "" {
@@ -32,7 +32,7 @@ func GetPaymentOuts(c *gin.Context) {
 		if purchaseBillID := c.Query("purchase_bill_id"); purchaseBillID != "" {
 			fallback = fallback.Where("purchase_bill_id = ?", purchaseBillID)
 		}
-		if err2 := fallback.Order("date DESC").Find(&paymentOuts).Error; err2 != nil {
+		if err2 := fallback.Order("updated_at DESC").Find(&paymentOuts).Error; err2 != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch payment outs"})
 			return
 		}

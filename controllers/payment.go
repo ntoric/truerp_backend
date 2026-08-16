@@ -24,7 +24,7 @@ func GetPayments(c *gin.Context) {
 		query = query.Where("party_id = ?", partyID)
 	}
 
-	if err := query.Order("date DESC").Find(&payments).Error; err != nil {
+	if err := query.Order("updated_at DESC").Find(&payments).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch payments"})
 		return
 	}

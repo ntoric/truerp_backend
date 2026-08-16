@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 	"truerp/models"
@@ -183,6 +184,8 @@ func loadReportForRange(userID uuid.UUID, startDate, endDate string) (models.Dai
 	aggregate(&models.SalesReturn{}, "date", "amount", "status != 'cancelled'", &report.SalesReturns)
 	aggregate(&models.PurchaseReturn{}, "date", "amount", "status != 'cancelled'", &report.PurchaseReturns)
 
+	report.PaymentsByMethod = loadPaymentsByMethod(userID, startDate, endDate)
+
 	utils.DB.Model(&models.PurchaseBill{}).
 		Where("user_id = ? AND DATE(bill_date) >= ? AND DATE(bill_date) <= ? AND total_amount > paid_amount", userID, startDate, endDate).
 		Select("COALESCE(SUM(total_amount - paid_amount), 0) as total_amount, COUNT(*) as count").
@@ -210,6 +213,107 @@ func loadReportForRange(userID uuid.UUID, startDate, endDate string) (models.Dai
 	report.ProductProfit = computeProductProfitForRange(userID, startDate, endDate)
 
 	return report, nil
+}
+
+func paymentMethodLabel(method string) string {
+	switch normalizePaymentMethod(method) {
+	case "cash":
+		return "Cash"
+	case "upi":
+		return "UPI"
+	case "card":
+		return "Card"
+	case "bank_transfer":
+		return "Bank Transfer"
+	case "cheque", "check":
+		return "Cheque"
+	default:
+		label := strings.ReplaceAll(normalizePaymentMethod(method), "_", " ")
+		if label == "" {
+			return "Cash"
+		}
+		return strings.ToUpper(label[:1]) + label[1:]
+	}
+}
+
+func loadPaymentsByMethod(userID uuid.UUID, startDate, endDate string) []models.PaymentMethodTotal {
+	type agg struct {
+		Method      string
+		TotalAmount float64
+		Count       int64
+	}
+
+	methodExpr := `CASE
+		WHEN LOWER(TRIM(COALESCE(mode, ''))) IN ('', 'cash') THEN 'cash'
+		WHEN LOWER(TRIM(COALESCE(mode, ''))) IN ('cheque', 'check') THEN 'cheque'
+		ELSE LOWER(TRIM(mode))
+	END`
+	dateWhere := utils.SQLDateGTE("date") + " AND " + utils.SQLDateLTE("date")
+
+	var inRows, outRows []agg
+	utils.DB.Raw(`
+		SELECT `+methodExpr+` AS method,
+			COALESCE(SUM(amount_received), 0) AS total_amount,
+			COUNT(*) AS count
+		FROM payments
+		WHERE user_id = ? AND `+dateWhere+` AND deleted_at IS NULL
+		GROUP BY `+methodExpr, userID, startDate, endDate).Scan(&inRows)
+	utils.DB.Raw(`
+		SELECT `+methodExpr+` AS method,
+			COALESCE(SUM(amount_paid), 0) AS total_amount,
+			COUNT(*) AS count
+		FROM payment_outs
+		WHERE user_id = ? AND `+dateWhere+` AND deleted_at IS NULL
+		GROUP BY `+methodExpr, userID, startDate, endDate).Scan(&outRows)
+
+	byMethod := make(map[string]*models.PaymentMethodTotal)
+	ensure := func(method string) *models.PaymentMethodTotal {
+		key := normalizePaymentMethod(method)
+		if existing, ok := byMethod[key]; ok {
+			return existing
+		}
+		row := &models.PaymentMethodTotal{
+			Method: key,
+			Label:  paymentMethodLabel(key),
+		}
+		byMethod[key] = row
+		return row
+	}
+
+	for _, r := range inRows {
+		row := ensure(r.Method)
+		row.In.TotalAmount = r.TotalAmount
+		row.In.Count = r.Count
+	}
+	for _, r := range outRows {
+		row := ensure(r.Method)
+		row.Out.TotalAmount = r.TotalAmount
+		row.Out.Count = r.Count
+	}
+
+	standardOrder := make([]string, 0, len(standardPaymentMethods))
+	for _, m := range standardPaymentMethods {
+		standardOrder = append(standardOrder, m.Key)
+	}
+
+	result := make([]models.PaymentMethodTotal, 0, len(standardPaymentMethods)+len(byMethod))
+	seen := make(map[string]bool, len(byMethod))
+	for _, key := range standardOrder {
+		row := ensure(key)
+		result = append(result, *row)
+		seen[key] = true
+	}
+	extra := make([]string, 0)
+	for key := range byMethod {
+		if !seen[key] {
+			extra = append(extra, key)
+		}
+	}
+	sort.Strings(extra)
+	for _, key := range extra {
+		result = append(result, *byMethod[key])
+	}
+	return result
 }
 
 func loadDailyReport(userID uuid.UUID, date string) (models.DailyReport, error) {
@@ -269,6 +373,26 @@ func GetPeriodicReport(c *gin.Context) {
 	c.JSON(http.StatusOK, report)
 }
 
+type reportTableRow struct {
+	label string
+	m     models.DailyReportMetric
+}
+
+func periodReportTableRows(report models.PeriodReport) []reportTableRow {
+	return []reportTableRow{
+		{label: "Sales (Invoices)", m: report.Sales},
+		{label: "Purchase Expense", m: report.Purchases},
+		{label: "Payment Out", m: report.PaymentsOut},
+		{label: "Accounts Payable (period)", m: report.AccountsPayable},
+		{label: "Credit Notes", m: report.CreditNotes},
+		{label: "Debit Notes", m: report.DebitNotes},
+		{label: "Expenses", m: report.Expenses},
+		{label: "Payments Received", m: report.PaymentsIn},
+		{label: "Sales Returns", m: report.SalesReturns},
+		{label: "Purchase Returns", m: report.PurchaseReturns},
+	}
+}
+
 func writePeriodReportCSV(c *gin.Context, report models.PeriodReport, filename string) {
 	c.Header("Content-Type", "text/csv")
 	c.Header("Content-Disposition", "attachment; filename="+filename)
@@ -284,23 +408,7 @@ func writePeriodReportCSV(c *gin.Context, report models.PeriodReport, filename s
 	_ = writer.Write([]string{""})
 	_ = writer.Write([]string{"Section", "Count", "Amount (INR)"})
 
-	rows := []struct {
-		label string
-		m     models.DailyReportMetric
-	}{
-		{"Sales (Invoices)", report.Sales},
-		{"Purchase Expense", report.Purchases},
-		{"Payment Out", report.PaymentsOut},
-		{"Accounts Payable (period)", report.AccountsPayable},
-		{"Credit Notes", report.CreditNotes},
-		{"Debit Notes", report.DebitNotes},
-		{"Expenses", report.Expenses},
-		{"Payments Received", report.PaymentsIn},
-		{"Sales Returns", report.SalesReturns},
-		{"Purchase Returns", report.PurchaseReturns},
-	}
-
-	for _, row := range rows {
+	for _, row := range periodReportTableRows(report) {
 		_ = writer.Write([]string{
 			row.label,
 			fmt.Sprintf("%d", row.m.Count),
@@ -314,6 +422,25 @@ func writePeriodReportCSV(c *gin.Context, report models.PeriodReport, filename s
 	_ = writer.Write([]string{"Period Profit (Sales − Purchases − Expenses ± returns/notes)", "", fmt.Sprintf("%.2f", report.DailyProfit)})
 	_ = writer.Write([]string{"Product Profit (sale value − purchase cost on items sold)", "", fmt.Sprintf("%.2f", report.ProductProfit)})
 	_ = writer.Write([]string{"Net Cash Flow (In − Out − Expenses)", "", fmt.Sprintf("%.2f", report.NetCashFlow)})
+	_ = writer.Write([]string{""})
+	_ = writer.Write([]string{"Payments by method"})
+	_ = writer.Write([]string{"Method", "Received count", "Received amount (INR)", "Paid count", "Paid amount (INR)"})
+	for _, method := range report.PaymentsByMethod {
+		_ = writer.Write([]string{
+			method.Label,
+			fmt.Sprintf("%d", method.In.Count),
+			fmt.Sprintf("%.2f", method.In.TotalAmount),
+			fmt.Sprintf("%d", method.Out.Count),
+			fmt.Sprintf("%.2f", method.Out.TotalAmount),
+		})
+	}
+	_ = writer.Write([]string{
+		"Total",
+		fmt.Sprintf("%d", report.PaymentsIn.Count),
+		fmt.Sprintf("%.2f", report.PaymentsIn.TotalAmount),
+		fmt.Sprintf("%d", report.PaymentsOut.Count),
+		fmt.Sprintf("%.2f", report.PaymentsOut.TotalAmount),
+	})
 }
 
 func ExportDailyReportCSV(c *gin.Context) {
@@ -406,6 +533,68 @@ func ExportPeriodicReportPDF(c *gin.Context) {
 	c.Data(http.StatusOK, "application/pdf", pdfBytes)
 }
 
+func writePaymentsByMethodPDF(pdf *fpdf.Fpdf, report models.PeriodReport) {
+	methods := report.PaymentsByMethod
+	if len(methods) == 0 {
+		return
+	}
+
+	pdf.Ln(8)
+	pdf.SetFont("Arial", "B", 11)
+	pdf.SetTextColor(37, 99, 235)
+	pdf.CellFormat(0, 7, "PAYMENTS BY METHOD", "", 1, "L", false, 0, "")
+	pdf.SetFont("Arial", "", 8)
+	pdf.SetTextColor(100, 100, 100)
+	pdf.CellFormat(0, 5, "Totals for each payment method. Received = money in; Paid = money out.", "", 1, "L", false, 0, "")
+	pdf.Ln(2)
+
+	pageW, _ := pdf.GetPageSize()
+	leftM, _, rightM, _ := pdf.GetMargins()
+	usable := pageW - leftM - rightM
+	colMethod := usable * 0.28
+	colInCount := usable * 0.12
+	colInAmt := usable * 0.24
+	colOutCount := usable * 0.12
+	colOutAmt := usable * 0.24
+
+	pdf.SetFillColor(219, 234, 254)
+	pdf.SetDrawColor(147, 197, 253)
+	pdf.SetFont("Arial", "B", 8)
+	pdf.SetTextColor(30, 64, 175)
+	pdf.CellFormat(colMethod, 8, "Method", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colInCount, 8, "In txn", "1", 0, "R", true, 0, "")
+	pdf.CellFormat(colInAmt, 8, "Received (INR)", "1", 0, "R", true, 0, "")
+	pdf.CellFormat(colOutCount, 8, "Out txn", "1", 0, "R", true, 0, "")
+	pdf.CellFormat(colOutAmt, 8, "Paid (INR)", "1", 1, "R", true, 0, "")
+
+	for i, method := range methods {
+		if i%2 == 0 {
+			pdf.SetFillColor(239, 246, 255)
+		} else {
+			pdf.SetFillColor(255, 255, 255)
+		}
+		pdf.SetFont("Arial", "B", 9)
+		pdf.SetTextColor(30, 30, 30)
+		pdf.CellFormat(colMethod, 7, sanitizePDFText(method.Label), "1", 0, "L", true, 0, "")
+		pdf.SetFont("Arial", "", 9)
+		pdf.SetTextColor(22, 101, 52)
+		pdf.CellFormat(colInCount, 7, fmt.Sprintf("%d", method.In.Count), "1", 0, "R", true, 0, "")
+		pdf.CellFormat(colInAmt, 7, fmt.Sprintf("%.2f", method.In.TotalAmount), "1", 0, "R", true, 0, "")
+		pdf.SetTextColor(154, 52, 18)
+		pdf.CellFormat(colOutCount, 7, fmt.Sprintf("%d", method.Out.Count), "1", 0, "R", true, 0, "")
+		pdf.CellFormat(colOutAmt, 7, fmt.Sprintf("%.2f", method.Out.TotalAmount), "1", 1, "R", true, 0, "")
+	}
+
+	pdf.SetFillColor(219, 234, 254)
+	pdf.SetFont("Arial", "B", 9)
+	pdf.SetTextColor(30, 64, 175)
+	pdf.CellFormat(colMethod, 7, "Total", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colInCount, 7, fmt.Sprintf("%d", report.PaymentsIn.Count), "1", 0, "R", true, 0, "")
+	pdf.CellFormat(colInAmt, 7, fmt.Sprintf("%.2f", report.PaymentsIn.TotalAmount), "1", 0, "R", true, 0, "")
+	pdf.CellFormat(colOutCount, 7, fmt.Sprintf("%d", report.PaymentsOut.Count), "1", 0, "R", true, 0, "")
+	pdf.CellFormat(colOutAmt, 7, fmt.Sprintf("%.2f", report.PaymentsOut.TotalAmount), "1", 1, "R", true, 0, "")
+}
+
 func buildDailyReportPDF(report models.DailyReport) ([]byte, error) {
 	return buildPeriodReportPDF(models.PeriodReport{
 		DailyReport: report,
@@ -448,7 +637,13 @@ func buildPeriodReportPDF(report models.PeriodReport) ([]byte, error) {
 	leftM, _, rightM, _ := pdf.GetMargins()
 	usable := pageW - leftM - rightM
 	cardW := (usable - 12) / 5
-	cardH := 22.0
+	innerW := cardW - 8
+	padX := 4.0
+	padTop := 3.0
+	padBottom := 5.0
+	labelLineH := 3.8
+	valueLineH := 5.6
+	subLineH := 4.0
 	startY := pdf.GetY()
 
 	purchaseExpense := report.Purchases.TotalAmount + report.Expenses.TotalAmount
@@ -479,23 +674,63 @@ func buildPeriodReportPDF(report models.PeriodReport) ([]byte, error) {
 		cards[4].r, cards[4].g, cards[4].b = 153, 27, 27
 	}
 
+	// Wrap against the inner text width, minus cell padding used when drawing.
+	textW := innerW
+	wrapW := innerW - 2.0
+	if wrapW < 8 {
+		wrapW = innerW
+	}
+
+	type cardLines struct {
+		label []string
+		value []string
+		sub   []string
+	}
+	rendered := make([]cardLines, len(cards))
+	maxLabelLines, maxValueLines, maxSubLines := 1, 1, 1
+	for i, card := range cards {
+		pdf.SetFont("Arial", "", 8)
+		rendered[i].label = wrapPDFText(pdf, card.label, wrapW)
+		pdf.SetFont("Arial", "B", 11)
+		rendered[i].value = wrapPDFText(pdf, card.value, wrapW)
+		pdf.SetFont("Arial", "", 7)
+		rendered[i].sub = wrapPDFText(pdf, card.sub, wrapW)
+		if n := len(rendered[i].label); n > maxLabelLines {
+			maxLabelLines = n
+		}
+		if n := len(rendered[i].value); n > maxValueLines {
+			maxValueLines = n
+		}
+		if n := len(rendered[i].sub); n > maxSubLines {
+			maxSubLines = n
+		}
+	}
+	cardH := padTop + float64(maxLabelLines)*labelLineH + float64(maxValueLines)*valueLineH + float64(maxSubLines)*subLineH + padBottom
+
 	for i, card := range cards {
 		x := leftM + float64(i)*(cardW+3)
-		pdf.SetXY(x, startY)
 		pdf.SetDrawColor(220, 220, 220)
 		pdf.SetFillColor(248, 250, 252)
 		pdf.Rect(x, startY, cardW, cardH, "DF")
-		pdf.SetXY(x+3, startY+3)
+		pdf.ClipRect(x+0.3, startY+0.3, cardW-0.6, cardH-0.6, false)
+
+		textX := x + padX
+		labelY := startY + padTop
+		valueY := labelY + float64(maxLabelLines)*labelLineH
+		subY := valueY + float64(maxValueLines)*valueLineH
+
 		pdf.SetFont("Arial", "", 8)
 		pdf.SetTextColor(card.r, card.g, card.b)
-		pdf.CellFormat(cardW-6, 4, card.label, "", 1, "L", false, 0, "")
-		pdf.SetX(x + 3)
+		writePDFWrappedLines(pdf, textX, labelY, textW, labelLineH, rendered[i].label)
+
 		pdf.SetFont("Arial", "B", 11)
-		pdf.CellFormat(cardW-6, 6, card.value, "", 1, "L", false, 0, "")
-		pdf.SetX(x + 3)
+		writePDFWrappedLines(pdf, textX, valueY, textW, valueLineH, rendered[i].value)
+
 		pdf.SetFont("Arial", "", 7)
 		pdf.SetTextColor(100, 100, 100)
-		pdf.CellFormat(cardW-6, 4, sanitizePDFText(card.sub), "", 1, "L", false, 0, "")
+		writePDFWrappedLines(pdf, textX, subY, textW, subLineH, rendered[i].sub)
+
+		pdf.ClipEnd()
 	}
 	pdf.SetY(startY + cardH + 8)
 
@@ -511,25 +746,9 @@ func buildPeriodReportPDF(report models.PeriodReport) ([]byte, error) {
 	pdf.CellFormat(colCount, 8, "Transactions", "1", 0, "R", true, 0, "")
 	pdf.CellFormat(colAmount, 8, "Amount (INR)", "1", 1, "R", true, 0, "")
 
-	rows := []struct {
-		label string
-		m     models.DailyReportMetric
-	}{
-		{"Sales (Invoices)", report.Sales},
-		{"Purchase Expense", report.Purchases},
-		{"Payment Out", report.PaymentsOut},
-		{"Accounts Payable (period)", report.AccountsPayable},
-		{"Credit Notes", report.CreditNotes},
-		{"Debit Notes", report.DebitNotes},
-		{"Expenses", report.Expenses},
-		{"Payments Received", report.PaymentsIn},
-		{"Sales Returns", report.SalesReturns},
-		{"Purchase Returns", report.PurchaseReturns},
-	}
-
 	pdf.SetFont("Arial", "", 9)
 	pdf.SetTextColor(50, 50, 50)
-	for _, row := range rows {
+	for _, row := range periodReportTableRows(report) {
 		pdf.CellFormat(colSection, 7, row.label, "1", 0, "L", false, 0, "")
 		pdf.CellFormat(colCount, 7, fmt.Sprintf("%d", row.m.Count), "1", 0, "R", false, 0, "")
 		pdf.CellFormat(colAmount, 7, fmt.Sprintf("%.2f", row.m.TotalAmount), "1", 1, "R", false, 0, "")
@@ -563,10 +782,12 @@ func buildPeriodReportPDF(report models.PeriodReport) ([]byte, error) {
 	pdf.CellFormat(colCount, 7, "-", "1", 0, "R", true, 0, "")
 	pdf.CellFormat(colAmount, 7, fmt.Sprintf("%.2f", report.NetCashFlow), "1", 1, "R", true, 0, "")
 
+	writePaymentsByMethodPDF(pdf, report)
+
 	pdf.Ln(8)
 	pdf.SetFont("Arial", "I", 8)
 	pdf.SetTextColor(140, 140, 140)
-	pdf.CellFormat(0, 5, "Purchase expense = full bill total; Payment out = paid; AP = unpaid. Generated from TruERP.", "", 1, "L", false, 0, "")
+	pdf.MultiCell(0, 4.5, sanitizePDFText("Purchase expense = full bill total; Payment out = paid; AP = unpaid. Payments by method lists Cash, UPI, Card, Bank Transfer and Cheque separately. Generated from TruERP."), "", "L", false)
 
 	var buf bytes.Buffer
 	if err := pdf.Output(&buf); err != nil {

@@ -327,6 +327,14 @@ type DailyReportMetric struct {
 	Count       int64   `json:"count"`
 }
 
+// PaymentMethodTotal is payments in/out for one payment mode (cash, upi, card, …).
+type PaymentMethodTotal struct {
+	Method string            `json:"method"`
+	Label  string            `json:"label"`
+	In     DailyReportMetric `json:"in"`
+	Out    DailyReportMetric `json:"out"`
+}
+
 type DailyReport struct {
 	Date            string            `json:"date"`
 	BusinessName    string            `json:"business_name"`
@@ -339,6 +347,8 @@ type DailyReport struct {
 	PaymentsOut     DailyReportMetric `json:"payments_out"`
 	SalesReturns    DailyReportMetric `json:"sales_returns"`
 	PurchaseReturns DailyReportMetric `json:"purchase_returns"`
+	// PaymentsByMethod breaks PaymentsIn / PaymentsOut down by payment mode.
+	PaymentsByMethod []PaymentMethodTotal `json:"payments_by_method"`
 	// AccountsPayable is unpaid balance from purchase bills dated this day
 	// (purchase expense − paid amount on those bills).
 	AccountsPayable DailyReportMetric `json:"accounts_payable"`

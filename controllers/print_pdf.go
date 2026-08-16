@@ -367,7 +367,9 @@ func mmFromInches(inches float64) float64 {
 }
 
 func sanitizePDFText(s string) string {
-	// fpdf core fonts are Latin-1; map common INR / unicode punctuation.
+	// fpdf core fonts are Latin-1/WinAnsi; map common INR / unicode punctuation
+	// then encode remaining runes as single Latin-1 bytes so UTF-8 sequences
+	// like "·" (U+00B7) do not render as "Â·".
 	r := strings.NewReplacer(
 		"₹", "Rs.",
 		"–", "-",
@@ -378,7 +380,110 @@ func sanitizePDFText(s string) string {
 		"”", "\"",
 		"…", "...",
 	)
-	return r.Replace(s)
+	s = r.Replace(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, rr := range s {
+		switch {
+		case rr == '\n' || rr == '\r' || rr == '\t':
+			b.WriteByte(byte(rr))
+		case rr < 32:
+			continue
+		case rr <= 255:
+			b.WriteByte(byte(rr))
+		default:
+			b.WriteByte('?')
+		}
+	}
+	return b.String()
+}
+
+// wrapPDFText splits text so each line's GetStringWidth is <= maxWidth.
+// The current font must already be selected.
+func wrapPDFText(pdf *fpdf.Fpdf, text string, maxWidth float64) []string {
+	text = strings.ReplaceAll(sanitizePDFText(text), "\r", "")
+	if strings.TrimSpace(text) == "" {
+		return []string{""}
+	}
+	if maxWidth <= 0 {
+		return []string{text}
+	}
+	var lines []string
+	for _, para := range strings.Split(text, "\n") {
+		para = strings.TrimSpace(para)
+		if para == "" {
+			lines = append(lines, "")
+			continue
+		}
+		lines = append(lines, wrapPDFParagraph(pdf, para, maxWidth)...)
+	}
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
+func wrapPDFParagraph(pdf *fpdf.Fpdf, text string, maxWidth float64) []string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	var lines []string
+	current := ""
+	for _, word := range words {
+		for _, part := range splitPDFWord(pdf, word, maxWidth) {
+			candidate := part
+			if current != "" {
+				candidate = current + " " + part
+			}
+			if pdf.GetStringWidth(candidate) <= maxWidth {
+				current = candidate
+				continue
+			}
+			if current != "" {
+				lines = append(lines, current)
+			}
+			current = part
+		}
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+	return lines
+}
+
+func splitPDFWord(pdf *fpdf.Fpdf, word string, maxWidth float64) []string {
+	if pdf.GetStringWidth(word) <= maxWidth {
+		return []string{word}
+	}
+	var parts []string
+	cur := ""
+	for _, rr := range word {
+		trial := cur + string(rr)
+		if cur != "" && pdf.GetStringWidth(trial) > maxWidth {
+			parts = append(parts, cur)
+			cur = string(rr)
+			continue
+		}
+		cur = trial
+	}
+	if cur != "" {
+		parts = append(parts, cur)
+	}
+	if len(parts) == 0 {
+		return []string{word}
+	}
+	return parts
+}
+
+func writePDFWrappedLines(pdf *fpdf.Fpdf, x, y, w, lineH float64, lines []string) {
+	prevMargin := pdf.GetCellMargin()
+	pdf.SetCellMargin(0.4)
+	for i, line := range lines {
+		pdf.SetXY(x, y+float64(i)*lineH)
+		pdf.CellFormat(w, lineH, line, "", 0, "L", false, 0, "")
+	}
+	pdf.SetCellMargin(prevMargin)
 }
 
 func truncatePDF(s string, max int) string {

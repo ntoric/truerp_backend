@@ -36,6 +36,10 @@ func parseDashboardPeriod(c *gin.Context) (start time.Time, end time.Time, filte
 	switch c.DefaultQuery("period", "month") {
 	case "today":
 		start = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	case "yesterday":
+		yesterday := now.AddDate(0, 0, -1)
+		start = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, loc)
+		end = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 999999999, loc)
 	case "week":
 		weekday := int(now.Weekday())
 		if weekday == 0 {

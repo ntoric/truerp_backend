@@ -42,7 +42,7 @@ func GetInvoices(c *gin.Context) {
 		query = query.Where("date <= ?", to)
 	}
 
-	if err := query.Order("date DESC, created_at DESC").Find(&invoices).Error; err != nil {
+	if err := query.Order("updated_at DESC").Find(&invoices).Error; err != nil {
 		fmt.Printf("[DEBUG] GetInvoices - DB error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch invoices"})
 		return
@@ -456,7 +456,7 @@ func UpdateInvoice(c *gin.Context) {
 		return
 	}
 
-	previousAmountPaid := invoice.AmountPaid
+	previousInvoice := invoiceCashSnapshot(invoice)
 	previousStatus := invoice.Status
 
 	// Reverse previously applied sale stock before rewriting items
@@ -565,14 +565,10 @@ func UpdateInvoice(c *gin.Context) {
 
 	applyInvoiceSaleStock(userID, &invoice)
 
-	if paymentDelta := invoice.AmountPaid - previousAmountPaid; paymentDelta > 0 {
-		notes := fmt.Sprintf("Auto-created from sales invoice %s (payment update)", invoice.InvoiceNumber)
-		if invoice.IsPOS {
-			notes = fmt.Sprintf("Auto-created from POS sale %s (payment update)", invoice.InvoiceNumber)
-		}
-		if err := createLinkedSalePaymentIn(utils.DB, userID, &invoice, paymentDelta, invoice.Date, notes); err != nil {
-			fmt.Printf("[DEBUG] UpdateInvoice - payment in error: %v\n", err)
-		}
+	if err := resyncLinkedInvoicePayments(utils.DB, userID, &previousInvoice, &invoice); err != nil {
+		fmt.Printf("[DEBUG] UpdateInvoice - payment resync error: %v\n", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invoice updated but failed to update cash/bank"})
+		return
 	}
 
 	fmt.Printf("[DEBUG] UpdateInvoice - Invoice updated successfully: %s\n", id)

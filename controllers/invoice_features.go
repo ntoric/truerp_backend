@@ -411,6 +411,7 @@ func UpdateInvoiceStatus(c *gin.Context) {
 		return
 	}
 
+	previousInvoice := invoiceCashSnapshot(invoice)
 	prevStatus := invoice.Status
 	invoice.Status = input.Status
 	if input.AmountPaid != nil {
@@ -426,6 +427,11 @@ func UpdateInvoiceStatus(c *gin.Context) {
 
 	if err := utils.DB.Save(&invoice).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update status"})
+		return
+	}
+
+	if err := resyncLinkedInvoicePayments(utils.DB, userID, &previousInvoice, &invoice); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Status updated but failed to update cash/bank"})
 		return
 	}
 
