@@ -108,6 +108,97 @@ func UpdateInvoiceSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, settings)
 }
 
+var allowedColorThemes = map[string]bool{
+	"blue":    true,
+	"sky":     true,
+	"teal":    true,
+	"emerald": true,
+	"violet":  true,
+	"purple":  true,
+	"rose":    true,
+	"orange":  true,
+	"amber":   true,
+	"slate":   true,
+	"custom":  true,
+}
+
+func normalizeCustomHex(hex string) string {
+	value := strings.TrimSpace(hex)
+	if len(value) == 4 && value[0] == '#' {
+		return strings.ToLower("#" + string(value[1]) + string(value[1]) + string(value[2]) + string(value[2]) + string(value[3]) + string(value[3]))
+	}
+	if len(value) == 7 && value[0] == '#' {
+		for _, ch := range value[1:] {
+			if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+				return "#2563eb"
+			}
+		}
+		return strings.ToLower(value)
+	}
+	return "#2563eb"
+}
+
+func GetAppearanceSettings(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	var settings models.AppearanceSettings
+	if err := utils.DB.Where("user_id = ?", userID).First(&settings).Error; err != nil {
+		c.JSON(http.StatusOK, gin.H{"color_theme": "", "custom_hex": ""})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"color_theme": settings.ColorTheme,
+		"custom_hex":  settings.CustomHex,
+	})
+}
+
+func UpdateAppearanceSettings(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	var input struct {
+		ColorTheme string `json:"color_theme"`
+		CustomHex  string `json:"custom_hex"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	theme := strings.TrimSpace(strings.ToLower(input.ColorTheme))
+	if !allowedColorThemes[theme] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid colour theme"})
+		return
+	}
+
+	customHex := normalizeCustomHex(input.CustomHex)
+
+	var settings models.AppearanceSettings
+	if err := utils.DB.Where("user_id = ?", userID).First(&settings).Error; err != nil {
+		settings = models.AppearanceSettings{
+			ID:         uuid.New(),
+			UserID:     userID,
+			ColorTheme: theme,
+			CustomHex:  customHex,
+		}
+		if err := utils.DB.Create(&settings).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save appearance settings"})
+			return
+		}
+	} else if err := utils.DB.Model(&settings).Updates(map[string]interface{}{
+		"color_theme": theme,
+		"custom_hex":  customHex,
+	}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save appearance settings"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"color_theme": theme,
+		"custom_hex":  customHex,
+	})
+}
+
 // printSettingsPayload is PrintSettings plus A4 barcode label layout (stored on Business).
 type printSettingsPayload struct {
 	models.PrintSettings

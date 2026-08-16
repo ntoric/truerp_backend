@@ -679,6 +679,10 @@ func SetupRoutes(r *gin.Engine) {
 		// Invoice Settings
 		settings.GET("/invoice", controllers.GetInvoiceSettings)
 		settings.PUT("/invoice", controllers.UpdateInvoiceSettings)
+
+		// App appearance (colour theme)
+		settings.GET("/appearance", controllers.GetAppearanceSettings)
+		settings.PUT("/appearance", controllers.UpdateAppearanceSettings)
 		settings.GET("/invoice-custom-fields", controllers.GetInvoiceCustomFieldDefinitions)
 		settings.POST("/invoice-custom-fields", controllers.CreateInvoiceCustomFieldDefinition)
 		settings.PUT("/invoice-custom-fields/:id", controllers.UpdateInvoiceCustomFieldDefinition)

@@ -44,8 +44,8 @@ services:
     environment:
       API_TRANSPORT: rest
       API_ADDR: ":8088"
-      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-truerp}?sslmode=disable
-      # DATABASE_PATH: /app/data/truerp.db
+      # DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-truerp}?sslmode=disable
+      DATABASE_PATH: /app/data/truerp.db
       STORAGE_TYPE: ${STORAGE_TYPE:-local}
       LOCAL_STORAGE_PATH: /app/uploads
       # Set to your public API URL so desktop clients can load uploaded assets:
