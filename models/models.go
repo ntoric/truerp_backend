@@ -121,35 +121,36 @@ type Store struct {
 }
 
 type Business struct {
-	ID            uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID        uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
-	Name          string    `json:"name" gorm:"not null"`
-	GSTIN         string    `json:"gstin"`
-	Address       string    `json:"address"`
-	City          string    `json:"city"`
-	State         string    `json:"state"`
-	Pincode       string    `json:"pincode"`
-	Phone         string    `json:"phone"`
-	Email         string    `json:"email"`
-	LogoURL       string    `json:"logo_url"`
-	SignatureURL  string    `json:"signature_url"`
-	StateCode     string    `json:"state_code"`
-	BankName      string    `json:"bank_name"`
-	AccountNumber string    `json:"account_number"`
-	IFSCCode      string    `json:"ifsc_code"`
-	UPIID         string    `json:"upi_id"`
+	ID              uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID          uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
+	Name            string    `json:"name" gorm:"not null"`
+	GSTIN           string    `json:"gstin"`
+	Address         string    `json:"address"`
+	City            string    `json:"city"`
+	State           string    `json:"state"`
+	Pincode         string    `json:"pincode"`
+	Phone           string    `json:"phone"`
+	Email           string    `json:"email"`
+	LogoURL         string    `json:"logo_url"`
+	LogoAspectRatio string    `json:"logo_aspect_ratio" gorm:"default:'square'"`
+	SignatureURL    string    `json:"signature_url"`
+	StateCode       string    `json:"state_code"`
+	BankName        string    `json:"bank_name"`
+	AccountNumber   string    `json:"account_number"`
+	IFSCCode        string    `json:"ifsc_code"`
+	UPIID           string    `json:"upi_id"`
 	// Label printing settings
-	LabelPaperSize     string  `json:"label_paper_size" gorm:"default:'A4'"`
-	LabelSheetPreset   string  `json:"label_sheet_preset" gorm:"default:'48.5x25.4'"`
-	LabelWidthMM       float64 `json:"label_width_mm" gorm:"default:48.5"`
-	LabelHeightMM      float64 `json:"label_height_mm" gorm:"default:25.4"`
-	LabelColumns       int     `json:"label_columns" gorm:"default:4"`
-	LabelRows          int     `json:"label_rows" gorm:"default:11"`
-	LabelMarginMM      float64 `json:"label_margin_mm" gorm:"default:5"`
-	LabelMarginTopMM   float64 `json:"label_margin_top_mm" gorm:"default:8.8"`
-	LabelMarginLeftMM  float64 `json:"label_margin_left_mm" gorm:"default:5"`
-	LabelGapHMM        float64 `json:"label_gap_h_mm" gorm:"column:label_gap_h_mm;default:2"`
-	LabelGapVMM        float64 `json:"label_gap_v_mm" gorm:"column:label_gap_v_mm;default:0"`
+	LabelPaperSize    string  `json:"label_paper_size" gorm:"default:'A4'"`
+	LabelSheetPreset  string  `json:"label_sheet_preset" gorm:"default:'48.5x25.4'"`
+	LabelWidthMM      float64 `json:"label_width_mm" gorm:"default:48.5"`
+	LabelHeightMM     float64 `json:"label_height_mm" gorm:"default:25.4"`
+	LabelColumns      int     `json:"label_columns" gorm:"default:4"`
+	LabelRows         int     `json:"label_rows" gorm:"default:11"`
+	LabelMarginMM     float64 `json:"label_margin_mm" gorm:"default:5"`
+	LabelMarginTopMM  float64 `json:"label_margin_top_mm" gorm:"default:8.8"`
+	LabelMarginLeftMM float64 `json:"label_margin_left_mm" gorm:"default:5"`
+	LabelGapHMM       float64 `json:"label_gap_h_mm" gorm:"column:label_gap_h_mm;default:2"`
+	LabelGapVMM       float64 `json:"label_gap_v_mm" gorm:"column:label_gap_v_mm;default:0"`
 	// AI HSN search settings
 	EnableAIHSNSearch   bool           `json:"enable_ai_hsn_search" gorm:"column:enable_aihsn_search;default:false"`
 	EnableAIBillParsing bool           `json:"enable_ai_bill_parsing" gorm:"default:false"`
@@ -464,22 +465,22 @@ type StockEntry struct {
 }
 
 type InventoryStock struct {
-	ID           uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID       uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;uniqueIndex:idx_inventory_stock_batch"`
-	ProductID    uuid.UUID  `json:"product_id" gorm:"type:uuid;not null;uniqueIndex:idx_inventory_stock_batch"`
-	Product      Product    `json:"product,omitempty" gorm:"foreignKey:ProductID"`
-	OutletID     uuid.UUID  `json:"outlet_id" gorm:"type:uuid;not null;uniqueIndex:idx_inventory_stock_batch"`
-	BatchNo      string     `json:"batch_no" gorm:"default:'';uniqueIndex:idx_inventory_stock_batch"`
-	MfgDate      *time.Time `json:"mfg_date,omitempty"`
-	ExpDate      *time.Time `json:"exp_date,omitempty"`
-	Quantity         float64    `json:"quantity" gorm:"default:0"`
-	InitialQuantity  float64    `json:"initial_quantity" gorm:"default:0"` // Qty when batch/outlet stock was first recorded
-	ReservedQty        float64    `json:"reserved_qty" gorm:"default:0"`  // Reserved for orders
-	AvailableQty float64    `json:"available_qty" gorm:"default:0"` // Quantity - Reserved
-	AverageCost  float64    `json:"average_cost" gorm:"default:0"`  // Weighted average cost
-	LastUpdated  time.Time  `json:"last_updated"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	ID              uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID          uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;uniqueIndex:idx_inventory_stock_batch"`
+	ProductID       uuid.UUID  `json:"product_id" gorm:"type:uuid;not null;uniqueIndex:idx_inventory_stock_batch"`
+	Product         Product    `json:"product,omitempty" gorm:"foreignKey:ProductID"`
+	OutletID        uuid.UUID  `json:"outlet_id" gorm:"type:uuid;not null;uniqueIndex:idx_inventory_stock_batch"`
+	BatchNo         string     `json:"batch_no" gorm:"default:'';uniqueIndex:idx_inventory_stock_batch"`
+	MfgDate         *time.Time `json:"mfg_date,omitempty"`
+	ExpDate         *time.Time `json:"exp_date,omitempty"`
+	Quantity        float64    `json:"quantity" gorm:"default:0"`
+	InitialQuantity float64    `json:"initial_quantity" gorm:"default:0"` // Qty when batch/outlet stock was first recorded
+	ReservedQty     float64    `json:"reserved_qty" gorm:"default:0"`     // Reserved for orders
+	AvailableQty    float64    `json:"available_qty" gorm:"default:0"`    // Quantity - Reserved
+	AverageCost     float64    `json:"average_cost" gorm:"default:0"`     // Weighted average cost
+	LastUpdated     time.Time  `json:"last_updated"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 type StockTransfer struct {

@@ -1,13 +1,13 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/services"
-	"truerp/utils"
 	"fmt"
 	"mime/multipart"
 	"net/http"
 	"strings"
+	"truerp/models"
+	"truerp/services"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -56,6 +56,9 @@ func GetBusiness(c *gin.Context) {
 	if business.GeminiAPIKey != "" {
 		business.GeminiAPIKey = "********"
 	}
+	if business.LogoAspectRatio == "" {
+		business.LogoAspectRatio = "square"
+	}
 
 	c.JSON(http.StatusOK, business)
 }
@@ -80,22 +83,23 @@ func UpdateBusiness(c *gin.Context) {
 	fmt.Println("DEBUG: Business found:", business.ID)
 
 	updates := map[string]interface{}{
-		"name":                 input.Name,
-		"gstin":                input.GSTIN,
-		"address":              input.Address,
-		"city":                 input.City,
-		"state":                input.State,
-		"pincode":              input.Pincode,
-		"phone":                input.Phone,
-		"email":                input.Email,
-		"logo_url":             input.LogoURL,
-		"signature_url":        input.SignatureURL,
-		"state_code":           input.StateCode,
-		"bank_name":            input.BankName,
-		"account_number":       input.AccountNumber,
-		"ifsc_code":            input.IFSCCode,
-		"upi_id":               input.UPIID,
-		"enable_aihsn_search":  input.EnableAIHSNSearch,
+		"name":                   input.Name,
+		"gstin":                  input.GSTIN,
+		"address":                input.Address,
+		"city":                   input.City,
+		"state":                  input.State,
+		"pincode":                input.Pincode,
+		"phone":                  input.Phone,
+		"email":                  input.Email,
+		"logo_url":               input.LogoURL,
+		"logo_aspect_ratio":      normalizeLogoAspectRatio(input.LogoAspectRatio),
+		"signature_url":          input.SignatureURL,
+		"state_code":             input.StateCode,
+		"bank_name":              input.BankName,
+		"account_number":         input.AccountNumber,
+		"ifsc_code":              input.IFSCCode,
+		"upi_id":                 input.UPIID,
+		"enable_aihsn_search":    input.EnableAIHSNSearch,
 		"enable_ai_bill_parsing": input.EnableAIBillParsing,
 	}
 	fmt.Println("DEBUG: Updates map created")
@@ -181,12 +185,18 @@ func UploadLogo(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load business"})
 		return
 	}
-	if err := utils.DB.Model(&business).Update("logo_url", publicURL).Error; err != nil {
+	if err := utils.DB.Model(&business).Updates(map[string]interface{}{
+		"logo_url":          publicURL,
+		"logo_aspect_ratio": normalizeLogoAspectRatio(c.PostForm("aspect_ratio")),
+	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update logo"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"logo_url": publicURL})
+	c.JSON(http.StatusOK, gin.H{
+		"logo_url":          publicURL,
+		"logo_aspect_ratio": normalizeLogoAspectRatio(c.PostForm("aspect_ratio")),
+	})
 }
 
 func RemoveLogo(c *gin.Context) {
@@ -291,4 +301,13 @@ func isValidImageFile(file *multipart.FileHeader) bool {
 		".webp": true,
 	}
 	return allowedExts[ext]
+}
+
+func normalizeLogoAspectRatio(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "landscape", "portrait":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "square"
+	}
 }

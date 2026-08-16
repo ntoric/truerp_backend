@@ -191,17 +191,11 @@ func createImportedInvoice(userID uuid.UUID, userName string, lines []invoiceImp
 		return fmt.Errorf("party %q not found", header.partyName)
 	}
 
-	invoiceNumber := header.invoiceNumber
+	invoiceNumber := strings.TrimSpace(header.invoiceNumber)
 	if invoiceNumber == "" {
-		var count int64
-		utils.DB.Model(&models.Invoice{}).Where("user_id = ?", userID).Count(&count)
-		invoiceNumber = fmt.Sprintf("INV-%04d", count+1)
-	} else {
-		var existing int64
-		utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND invoice_number = ?", userID, invoiceNumber).Count(&existing)
-		if existing > 0 {
-			return fmt.Errorf("invoice number %q already exists", invoiceNumber)
-		}
+		invoiceNumber = allocateUniqueInvoiceNumber(userID, "")
+	} else if invoiceNumberInUse(userID, invoiceNumber, uuid.Nil) {
+		return fmt.Errorf("invoice number %q already exists", invoiceNumber)
 	}
 
 	invoice := models.Invoice{

@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"truerp/models"
@@ -44,14 +45,56 @@ func findInvoiceByClientSaleID(userID uuid.UUID, clientSaleID uuid.UUID) (*model
 	return &invoice, true
 }
 
+func invoiceNumberInUse(userID uuid.UUID, invoiceNumber string, excludeID uuid.UUID) bool {
+	invoiceNumber = strings.TrimSpace(invoiceNumber)
+	if invoiceNumber == "" {
+		return false
+	}
+	q := utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND invoice_number = ?", userID, invoiceNumber)
+	if excludeID != uuid.Nil {
+		q = q.Where("id <> ?", excludeID)
+	}
+	var n int64
+	q.Count(&n)
+	return n > 0
+}
+
+func parseInvoiceSequence(invoiceNumber, prefix string) int64 {
+	raw := strings.TrimSpace(invoiceNumber)
+	p := strings.TrimSpace(prefix)
+	if raw == "" || p == "" {
+		return 0
+	}
+	want := strings.ToUpper(p) + "-"
+	if !strings.HasPrefix(strings.ToUpper(raw), want) {
+		return 0
+	}
+	rest := raw[len(want):]
+	n, err := strconv.ParseInt(strings.TrimSpace(rest), 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+func maxInvoiceSequence(userID uuid.UUID, prefix string) int64 {
+	var numbers []string
+	utils.DB.Model(&models.Invoice{}).
+		Where("user_id = ? AND invoice_number LIKE ?", userID, prefix+"-%").
+		Pluck("invoice_number", &numbers)
+	var max int64
+	for _, number := range numbers {
+		if seq := parseInvoiceSequence(number, prefix); seq > max {
+			max = seq
+		}
+	}
+	return max
+}
+
 func allocateUniqueInvoiceNumber(userID uuid.UUID, preferred string) string {
 	preferred = strings.TrimSpace(preferred)
-	if preferred != "" {
-		var n int64
-		utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND invoice_number = ?", userID, preferred).Count(&n)
-		if n == 0 {
-			return preferred
-		}
+	if preferred != "" && !invoiceNumberInUse(userID, preferred, uuid.Nil) {
+		return preferred
 	}
 
 	prefix := "INV"
@@ -60,17 +103,16 @@ func allocateUniqueInvoiceNumber(userID uuid.UUID, preferred string) string {
 		prefix = strings.TrimSpace(settings.InvoicePrefix)
 	}
 
-	var count int64
-	utils.DB.Model(&models.Invoice{}).Where("user_id = ?", userID).Count(&count)
-	start := count + 1
-	if settings.StartingNumber > int(start) {
+	start := maxInvoiceSequence(userID, prefix) + 1
+	if start < 1 {
+		start = 1
+	}
+	if int64(settings.StartingNumber) > start {
 		start = int64(settings.StartingNumber)
 	}
 	for i := start; i < start+10000; i++ {
 		candidate := fmt.Sprintf("%s-%04d", prefix, i)
-		var n int64
-		utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND invoice_number = ?", userID, candidate).Count(&n)
-		if n == 0 {
+		if !invoiceNumberInUse(userID, candidate, uuid.Nil) {
 			return candidate
 		}
 	}

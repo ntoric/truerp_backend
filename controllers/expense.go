@@ -39,6 +39,22 @@ func GetExpenses(c *gin.Context) {
 	c.JSON(http.StatusOK, expenses)
 }
 
+func GetExpense(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	id := c.Param("id")
+
+	var expense models.Expense
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).
+		Preload("Items").
+		Preload("BankAccount").
+		First(&expense).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Expense not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, expense)
+}
+
 func CreateExpense(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 	userName := ""

@@ -148,6 +148,7 @@ func SetupRoutes(r *gin.Engine) {
 		expenses.GET("", controllers.GetExpenses)
 		expenses.POST("", controllers.CreateExpense)
 		expenses.GET("/next-number", controllers.GetNextExpenseNumber)
+		expenses.GET("/:id", controllers.GetExpense)
 		expenses.PUT("/:id", controllers.UpdateExpense)
 		expenses.DELETE("/:id", controllers.DeleteExpense)
 	}
@@ -609,7 +610,7 @@ func SetupRoutes(r *gin.Engine) {
 		cashBank.POST("/transactions/add", controllers.AddMoney)
 		cashBank.POST("/transactions/reduce", controllers.ReduceMoney)
 		cashBank.POST("/transactions/transfer", controllers.TransferMoney)
-		cashBank.DELETE("/transactions/:id", controllers.DeleteCashTransaction)
+		cashBank.DELETE("/transactions/:id", middleware.SuperAdminRequired(), controllers.DeleteCashTransaction)
 	}
 
 	// Staff routes

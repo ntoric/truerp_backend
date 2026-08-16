@@ -42,7 +42,7 @@ func GetInvoices(c *gin.Context) {
 		query = query.Where("date <= ?", to)
 	}
 
-	if err := query.Order("updated_at DESC").Find(&invoices).Error; err != nil {
+	if err := query.Order("invoice_number DESC").Find(&invoices).Error; err != nil {
 		fmt.Printf("[DEBUG] GetInvoices - DB error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch invoices"})
 		return
@@ -445,6 +445,16 @@ func UpdateInvoice(c *gin.Context) {
 		input.PartyID = input.CustomerID
 	}
 
+	invoiceNumber := strings.TrimSpace(input.InvoiceNumber)
+	if invoiceNumber == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invoice number is required"})
+		return
+	}
+	if invoiceNumberInUse(userID, invoiceNumber, invoice.ID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invoice number already exists"})
+		return
+	}
+
 	if err := validateUserBankAccount(userID, input.BankAccountID); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account"})
 		return
@@ -474,7 +484,7 @@ func UpdateInvoice(c *gin.Context) {
 	}
 
 	// Update invoice fields
-	invoice.InvoiceNumber = input.InvoiceNumber
+	invoice.InvoiceNumber = invoiceNumber
 	invoice.PartyID = input.PartyID
 	invoice.Date = input.Date
 	invoice.DueDate = input.DueDate.Ptr()
@@ -702,16 +712,27 @@ func DeleteInvoice(c *gin.Context) {
 
 func GetNextInvoiceNumber(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
+	c.JSON(http.StatusOK, gin.H{"invoice_number": allocateUniqueInvoiceNumber(userID, "")})
+}
 
-	var count int64
-	utils.DB.Model(&models.Invoice{}).Where("user_id = ?", userID).Count(&count)
-
-	nextNum := fmt.Sprintf("INV-%04d", count+1)
-	c.JSON(http.StatusOK, gin.H{"invoice_number": nextNum})
+func invoiceListFilters(c *gin.Context) func(*gorm.DB) *gorm.DB {
+	return func(db *gorm.DB) *gorm.DB {
+		if from := c.Query("from"); from != "" {
+			db = db.Where("date >= ?", from)
+		}
+		if to := c.Query("to"); to != "" {
+			db = db.Where("date <= ?", to)
+		}
+		if status := c.Query("status"); status != "" {
+			db = db.Where("status = ?", status)
+		}
+		return db
+	}
 }
 
 func GetInvoiceStats(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
+	filters := invoiceListFilters(c)
 
 	var stats struct {
 		TotalSales float64 `json:"total_sales"`
@@ -720,66 +741,24 @@ func GetInvoiceStats(c *gin.Context) {
 		Cancelled  float64 `json:"cancelled"`
 	}
 
-	query := utils.DB.Model(&models.Invoice{}).Where("user_id = ?", userID)
-
-	// Apply date range filter if provided
-	if from := c.Query("from"); from != "" {
-		query = query.Where("date >= ?", from)
-	}
-	if to := c.Query("to"); to != "" {
-		query = query.Where("date <= ?", to)
-	}
-
 	// Total Sales (excluding cancelled)
 	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status != ?", userID, "cancelled").
-		Scopes(func(db *gorm.DB) *gorm.DB {
-			if from := c.Query("from"); from != "" {
-				db = db.Where("date >= ?", from)
-			}
-			if to := c.Query("to"); to != "" {
-				db = db.Where("date <= ?", to)
-			}
-			return db
-		}).
+		Scopes(filters).
 		Select("COALESCE(SUM(total_amount), 0)").Scan(&stats.TotalSales)
 
 	// Paid
 	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status = ?", userID, "paid").
-		Scopes(func(db *gorm.DB) *gorm.DB {
-			if from := c.Query("from"); from != "" {
-				db = db.Where("date >= ?", from)
-			}
-			if to := c.Query("to"); to != "" {
-				db = db.Where("date <= ?", to)
-			}
-			return db
-		}).
+		Scopes(filters).
 		Select("COALESCE(SUM(total_amount), 0)").Scan(&stats.Paid)
 
 	// Unpaid (sent, partial, overdue — remaining balance on issued invoices)
 	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status IN ?", userID, []string{"sent", "partial", "overdue"}).
-		Scopes(func(db *gorm.DB) *gorm.DB {
-			if from := c.Query("from"); from != "" {
-				db = db.Where("date >= ?", from)
-			}
-			if to := c.Query("to"); to != "" {
-				db = db.Where("date <= ?", to)
-			}
-			return db
-		}).
+		Scopes(filters).
 		Select("COALESCE(SUM(total_amount - amount_paid), 0)").Scan(&stats.Unpaid)
 
 	// Cancelled
 	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status = ?", userID, "cancelled").
-		Scopes(func(db *gorm.DB) *gorm.DB {
-			if from := c.Query("from"); from != "" {
-				db = db.Where("date >= ?", from)
-			}
-			if to := c.Query("to"); to != "" {
-				db = db.Where("date <= ?", to)
-			}
-			return db
-		}).
+		Scopes(filters).
 		Select("COALESCE(SUM(total_amount), 0)").Scan(&stats.Cancelled)
 
 	c.JSON(http.StatusOK, stats)

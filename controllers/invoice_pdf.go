@@ -1,12 +1,12 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"encoding/json"
 	"fmt"
 	"html"
 	"strings"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/google/uuid"
 )
@@ -75,6 +75,17 @@ func documentPageCSS(ps models.PrintSettings) (pageRule string, bodyFontSize int
 	return pageRule, fontSize, bodyPadding
 }
 
+func logoImgStyle(aspect string) string {
+	switch strings.ToLower(strings.TrimSpace(aspect)) {
+	case "landscape":
+		return "max-height:60px;max-width:90px;width:auto;height:auto;object-fit:contain;margin-bottom:8px;"
+	case "portrait":
+		return "max-height:90px;max-width:60px;width:auto;height:auto;object-fit:contain;margin-bottom:8px;"
+	default:
+		return "max-height:60px;max-width:60px;width:auto;height:auto;object-fit:contain;margin-bottom:8px;"
+	}
+}
+
 func InvoicePDFHTML(invoice models.Invoice) string {
 	return InvoicePDFHTMLWithOptions(invoice, buildInvoicePDFOptions(invoice.UserID, invoice))
 }
@@ -122,7 +133,7 @@ func InvoicePDFHTMLWithOptions(invoice models.Invoice, opts invoicePDFOptions) s
 
 	logoHTML := ""
 	if printSettings.PrintHeader && settings.ShowLogo && opts.Business != nil && opts.Business.LogoURL != "" {
-		logoHTML = fmt.Sprintf(`<img src="%s" alt="Logo" style="max-height:60px;margin-bottom:8px;" />`, html.EscapeString(opts.Business.LogoURL))
+		logoHTML = fmt.Sprintf(`<img src="%s" alt="Logo" style="%s" />`, html.EscapeString(opts.Business.LogoURL), logoImgStyle(opts.Business.LogoAspectRatio))
 	}
 
 	showBank := settings.ShowBankDetails && custom.Miscellaneous.ShowBankDetails
