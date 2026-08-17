@@ -1,11 +1,12 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -43,7 +44,7 @@ func CreatePayment(c *gin.Context) {
 		InvoiceID         *uuid.UUID `json:"invoice_id"`
 		PartyID           uuid.UUID  `json:"party_id" binding:"required"`
 		AmountReceived    float64    `json:"amount_received" binding:"required,gt=0"`
-		PaymentInDiscount float64    `json:"payment_in_discount" binding:"required"`
+		PaymentInDiscount float64    `json:"payment_in_discount" binding:"gte=0"`
 		PaymentInNumber   string     `json:"payment_in_number"`
 		Mode              string     `json:"mode" binding:"required"`
 		Date              time.Time  `json:"date" binding:"required"`
@@ -63,6 +64,16 @@ func CreatePayment(c *gin.Context) {
 		return
 	}
 
+	paymentNumber := strings.TrimSpace(input.PaymentInNumber)
+	if paymentNumber != "" && paymentInNumberInUse(utils.DB, userID, paymentNumber) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":  "Payment number already exists",
+			"fields": gin.H{"payment_in_number": "Payment number already exists"},
+		})
+		return
+	}
+	paymentNumber = allocateUniquePaymentInNumber(utils.DB, userID, paymentNumber)
+
 	// Calculate net amount (amount received minus discount)
 	netAmount := input.AmountReceived - input.PaymentInDiscount
 
@@ -73,7 +84,7 @@ func CreatePayment(c *gin.Context) {
 		PartyID:           input.PartyID,
 		AmountReceived:    input.AmountReceived,
 		PaymentInDiscount: input.PaymentInDiscount,
-		PaymentInNumber:   input.PaymentInNumber,
+		PaymentInNumber:   paymentNumber,
 		Mode:              input.Mode,
 		Date:              input.Date,
 		Reference:         input.Reference,
@@ -201,4 +212,9 @@ func DeletePayment(c *gin.Context) {
 	)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Payment deleted successfully"})
+}
+
+func GetNextPaymentInNumber(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	c.JSON(http.StatusOK, gin.H{"payment_in_number": allocateUniquePaymentInNumber(utils.DB, userID, "")})
 }

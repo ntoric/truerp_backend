@@ -49,6 +49,7 @@ func GetInvoices(c *gin.Context) {
 	}
 
 	fmt.Printf("[DEBUG] GetInvoices - Found %d invoices\n", len(invoices))
+	attachInvoicePaymentSplitsList(utils.DB, invoices)
 	c.JSON(http.StatusOK, invoices)
 }
 
@@ -68,6 +69,7 @@ func GetInvoice(c *gin.Context) {
 		return
 	}
 
+	attachInvoicePaymentSplits(utils.DB, &invoice)
 	c.JSON(http.StatusOK, invoice)
 }
 
@@ -90,6 +92,7 @@ func CreateInvoice(c *gin.Context) {
 		PaymentMode           string                 `json:"payment_mode"`
 		AmountPaid            float64                `json:"amount_paid"`
 		ReceivedAmount        float64                `json:"received_amount"`
+		PaymentSplits         []models.PaymentSplit  `json:"payment_splits"`
 		BankAccountID         *uuid.UUID             `json:"bank_account_id"`
 		Notes                 string                 `json:"notes"`
 		Terms                 string                 `json:"terms"`
@@ -313,6 +316,11 @@ func CreateInvoice(c *gin.Context) {
 		invoice.AmountPaid = invoice.TotalAmount
 	}
 
+	if err := finalizeInvoicePaymentSplits(userID, &invoice, input.PaymentSplits, input.PaymentMode, input.BankAccountID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account for payment method"})
+		return
+	}
+
 	normalizeInvoicePaymentStatus(&invoice)
 
 	if err := utils.DB.Create(&invoice).Error; err != nil {
@@ -382,6 +390,7 @@ func CreateInvoice(c *gin.Context) {
 		"",
 	)
 
+	attachInvoicePaymentSplits(utils.DB, &invoice)
 	c.JSON(http.StatusCreated, invoice)
 }
 
@@ -413,6 +422,7 @@ func UpdateInvoice(c *gin.Context) {
 		IsInterState      bool                   `json:"is_inter_state"`
 		PaymentMode       string                 `json:"payment_mode"`
 		AmountPaid        float64                `json:"amount_paid"`
+		PaymentSplits     []models.PaymentSplit  `json:"payment_splits"`
 		BankAccountID     *uuid.UUID             `json:"bank_account_id"`
 		Notes             string                 `json:"notes"`
 		Terms             string                 `json:"terms"`
@@ -466,6 +476,7 @@ func UpdateInvoice(c *gin.Context) {
 		return
 	}
 
+	attachInvoicePaymentSplits(utils.DB, &invoice)
 	previousInvoice := invoiceCashSnapshot(invoice)
 	previousStatus := invoice.Status
 
@@ -565,6 +576,10 @@ func UpdateInvoice(c *gin.Context) {
 	if invoice.Status == "paid" {
 		invoice.AmountPaid = invoice.TotalAmount
 	}
+	if err := finalizeInvoicePaymentSplits(userID, &invoice, input.PaymentSplits, input.PaymentMode, input.BankAccountID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account for payment method"})
+		return
+	}
 	normalizeInvoicePaymentStatus(&invoice)
 
 	if err := utils.DB.Save(&invoice).Error; err != nil {
@@ -607,6 +622,7 @@ func UpdateInvoice(c *gin.Context) {
 		"",
 	)
 
+	attachInvoicePaymentSplits(utils.DB, &invoice)
 	c.JSON(http.StatusOK, invoice)
 }
 
@@ -776,6 +792,7 @@ func GenerateInvoicePDF(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Invoice not found"})
 		return
 	}
+	attachInvoicePaymentSplits(utils.DB, &invoice)
 
 	settings := loadPrintSettings(userID)
 	var business models.Business

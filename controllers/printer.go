@@ -240,6 +240,7 @@ func GenerateDocumentPrint(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Invoice not found"})
 			return
 		}
+		attachInvoicePaymentSplits(utils.DB, &invoice)
 		title := "Invoice " + invoice.InvoiceNumber
 		var business models.Business
 		_ = utils.DB.Where("user_id = ?", userID).First(&business)
@@ -841,6 +842,10 @@ func prepareInvoiceData(invoice models.Invoice, business models.Business, printS
 	}
 	totalLines = append(totalLines, sepWeak)
 	totalLines = append(totalLines, formatLabelValue("TOTAL", fmt.Sprintf("%.2f", invoice.TotalAmount), cols))
+	attachInvoicePaymentSplits(utils.DB, &invoice)
+	if label := formatPaymentSplitsLabel(invoice.PaymentSplits, invoice.PaymentMode); label != "" {
+		totalLines = append(totalLines, formatLabelValue("Payment", label, cols))
+	}
 	if invoice.AmountPaid > 0 {
 		totalLines = append(totalLines, formatLabelValue("Paid", fmt.Sprintf("%.2f", invoice.AmountPaid), cols))
 		balance := invoice.TotalAmount - invoice.AmountPaid
@@ -851,9 +856,6 @@ func prepareInvoiceData(invoice models.Invoice, business models.Business, printS
 	totals := strings.Join(totalLines, "\n")
 
 	taxDetails := ""
-	if wide && invoice.PaymentMode != "" {
-		taxDetails = formatLabelValue("Payment", invoice.PaymentMode, cols)
-	}
 
 	footer := formatLabelValue("Status", strings.ToUpper(invoice.Status), cols)
 	terms := invoice.Terms

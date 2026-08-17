@@ -164,6 +164,10 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 	}
 	pdf.SetFont("Arial", "B", fontSize)
 	writeTotalRow(pdf, usable, "Grand Total", fmt.Sprintf("Rs. %.2f", invoice.TotalAmount), true)
+	if label := formatPaymentSplitsLabel(invoice.PaymentSplits, invoice.PaymentMode); label != "" {
+		pdf.SetFont("Arial", "", fontSize-1)
+		writeTotalRow(pdf, usable, "Payment", sanitizePDFText(label), false)
+	}
 	if invoice.AmountPaid > 0 {
 		pdf.SetFont("Arial", "", fontSize-1)
 		writeTotalRow(pdf, usable, "Paid", fmt.Sprintf("Rs. %.2f", invoice.AmountPaid), false)

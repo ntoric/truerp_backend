@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 	"truerp/models"
@@ -75,20 +76,33 @@ func recordPurchasePaymentOut(tx *gorm.DB, userID uuid.UUID, accountID *uuid.UUI
 	return postPurchasePaymentAccounting(tx, userID, transaction.ID, accountID, amount, date, reference, description)
 }
 
-// createLinkedSalePaymentIn records a Payment row for a sales invoice payment
+// createLinkedSalePaymentIn records Payment row(s) for a sales invoice payment
 // and posts cash/bank + AR reduction. Invoice amount_paid/status must already be set.
+// When invoice.PaymentSplits is set, one Payment + cash transaction is created per split.
 func createLinkedSalePaymentIn(tx *gorm.DB, userID uuid.UUID, invoice *models.Invoice, amount float64, date time.Time, notes string) error {
 	if amount <= 0 || invoice == nil {
 		return nil
 	}
-
-	var count int64
-	if err := tx.Model(&models.Payment{}).Where("user_id = ?", userID).Count(&count).Error; err != nil {
+	resolved, err := resolveInvoicePaymentSplits(userID, invoice.PaymentSplits, invoice.PaymentMode, amount)
+	if err != nil {
 		return err
 	}
-	number := fmt.Sprintf("PIN-%04d", count+1)
+	for _, split := range resolved {
+		if err := createLinkedSalePaymentInWithMode(tx, userID, invoice, split.Amount, split.Mode, split.BankAccountID, date, notes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-	mode := invoice.PaymentMode
+func createLinkedSalePaymentInWithMode(tx *gorm.DB, userID uuid.UUID, invoice *models.Invoice, amount float64, mode string, accountID *uuid.UUID, date time.Time, notes string) error {
+	if amount <= 0 || invoice == nil {
+		return nil
+	}
+
+	number := allocateUniquePaymentInNumber(tx, userID, "")
+
+	mode = normalizePaymentMethod(mode)
 	if mode == "" {
 		mode = "cash"
 	}
@@ -111,7 +125,7 @@ func createLinkedSalePaymentIn(tx *gorm.DB, userID uuid.UUID, invoice *models.In
 	}
 
 	desc := salePaymentDescription(invoice)
-	if err := recordSalePaymentIn(tx, userID, invoice.BankAccountID, amount, date, invoice.InvoiceNumber, desc); err != nil {
+	if err := recordSalePaymentIn(tx, userID, accountID, amount, date, invoice.InvoiceNumber, desc); err != nil {
 		return err
 	}
 
@@ -276,10 +290,6 @@ func createInvoicePaymentRecord(tx *gorm.DB, userID uuid.UUID, invoice *models.I
 	if amount <= 0 || invoice == nil {
 		return nil
 	}
-	var count int64
-	if err := tx.Model(&models.Payment{}).Where("user_id = ?", userID).Count(&count).Error; err != nil {
-		return err
-	}
 	mode := invoice.PaymentMode
 	if mode == "" {
 		mode = "cash"
@@ -291,7 +301,7 @@ func createInvoicePaymentRecord(tx *gorm.DB, userID uuid.UUID, invoice *models.I
 		InvoiceID:       &invoiceID,
 		PartyID:         invoice.PartyID,
 		AmountReceived:  amount,
-		PaymentInNumber: fmt.Sprintf("PIN-%04d", count+1),
+		PaymentInNumber: allocateUniquePaymentInNumber(tx, userID, ""),
 		Mode:            mode,
 		Date:            invoice.Date,
 		Reference:       invoice.InvoiceNumber,
@@ -318,7 +328,7 @@ func cashTransactionsTotal(txns []models.CashTransaction) float64 {
 
 // reverseLinkedInvoicePayments removes payment-ins created for a sales invoice and
 // restores cash/bank balances plus linked GL postings.
-func reverseLinkedInvoicePayments(tx *gorm.DB, userID uuid.UUID, invoice *models.Invoice) error {
+func reverseLinkedInvoicePayments(tx *gorm.DB, userID uuid.UUID, invoice *models.Invoice, extraInvoiceNumbers ...string) error {
 	if invoice == nil {
 		return nil
 	}
@@ -329,9 +339,31 @@ func reverseLinkedInvoicePayments(tx *gorm.DB, userID uuid.UUID, invoice *models
 	}
 	totalPaid := invoicePaymentsTotal(payments)
 
-	txns, err := findInvoiceCashTransactions(tx, userID, invoice.InvoiceNumber)
-	if err != nil {
-		return err
+	numbers := []string{strings.TrimSpace(invoice.InvoiceNumber)}
+	for _, number := range extraInvoiceNumbers {
+		number = strings.TrimSpace(number)
+		if number == "" {
+			continue
+		}
+		duplicate := false
+		for _, existing := range numbers {
+			if existing == number {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			numbers = append(numbers, number)
+		}
+	}
+
+	var txns []models.CashTransaction
+	for _, number := range numbers {
+		found, err := findInvoiceCashTransactions(tx, userID, number)
+		if err != nil {
+			return err
+		}
+		txns = mergeCashTransactions(txns, found)
 	}
 
 	for _, txn := range txns {
@@ -368,6 +400,7 @@ func invoiceCashSnapshot(invoice models.Invoice) models.Invoice {
 		BankAccountID: invoice.BankAccountID,
 		Date:          invoice.Date,
 		IsPOS:         invoice.IsPOS,
+		PaymentSplits: copyPaymentSplits(invoice.PaymentSplits),
 	}
 }
 
@@ -393,6 +426,9 @@ func invoiceCashLedgerNeedsResync(previous, current *models.Invoice) bool {
 	if previous.Date.Format("2006-01-02") != current.Date.Format("2006-01-02") {
 		return true
 	}
+	if current.PaymentSplits != nil && !paymentSplitsEqual(previous.PaymentSplits, current.PaymentSplits) {
+		return true
+	}
 	return false
 }
 
@@ -411,77 +447,28 @@ func rewriteLinkedInvoicePayments(tx *gorm.DB, userID uuid.UUID, previous, curre
 		return nil
 	}
 
-	var payments []models.Payment
-	if err := tx.Where("user_id = ? AND invoice_id = ?", userID, current.ID).Find(&payments).Error; err != nil {
-		return err
-	}
-
-	previousTxns, err := findInvoiceCashTransactions(tx, userID, previous.InvoiceNumber)
+	resolved, err := ledgerSplitsForInvoice(tx, userID, previous, current)
 	if err != nil {
 		return err
 	}
-	currentTxns, err := findInvoiceCashTransactions(tx, userID, current.InvoiceNumber)
-	if err != nil {
-		return err
-	}
-	txns := mergeCashTransactions(previousTxns, currentTxns)
 
-	oldPaid := invoicePaymentsTotal(payments)
-	if oldPaid == 0 {
-		oldPaid = cashTransactionsTotal(txns)
-	}
-
-	if err := adjustPartyBalance(tx, userID, previous.PartyID, oldPaid); err != nil {
+	reversal := *current
+	reversal.PartyID = previous.PartyID
+	if err := reverseLinkedInvoicePayments(tx, userID, &reversal, previous.InvoiceNumber); err != nil {
 		return err
 	}
 
-	if current.AmountPaid <= 0 {
-		for _, txn := range txns {
-			if err := reverseCashAddTransaction(tx, userID, txn); err != nil {
-				return err
-			}
-		}
-		for _, payment := range payments {
-			if err := reverseAccountingByRef(tx, userID, "payment_in_record", payment.ID); err != nil {
-				return err
-			}
-			if err := tx.Delete(&payment).Error; err != nil {
-				return err
-			}
-		}
+	if current.AmountPaid <= 0 || len(resolved) == 0 {
 		return nil
 	}
 
-	if len(txns) > 0 {
-		if err := updateInvoiceCashTransaction(tx, userID, &txns[0], current, current.AmountPaid); err != nil {
+	notes := linkedSalePaymentNotes(current)
+	for _, split := range resolved {
+		if err := createLinkedSalePaymentInWithMode(tx, userID, current, split.Amount, split.Mode, split.BankAccountID, current.Date, notes); err != nil {
 			return err
 		}
-		for _, extra := range txns[1:] {
-			if err := reverseCashAddTransaction(tx, userID, extra); err != nil {
-				return err
-			}
-		}
-	} else if err := recordSalePaymentIn(tx, userID, current.BankAccountID, current.AmountPaid, current.Date, current.InvoiceNumber, salePaymentDescription(current)); err != nil {
-		return err
 	}
-
-	if len(payments) > 0 {
-		if err := updateInvoicePaymentRecord(tx, userID, &payments[0], current, current.AmountPaid); err != nil {
-			return err
-		}
-		for _, extra := range payments[1:] {
-			if err := reverseAccountingByRef(tx, userID, "payment_in_record", extra.ID); err != nil {
-				return err
-			}
-			if err := tx.Delete(&extra).Error; err != nil {
-				return err
-			}
-		}
-	} else if err := createInvoicePaymentRecord(tx, userID, current, current.AmountPaid); err != nil {
-		return err
-	}
-
-	return adjustPartyBalance(tx, userID, current.PartyID, -current.AmountPaid)
+	return nil
 }
 
 // resyncLinkedInvoicePayments updates existing cash/bank transactions and payment-in
@@ -670,4 +657,65 @@ func validateUserBankAccount(userID uuid.UUID, accountID *uuid.UUID) error {
 	}
 	var account models.BankAccount
 	return utils.DB.Where("user_id = ? AND id = ? AND is_active = ?", userID, *accountID, true).First(&account).Error
+}
+
+const paymentInNumberPrefix = "PIN"
+
+func paymentInNumberInUse(db *gorm.DB, userID uuid.UUID, number string) bool {
+	number = strings.TrimSpace(number)
+	if number == "" {
+		return false
+	}
+	var n int64
+	db.Model(&models.Payment{}).Where("user_id = ? AND payment_in_number = ?", userID, number).Count(&n)
+	return n > 0
+}
+
+func parsePaymentNumberSequence(number, prefix string) int64 {
+	raw := strings.TrimSpace(number)
+	p := strings.TrimSpace(prefix)
+	if raw == "" || p == "" {
+		return 0
+	}
+	want := strings.ToUpper(p) + "-"
+	if !strings.HasPrefix(strings.ToUpper(raw), want) {
+		return 0
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(raw[len(want):]), 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+func maxPaymentInSequence(db *gorm.DB, userID uuid.UUID) int64 {
+	var numbers []string
+	db.Model(&models.Payment{}).
+		Where("user_id = ? AND payment_in_number LIKE ?", userID, paymentInNumberPrefix+"-%").
+		Pluck("payment_in_number", &numbers)
+	var max int64
+	for _, number := range numbers {
+		if seq := parsePaymentNumberSequence(number, paymentInNumberPrefix); seq > max {
+			max = seq
+		}
+	}
+	return max
+}
+
+func allocateUniquePaymentInNumber(db *gorm.DB, userID uuid.UUID, preferred string) string {
+	preferred = strings.TrimSpace(preferred)
+	if preferred != "" && !paymentInNumberInUse(db, userID, preferred) {
+		return preferred
+	}
+	start := maxPaymentInSequence(db, userID) + 1
+	if start < 1 {
+		start = 1
+	}
+	for i := start; i < start+10000; i++ {
+		candidate := fmt.Sprintf("%s-%04d", paymentInNumberPrefix, i)
+		if !paymentInNumberInUse(db, userID, candidate) {
+			return candidate
+		}
+	}
+	return fmt.Sprintf("%s-%d", paymentInNumberPrefix, time.Now().Unix())
 }

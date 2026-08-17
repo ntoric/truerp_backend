@@ -441,5 +441,6 @@ func UpdateInvoiceStatus(c *gin.Context) {
 	}
 	recordInvoiceStatusHistory(invoice.ID, userID, prevStatus, invoice.Status, input.Note, changedBy)
 
+	attachInvoicePaymentSplits(utils.DB, &invoice)
 	c.JSON(http.StatusOK, invoice)
 }

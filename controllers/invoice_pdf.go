@@ -330,6 +330,9 @@ func renderInvoiceMetaSection(invoice models.Invoice, custom models.InvoiceTempl
 	if custom.InvoiceDetails.ShowPlaceOfSupply && invoice.PlaceOfSupply != "" {
 		cells = append(cells, fmt.Sprintf("<div>Place of Supply: %s</div>", html.EscapeString(invoice.PlaceOfSupply)))
 	}
+	if label := formatPaymentSplitsLabel(invoice.PaymentSplits, invoice.PaymentMode); label != "" {
+		cells = append(cells, fmt.Sprintf("<div>Payment: %s</div>", html.EscapeString(label)))
+	}
 	if len(cells) == 0 {
 		return ""
 	}

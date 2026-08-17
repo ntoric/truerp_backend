@@ -160,6 +160,13 @@ type Business struct {
 	DeletedAt           gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
+// PaymentSplit is one tender on a sales invoice (cash, UPI, card, …).
+// It is not stored as its own table; linked Payment rows are the source of truth.
+type PaymentSplit struct {
+	Mode   string  `json:"mode"`
+	Amount float64 `json:"amount"`
+}
+
 type Invoice struct {
 	ID                    uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID                uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index;uniqueIndex:idx_invoice_user_client_sale"`
@@ -186,6 +193,7 @@ type Invoice struct {
 	LoyaltyDiscount       float64        `json:"loyalty_discount" gorm:"default:0"`
 	PaymentMode           string         `json:"payment_mode"`
 	BankAccountID         *uuid.UUID     `json:"bank_account_id,omitempty" gorm:"type:uuid;index"`
+	PaymentSplits         []PaymentSplit `json:"payment_splits,omitempty" gorm:"-"`
 	Notes                 string         `json:"notes"`
 	Terms                 string         `json:"terms"`
 	IsInterState          bool           `json:"is_inter_state" gorm:"default:false"`

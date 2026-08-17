@@ -70,4 +70,35 @@ func TestInvoiceCashLedgerNeedsResync(t *testing.T) {
 			t.Fatal("expected resync when invoice date changes")
 		}
 	})
+
+	t.Run("split methods changed", func(t *testing.T) {
+		current := base
+		current.PaymentSplits = []models.PaymentSplit{
+			{Mode: "cash", Amount: 50},
+			{Mode: "upi", Amount: 50},
+		}
+		if !invoiceCashLedgerNeedsResync(&base, &current) {
+			t.Fatal("expected resync when payment splits change")
+		}
+	})
+}
+
+func TestParsePaymentNumberSequence(t *testing.T) {
+	tests := []struct {
+		number string
+		prefix string
+		want   int64
+	}{
+		{number: "PIN-0001", prefix: "PIN", want: 1},
+		{number: "PIN-0042", prefix: "PIN", want: 42},
+		{number: "pin-7", prefix: "PIN", want: 7},
+		{number: "PIN-ABC", prefix: "PIN", want: 0},
+		{number: "POUT-0001", prefix: "PIN", want: 0},
+		{number: "", prefix: "PIN", want: 0},
+	}
+	for _, tt := range tests {
+		if got := parsePaymentNumberSequence(tt.number, tt.prefix); got != tt.want {
+			t.Errorf("parsePaymentNumberSequence(%q, %q) = %d, want %d", tt.number, tt.prefix, got, tt.want)
+		}
+	}
 }

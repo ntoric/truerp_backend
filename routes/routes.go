@@ -118,6 +118,7 @@ func SetupRoutes(r *gin.Engine) {
 	payments.Use(middleware.AuthRequired())
 	{
 		payments.GET("", controllers.GetPayments)
+		payments.GET("/next-number", controllers.GetNextPaymentInNumber)
 		payments.POST("", controllers.CreatePayment)
 		payments.DELETE("/:id", controllers.DeletePayment)
 		payments.GET("/:id/pdf", controllers.GenerateReceiptPDF)
