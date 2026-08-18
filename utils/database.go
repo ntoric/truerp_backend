@@ -211,6 +211,7 @@ func runRawMigrations(db *gorm.DB) {
 	reclassifyExpenseCategoryGLAccounts(db)
 	backfillExpenseCategories(db)
 	SeedDefaultCategoriesForAllUsers(db)
+	SeedDefaultVendorsForAllUsers(db)
 	migrateWarehouseCodeUnique(db)
 	backfillProductGstEnabled(db)
 	BackfillProductPLUs(db)

@@ -324,6 +324,7 @@ func SetupRoutes(r *gin.Engine) {
 		purchase.GET("/bills/:id/download-pdf", controllers.DownloadPurchaseBillPDF)
 		purchase.PUT("/bills/:id", controllers.UpdatePurchaseBill)
 		purchase.DELETE("/bills/:id", controllers.DeletePurchaseBill)
+		purchase.GET("/bills/vendor/:vendorId/recent-products", controllers.GetVendorRecentProducts)
 		purchase.POST("/bills/labels", controllers.PrintPurchaseBillLabels)
 		purchase.POST("/parse-bill-ai", controllers.ParseBillWithAI)
 	}

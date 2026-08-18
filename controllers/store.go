@@ -83,6 +83,9 @@ func createStoreOwnerUser(tx *gorm.DB, storeName string) (models.User, error) {
 	if err := utils.EnsureDefaultCategories(tx, owner.ID); err != nil {
 		return models.User{}, err
 	}
+	if err := utils.EnsureDefaultVendor(tx, owner.ID); err != nil {
+		return models.User{}, err
+	}
 	return owner, nil
 }
 
@@ -472,7 +475,7 @@ func parseStoreResetScopes(c *gin.Context) (storeResetScopes, error) {
 
 // ResetStore wipes selected operational data for a store (scoped to OwnerUserID) while
 // preserving the store record, users, roles, and business profile. Defaults
-// (chart of accounts, categories) are re-seeded when those scopes are reset.
+// (chart of accounts, categories, default vendor) are re-seeded when those scopes are reset.
 func ResetStore(c *gin.Context) {
 	actor, err := loadActor(c)
 	if err != nil {
@@ -520,6 +523,11 @@ func ResetStore(c *gin.Context) {
 		}
 		if scopes.has("products") {
 			if err := utils.EnsureDefaultCategories(tx, ownerID); err != nil {
+				return err
+			}
+		}
+		if scopes.has("parties") {
+			if err := utils.EnsureDefaultVendor(tx, ownerID); err != nil {
 				return err
 			}
 		}

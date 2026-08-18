@@ -1,10 +1,10 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -17,6 +17,10 @@ func GetParties(c *gin.Context) {
 	partyType := c.Query("party_type")
 
 	fmt.Printf("[DEBUG] GetParties - UserID: %s, Search: %s, Category: %s, PartyType: %s\n", userID, search, category, partyType)
+
+	if partyType == "" || partyType == "vendor" {
+		_ = utils.EnsureDefaultVendor(utils.DB, userID)
+	}
 
 	var parties []models.Party
 	query := utils.DB.Where("user_id = ?", userID)
@@ -192,22 +196,22 @@ func UpdateParty(c *gin.Context) {
 	}
 
 	updates := map[string]interface{}{
-		"name":           input.Name,
-		"phone":          input.Phone,
-		"email":          input.Email,
-		"gstin":          input.GSTIN,
-		"address":        input.Address,
-		"city":           input.City,
-		"state":          input.State,
-		"pincode":        input.Pincode,
-		"state_code":     input.StateCode,
-		"category":       input.Category,
-		"party_type":     input.PartyType,
-		"credit_limit":   input.CreditLimit,
-		"tan":            input.TAN,
-		"pan":            input.PAN,
-		"notes":          input.Notes,
-		"is_active":      input.IsActive,
+		"name":         input.Name,
+		"phone":        input.Phone,
+		"email":        input.Email,
+		"gstin":        input.GSTIN,
+		"address":      input.Address,
+		"city":         input.City,
+		"state":        input.State,
+		"pincode":      input.Pincode,
+		"state_code":   input.StateCode,
+		"category":     input.Category,
+		"party_type":   input.PartyType,
+		"credit_limit": input.CreditLimit,
+		"tan":          input.TAN,
+		"pan":          input.PAN,
+		"notes":        input.Notes,
+		"is_active":    input.IsActive,
 	}
 
 	if err := utils.DB.Model(&party).Updates(updates).Error; err != nil {

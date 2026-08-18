@@ -636,6 +636,8 @@ type PurchaseBillItem struct {
 	BatchNo     string     `json:"batch_no"`
 	MfgDate     *time.Time `json:"mfg_date,omitempty"`
 	ExpDate     *time.Time `json:"exp_date,omitempty"`
+	IsNewItem   bool       `json:"is_new_item" gorm:"default:false"`
+	Category    string     `json:"category"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 }

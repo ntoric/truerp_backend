@@ -149,7 +149,7 @@ func ForgotPassword(c *gin.Context) {
 	expiresAt := time.Now().Add(passwordResetOTPTTL)
 	otpHash := hashPasswordResetToken(otp)
 	if updateErr := utils.DB.Model(&user).Updates(map[string]interface{}{
-		"password_reset_token_hash":  otpHash,
+		"password_reset_token_hash": otpHash,
 		"password_reset_expires_at": expiresAt,
 	}).Error; updateErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save verification code"})
@@ -267,9 +267,9 @@ func ResetPassword(c *gin.Context) {
 	}
 
 	if err := utils.DB.Model(&user).Updates(map[string]interface{}{
-		"password":                    string(hashedPassword),
-		"password_reset_token_hash":   "",
-		"password_reset_expires_at":   nil,
+		"password":                  string(hashedPassword),
+		"password_reset_token_hash": "",
+		"password_reset_expires_at": nil,
 	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update password"})
 		return
@@ -360,6 +360,9 @@ func Register(c *gin.Context) {
 		}
 		utils.EnsureDefaultRoles(tx, user.ID)
 		if err := utils.EnsureDefaultCategories(tx, user.ID); err != nil {
+			return err
+		}
+		if err := utils.EnsureDefaultVendor(tx, user.ID); err != nil {
 			return err
 		}
 
@@ -652,8 +655,8 @@ func SetPassword(c *gin.Context) {
 	}
 
 	if err := utils.DB.Model(&user).Updates(map[string]interface{}{
-		"password":               string(hashedPassword),
-		"must_change_password":   false,
+		"password":                  string(hashedPassword),
+		"must_change_password":      false,
 		"password_reset_token_hash": "",
 		"password_reset_expires_at": nil,
 	}).Error; err != nil {

@@ -392,6 +392,43 @@ func resolveSaleWarehouseID(userID, productID uuid.UUID) uuid.UUID {
 	return resolveDefaultWarehouseID(userID)
 }
 
+// ensureProductForAdhocItem auto-creates a Product when a PurchaseBillItem has
+// no product_id but has a non-empty description. The new product_id is written
+// back to the bill item row in the database so stock entries and the Products
+// page stay in sync.
+func ensureProductForAdhocItem(userID uuid.UUID, item *models.PurchaseBillItem) error {
+	if item.ProductID != nil {
+		return nil
+	}
+	desc := strings.TrimSpace(item.Description)
+	if desc == "" {
+		return nil
+	}
+
+	product := models.Product{
+		ID:        uuid.New(),
+		UserID:    userID,
+		Name:      desc,
+		Unit:      item.Unit,
+		HSNCode:   item.HSNCode,
+		TaxRate:   item.TaxRate,
+		ItemCode:  item.ItemCode,
+		IsActive:  true,
+	}
+	if product.Unit == "" {
+		product.Unit = "PCS"
+	}
+	if err := utils.AssignProductPLU(userID, &product); err != nil {
+		return err
+	}
+	if err := utils.DB.Create(&product).Error; err != nil {
+		return err
+	}
+
+	item.ProductID = &product.ID
+	return utils.DB.Model(item).Update("product_id", product.ID).Error
+}
+
 func createPendingPurchaseStockEntries(userID uuid.UUID, bill *models.PurchaseBill) error {
 	if bill == nil || bill.Status == "draft" {
 		bill.StockStatus = "none"
@@ -412,6 +449,13 @@ func createPendingPurchaseStockEntries(userID uuid.UUID, bill *models.PurchaseBi
 	if warehouseID == uuid.Nil {
 		bill.StockStatus = "none"
 		return utils.DB.Model(bill).Update("stock_status", "none").Error
+	}
+
+	// Auto-create products for ad-hoc line items that have no product_id.
+	for i := range bill.Items {
+		if err := ensureProductForAdhocItem(userID, &bill.Items[i]); err != nil {
+			return fmt.Errorf("failed to auto-create product for '%s': %w", bill.Items[i].Description, err)
+		}
 	}
 
 	now := time.Now()

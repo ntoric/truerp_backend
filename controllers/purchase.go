@@ -406,6 +406,8 @@ func CreatePurchaseBill(c *gin.Context) {
 			BatchNo     string               `json:"batch_no"`
 			MfgDate     *models.FlexibleTime `json:"mfg_date"`
 			ExpDate     *models.FlexibleTime `json:"exp_date"`
+			IsNewItem   bool                 `json:"is_new_item"`
+			Category    string               `json:"category"`
 		} `json:"items" binding:"required,min=1"`
 	}
 
@@ -520,6 +522,8 @@ func CreatePurchaseBill(c *gin.Context) {
 			BatchNo:     item.BatchNo,
 			MfgDate:     item.MfgDate.Ptr(),
 			ExpDate:     item.ExpDate.Ptr(),
+			IsNewItem:   item.IsNewItem,
+			Category:    item.Category,
 		})
 
 		subTotal += itemTotal
@@ -611,6 +615,8 @@ func UpdatePurchaseBill(c *gin.Context) {
 			BatchNo     string               `json:"batch_no"`
 			MfgDate     *models.FlexibleTime `json:"mfg_date"`
 			ExpDate     *models.FlexibleTime `json:"exp_date"`
+			IsNewItem   bool                 `json:"is_new_item"`
+			Category    string               `json:"category"`
 		} `json:"items"`
 	}
 
@@ -760,6 +766,8 @@ func UpdatePurchaseBill(c *gin.Context) {
 			BatchNo:     item.BatchNo,
 			MfgDate:     item.MfgDate.Ptr(),
 			ExpDate:     item.ExpDate.Ptr(),
+			IsNewItem:   item.IsNewItem,
+			Category:    item.Category,
 		})
 
 		subTotal += itemTotal
@@ -1823,4 +1831,105 @@ Return ONLY the JSON, nothing else.`
 		"status": "success",
 		"data":   aiResponse.Data,
 	})
+}
+
+func GetVendorRecentProducts(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	vendorID := c.Param("vendorId")
+
+	if vendorID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "vendorId is required"})
+		return
+	}
+
+	limit := 15
+
+	type itemRow struct {
+		ProductID   *uuid.UUID `json:"product_id"`
+		Description string     `json:"description"`
+		ItemCode    string     `json:"item_code"`
+		HSNCode     string     `json:"hsn_code"`
+		Unit        string     `json:"unit"`
+		UnitPrice   float64    `json:"unit_price"`
+		Quantity    float64    `json:"quantity"`
+		TaxRate     float64    `json:"tax_rate"`
+		Discount    float64    `json:"discount"`
+		MRP         float64    `json:"mrp"`
+		SalePrice   float64    `json:"sale_price"`
+		BillDate    time.Time  `json:"bill_date"`
+	}
+
+	var rows []itemRow
+	err := utils.DB.Table("purchase_bill_items AS pbi").
+		Select("pbi.product_id, pbi.description, pbi.item_code, pbi.hsn_code, pbi.unit, pbi.unit_price, pbi.quantity, pbi.tax_rate, pbi.discount, pbi.mrp, pbi.sale_price, pb.bill_date").
+		Joins("JOIN purchase_bills pb ON pb.id = pbi.bill_id").
+		Where("pb.user_id = ? AND pb.party_id = ?", userID, vendorID).
+		Where("pbi.product_id IS NOT NULL OR pbi.description != ''").
+		Order("pb.bill_date DESC, pbi.created_at DESC").
+		Scan(&rows).Error
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch recent products"})
+		return
+	}
+
+	type RecentProduct struct {
+		ProductID   string  `json:"product_id"`
+		Description string  `json:"description"`
+		ItemCode    string  `json:"item_code"`
+		HSNCode     string  `json:"hsn_code"`
+		Unit        string  `json:"unit"`
+		UnitPrice   float64 `json:"unit_price"`
+		Quantity    float64 `json:"quantity"`
+		TaxRate     float64 `json:"tax_rate"`
+		Discount    float64 `json:"discount"`
+		MRP         float64 `json:"mrp"`
+		SalePrice   float64 `json:"sale_price"`
+		Frequency   int     `json:"frequency"`
+		LastDate    string  `json:"last_date"`
+	}
+
+	seen := make(map[string]int)
+	var results []RecentProduct
+
+	for _, row := range rows {
+		key := ""
+		if row.ProductID != nil {
+			key = row.ProductID.String()
+		} else {
+			key = "desc:" + row.Description
+		}
+
+		if idx, ok := seen[key]; ok {
+			results[idx].Frequency++
+			continue
+		}
+
+		seen[key] = len(results)
+		productID := ""
+		if row.ProductID != nil {
+			productID = row.ProductID.String()
+		}
+		results = append(results, RecentProduct{
+			ProductID:   productID,
+			Description: row.Description,
+			ItemCode:    row.ItemCode,
+			HSNCode:     row.HSNCode,
+			Unit:        row.Unit,
+			UnitPrice:   row.UnitPrice,
+			Quantity:    row.Quantity,
+			TaxRate:     row.TaxRate,
+			Discount:    row.Discount,
+			MRP:         row.MRP,
+			SalePrice:   row.SalePrice,
+			Frequency:   1,
+			LastDate:    row.BillDate.Format("2006-01-02"),
+		})
+
+		if len(results) >= limit {
+			break
+		}
+	}
+
+	c.JSON(http.StatusOK, results)
 }

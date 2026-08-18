@@ -893,7 +893,7 @@ func prepareExpenseData(expense models.Expense, business models.Business, printS
 
 	partyInfo := "Vendor: " + truncateString(expense.Vendor, cols-8)
 	if expense.PaymentMode != "" {
-		partyInfo += "\n" + formatLabelValue("Payment", expense.PaymentMode, cols)
+		partyInfo += "\n" + formatLabelValue("Payment", paymentMethodLabel(expense.PaymentMode), cols)
 	}
 
 	items := make([]ItemTemplateData, len(expense.Items))
