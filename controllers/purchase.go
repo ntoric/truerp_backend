@@ -631,7 +631,8 @@ func UpdatePurchaseBill(c *gin.Context) {
 
 	// Status-only "mark as paid" from the list page (no items / totals in body).
 	if input.Status == "paid" && len(input.Items) == 0 && input.TotalAmount == 0 && bill.TotalAmount > 0 {
-		previousPaidAmount := bill.PaidAmount
+		previousBillNumber := bill.BillNumber
+		previousPartyID := bill.PartyID
 		bill.Status = "paid"
 		bill.PaidAmount = bill.TotalAmount
 		bill.BalanceDue = 0
@@ -643,9 +644,19 @@ func UpdatePurchaseBill(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update bill"})
 			return
 		}
-		if paymentDelta := bill.PaidAmount - previousPaidAmount; paymentDelta > 0 {
+		// Reverse existing linked payment outs, then create a single fresh one.
+		reversalBill := models.PurchaseBill{
+			ID:         bill.ID,
+			PartyID:    previousPartyID,
+			BillNumber: previousBillNumber,
+		}
+		if err := reverseLinkedPurchasePaymentOuts(utils.DB, userID, &reversalBill); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to reverse existing payment outs"})
+			return
+		}
+		if bill.PaidAmount > 0 {
 			notes := fmt.Sprintf("Auto-created from purchase bill %s (mark paid)", bill.BillNumber)
-			if err := createLinkedPurchasePaymentOut(utils.DB, userID, &bill, paymentDelta, bill.BillDate, notes); err != nil {
+			if err := createLinkedPurchasePaymentOut(utils.DB, userID, &bill, bill.PaidAmount, bill.BillDate, notes); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to create payment out"})
 				return
 			}
@@ -665,7 +676,8 @@ func UpdatePurchaseBill(c *gin.Context) {
 		return
 	}
 
-	previousPaidAmount := bill.PaidAmount
+	previousBillNumber := bill.BillNumber
+	previousPartyID := bill.PartyID
 
 	warehouseID := input.WarehouseID
 	if warehouseID == nil || *warehouseID == uuid.Nil {
@@ -768,9 +780,20 @@ func UpdatePurchaseBill(c *gin.Context) {
 		return
 	}
 
-	if paymentDelta := bill.PaidAmount - previousPaidAmount; paymentDelta > 0 {
+	// Reverse all existing linked payment outs using the previous bill state,
+	// then create a single fresh payment out for the new paid amount (if > 0).
+	reversalBill := models.PurchaseBill{
+		ID:         bill.ID,
+		PartyID:    previousPartyID,
+		BillNumber: previousBillNumber,
+	}
+	if err := reverseLinkedPurchasePaymentOuts(utils.DB, userID, &reversalBill); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to reverse existing payment outs"})
+		return
+	}
+	if bill.PaidAmount > 0 {
 		notes := fmt.Sprintf("Auto-created from purchase bill %s (payment update)", bill.BillNumber)
-		if err := createLinkedPurchasePaymentOut(utils.DB, userID, &bill, paymentDelta, bill.BillDate, notes); err != nil {
+		if err := createLinkedPurchasePaymentOut(utils.DB, userID, &bill, bill.PaidAmount, bill.BillDate, notes); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to create payment out"})
 			return
 		}

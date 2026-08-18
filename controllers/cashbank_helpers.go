@@ -533,6 +533,73 @@ func createLinkedPurchasePaymentOut(tx *gorm.DB, userID uuid.UUID, bill *models.
 	return nil
 }
 
+// reverseCashReduceTransaction restores cash/bank for a linked "reduce" cash
+// transaction (used by purchase payment outs) and removes the transaction.
+func reverseCashReduceTransaction(tx *gorm.DB, userID uuid.UUID, txn models.CashTransaction) error {
+	if err := adjustBankAccountBalance(tx, userID, txn.AccountID, txn.Amount, false); err != nil {
+		return err
+	}
+	if err := reverseAccountingByRef(tx, userID, "payment_out", txn.ID); err != nil {
+		return err
+	}
+	return tx.Delete(&txn).Error
+}
+
+// reverseLinkedPurchasePaymentOuts removes PaymentOut rows created for a
+// purchase bill and restores cash/bank balances plus linked GL postings.
+// The bill should carry the *previous* party ID and bill number so that
+// cash transactions and party balance are reversed correctly.
+func reverseLinkedPurchasePaymentOuts(tx *gorm.DB, userID uuid.UUID, bill *models.PurchaseBill) error {
+	if bill == nil {
+		return nil
+	}
+
+	var paymentOuts []models.PaymentOut
+	if err := tx.Where("user_id = ? AND purchase_bill_id = ?", userID, bill.ID).Find(&paymentOuts).Error; err != nil {
+		return err
+	}
+	totalPaid := 0.0
+	for _, po := range paymentOuts {
+		totalPaid += po.AmountPaid
+	}
+
+	// Find and reverse linked cash/bank transactions (reference = bill number, type = reduce).
+	billNumber := strings.TrimSpace(bill.BillNumber)
+	if billNumber != "" {
+		var txns []models.CashTransaction
+		if err := tx.Where(
+			"user_id = ? AND transaction_type = ? AND reference = ? AND is_linked = ?",
+			userID, "reduce", billNumber, true,
+		).Order("created_at ASC").Find(&txns).Error; err != nil {
+			return err
+		}
+		for _, txn := range txns {
+			if err := reverseCashReduceTransaction(tx, userID, txn); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Reverse accounting and delete payment out records.
+	for _, po := range paymentOuts {
+		if err := reverseAccountingByRef(tx, userID, "payment_out_record", po.ID); err != nil {
+			return err
+		}
+		if err := tx.Delete(&po).Error; err != nil {
+			return err
+		}
+	}
+
+	// Restore party balance (we had increased it by totalPaid when creating payment outs).
+	if totalPaid > 0 {
+		if err := adjustPartyBalance(tx, userID, bill.PartyID, -totalPaid); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // recordExpenseCashOut deducts an expense from a bank account or cash in-hand.
 func recordExpenseCashOut(tx *gorm.DB, userID uuid.UUID, accountID *uuid.UUID, amount float64, date time.Time, reference, description string) error {
 	if amount <= 0 {
