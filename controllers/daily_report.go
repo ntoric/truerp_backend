@@ -185,6 +185,7 @@ func loadReportForRange(userID uuid.UUID, startDate, endDate string) (models.Dai
 	aggregate(&models.PurchaseReturn{}, "date", "amount", "status != 'cancelled'", &report.PurchaseReturns)
 
 	report.PaymentsByMethod = loadPaymentsByMethod(userID, startDate, endDate)
+	report.ExpenseLines = loadExpenseLines(userID, startDate, endDate)
 
 	utils.DB.Model(&models.PurchaseBill{}).
 		Where("user_id = ? AND DATE(bill_date) >= ? AND DATE(bill_date) <= ? AND total_amount > paid_amount", userID, startDate, endDate).
@@ -320,6 +321,57 @@ func loadDailyReport(userID uuid.UUID, date string) (models.DailyReport, error) 
 	return loadReportForRange(userID, date, date)
 }
 
+// loadExpenseLines returns one row per expense item dated in [startDate, endDate],
+// newest first, for the per-expense breakdown in the daily/periodic report.
+// Expenses with no items emit a single row using the expense's own description
+// and amount, so simple expenses still appear in the breakdown.
+func loadExpenseLines(userID uuid.UUID, startDate, endDate string) []models.ExpenseLine {
+	var expenses []models.Expense
+	if err := utils.DB.
+		Where("user_id = ? AND DATE(date) >= ? AND DATE(date) <= ?", userID, startDate, endDate).
+		Preload("Items").
+		Order("date DESC, created_at DESC").
+		Find(&expenses).Error; err != nil {
+		return nil
+	}
+
+	lines := make([]models.ExpenseLine, 0, len(expenses))
+	for _, e := range expenses {
+		base := models.ExpenseLine{
+			ID:            e.ID,
+			ExpenseNumber: e.ExpenseNumber,
+			Category:      e.Category,
+			Description:   e.Description,
+			Vendor:        e.Vendor,
+			PaymentMode:   e.PaymentMode,
+			Date:          e.Date.Format("2006-01-02"),
+			WithGST:       e.WithGST,
+			TaxTotal:      e.TaxTotal,
+			SubTotal:      e.SubTotal,
+		}
+		if len(e.Items) == 0 {
+			row := base
+			row.ItemDescription = e.Description
+			row.Quantity = 1
+			row.UnitPrice = e.Amount
+			row.Amount = e.Amount
+			lines = append(lines, row)
+			continue
+		}
+		for _, item := range e.Items {
+			row := base
+			itemID := item.ID
+			row.ItemID = &itemID
+			row.ItemDescription = item.Description
+			row.Quantity = item.Quantity
+			row.UnitPrice = item.UnitPrice
+			row.Amount = item.Total
+			lines = append(lines, row)
+		}
+	}
+	return lines
+}
+
 func loadPeriodReport(userID uuid.UUID, period, anchorDate, startDate, endDate string) (models.PeriodReport, error) {
 	start, end, label, err := resolvePeriodRange(period, anchorDate, startDate, endDate)
 	if err != nil {
@@ -441,6 +493,55 @@ func writePeriodReportCSV(c *gin.Context, report models.PeriodReport, filename s
 		fmt.Sprintf("%d", report.PaymentsOut.Count),
 		fmt.Sprintf("%.2f", report.PaymentsOut.TotalAmount),
 	})
+
+	if len(report.ExpenseLines) > 0 {
+		_ = writer.Write([]string{""})
+		_ = writer.Write([]string{"Expenses (one row per item)"})
+		_ = writer.Write([]string{"Number", "Date", "Category", "Vendor", "Payment mode", "Item", "Qty", "Unit price (INR)", "Amount (INR)"})
+		for _, line := range report.ExpenseLines {
+			mode := line.PaymentMode
+			if mode == "" {
+				mode = "-"
+			}
+			vendor := line.Vendor
+			if vendor == "" {
+				vendor = "-"
+			}
+			category := line.Category
+			if category == "" {
+				category = "-"
+			}
+			itemDesc := line.ItemDescription
+			if itemDesc == "" {
+				itemDesc = line.Description
+				if itemDesc == "" {
+					itemDesc = "-"
+				}
+			}
+			_ = writer.Write([]string{
+				line.ExpenseNumber,
+				line.Date,
+				category,
+				vendor,
+				mode,
+				itemDesc,
+				fmt.Sprintf("%g", line.Quantity),
+				fmt.Sprintf("%.2f", line.UnitPrice),
+				fmt.Sprintf("%.2f", line.Amount),
+			})
+		}
+		_ = writer.Write([]string{
+			"Total",
+			"",
+			"",
+			"",
+			"",
+			"",
+			"",
+			"",
+			fmt.Sprintf("%.2f", report.Expenses.TotalAmount),
+		})
+	}
 }
 
 func ExportDailyReportCSV(c *gin.Context) {
@@ -593,6 +694,88 @@ func writePaymentsByMethodPDF(pdf *fpdf.Fpdf, report models.PeriodReport) {
 	pdf.CellFormat(colInAmt, 7, fmt.Sprintf("%.2f", report.PaymentsIn.TotalAmount), "1", 0, "R", true, 0, "")
 	pdf.CellFormat(colOutCount, 7, fmt.Sprintf("%d", report.PaymentsOut.Count), "1", 0, "R", true, 0, "")
 	pdf.CellFormat(colOutAmt, 7, fmt.Sprintf("%.2f", report.PaymentsOut.TotalAmount), "1", 1, "R", true, 0, "")
+}
+
+// writeExpenseLinesPDF renders a per-expense-item breakdown table when the
+// report contains any expenses dated in the period. Each expense item is
+// shown on its own row; expenses with no items show one row.
+func writeExpenseLinesPDF(pdf *fpdf.Fpdf, report models.PeriodReport) {
+	lines := report.ExpenseLines
+	if len(lines) == 0 {
+		return
+	}
+
+	pdf.Ln(8)
+	pdf.SetFont("Arial", "B", 11)
+	pdf.SetTextColor(37, 99, 235)
+	pdf.CellFormat(0, 7, "EXPENSES", "", 1, "L", false, 0, "")
+	pdf.SetFont("Arial", "", 8)
+	pdf.SetTextColor(100, 100, 100)
+	pdf.CellFormat(0, 5, "Each expense item recorded in this period.", "", 1, "L", false, 0, "")
+	pdf.Ln(2)
+
+	pageW, _ := pdf.GetPageSize()
+	leftM, _, rightM, _ := pdf.GetMargins()
+	usable := pageW - leftM - rightM
+	colNum := usable * 0.14
+	colDate := usable * 0.12
+	colCategory := usable * 0.18
+	colItem := usable * 0.42
+	colAmount := usable * 0.14
+
+	pdf.SetFillColor(254, 243, 199)
+	pdf.SetDrawColor(253, 230, 138)
+	pdf.SetFont("Arial", "B", 8)
+	pdf.SetTextColor(120, 53, 15)
+	pdf.CellFormat(colNum, 8, "No.", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colDate, 8, "Date", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colCategory, 8, "Category", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colItem, 8, "Item", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colAmount, 8, "Amount (INR)", "1", 1, "R", true, 0, "")
+
+	// Group rows by expense so the expense number/category/vendor are shown
+	// once as a header, then each item beneath it.
+	expenseCount := 0
+	seenExpense := make(map[string]bool, len(lines))
+	for _, line := range lines {
+		if !seenExpense[line.ExpenseNumber] {
+			seenExpense[line.ExpenseNumber] = true
+			expenseCount++
+		}
+	}
+
+	for _, line := range lines {
+		pdf.SetFillColor(254, 249, 235)
+		pdf.SetFont("Arial", "", 8)
+		pdf.SetTextColor(40, 40, 40)
+
+		category := line.Category
+		if category == "" {
+			category = "-"
+		}
+		itemDesc := line.ItemDescription
+		if itemDesc == "" {
+			itemDesc = line.Description
+			if itemDesc == "" {
+				itemDesc = "-"
+			}
+		}
+
+		pdf.CellFormat(colNum, 6.5, sanitizePDFText(line.ExpenseNumber), "1", 0, "L", true, 0, "")
+		pdf.CellFormat(colDate, 6.5, line.Date, "1", 0, "L", true, 0, "")
+		pdf.CellFormat(colCategory, 6.5, sanitizePDFText(truncatePDF(category, 24)), "1", 0, "L", true, 0, "")
+		pdf.CellFormat(colItem, 6.5, sanitizePDFText(truncatePDF(itemDesc, 60)), "1", 0, "L", true, 0, "")
+		pdf.SetFont("Arial", "B", 9)
+		pdf.SetTextColor(154, 52, 18)
+		pdf.CellFormat(colAmount, 6.5, fmt.Sprintf("%.2f", line.Amount), "1", 1, "R", true, 0, "")
+	}
+
+	pdf.SetFillColor(254, 243, 199)
+	pdf.SetFont("Arial", "B", 9)
+	pdf.SetTextColor(120, 53, 15)
+	pdf.CellFormat(colNum+colDate+colCategory+colItem, 7,
+		fmt.Sprintf("Total (%d expenses, %d items)", expenseCount, len(lines)), "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colAmount, 7, fmt.Sprintf("%.2f", report.Expenses.TotalAmount), "1", 1, "R", true, 0, "")
 }
 
 func buildDailyReportPDF(report models.DailyReport) ([]byte, error) {
@@ -783,6 +966,8 @@ func buildPeriodReportPDF(report models.PeriodReport) ([]byte, error) {
 	pdf.CellFormat(colAmount, 7, fmt.Sprintf("%.2f", report.NetCashFlow), "1", 1, "R", true, 0, "")
 
 	writePaymentsByMethodPDF(pdf, report)
+
+	writeExpenseLinesPDF(pdf, report)
 
 	pdf.Ln(8)
 	pdf.SetFont("Arial", "I", 8)

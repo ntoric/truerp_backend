@@ -344,6 +344,27 @@ type PaymentMethodTotal struct {
 	Out    DailyReportMetric `json:"out"`
 }
 
+// ExpenseLine is a single line shown in the daily/periodic report expense
+// breakdown. One row is emitted per expense item; expenses with no items
+// emit a single row using the expense's own description and amount.
+type ExpenseLine struct {
+	ID              uuid.UUID  `json:"id"`
+	ItemID          *uuid.UUID `json:"item_id,omitempty"`
+	ExpenseNumber   string     `json:"expense_number"`
+	Category        string     `json:"category"`
+	Description     string     `json:"description"`
+	ItemDescription string     `json:"item_description"`
+	Vendor          string     `json:"vendor"`
+	Quantity        float64    `json:"quantity"`
+	UnitPrice       float64    `json:"unit_price"`
+	Amount          float64    `json:"amount"`
+	PaymentMode     string     `json:"payment_mode"`
+	Date            string     `json:"date"`
+	WithGST         bool       `json:"with_gst"`
+	TaxTotal        float64    `json:"tax_total"`
+	SubTotal        float64    `json:"sub_total"`
+}
+
 type DailyReport struct {
 	Date            string            `json:"date"`
 	BusinessName    string            `json:"business_name"`
@@ -356,6 +377,9 @@ type DailyReport struct {
 	PaymentsOut     DailyReportMetric `json:"payments_out"`
 	SalesReturns    DailyReportMetric `json:"sales_returns"`
 	PurchaseReturns DailyReportMetric `json:"purchase_returns"`
+	// ExpenseLines lists each individual expense dated in this period, for the
+	// per-expense breakdown table. Empty when no expenses exist for the range.
+	ExpenseLines []ExpenseLine `json:"expense_lines"`
 	// PaymentsByMethod breaks PaymentsIn / PaymentsOut down by payment mode.
 	PaymentsByMethod []PaymentMethodTotal `json:"payments_by_method"`
 	// AccountsPayable is unpaid balance from purchase bills dated this day
