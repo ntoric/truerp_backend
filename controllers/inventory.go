@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tealeg/xlsx/v3"
+	"gorm.io/gorm"
 )
 
 type StockBalance struct {
@@ -393,10 +394,18 @@ func resolveSaleWarehouseID(userID, productID uuid.UUID) uuid.UUID {
 }
 
 // ensureProductForAdhocItem auto-creates a Product when a PurchaseBillItem has
-// no product_id but has a non-empty description. The new product_id is written
-// back to the bill item row in the database so stock entries and the Products
-// page stay in sync.
-func ensureProductForAdhocItem(userID uuid.UUID, item *models.PurchaseBillItem) error {
+// no product_id but has a non-empty description. When IsNewItem is true the
+// line's category/prices/HSN/batch flags are used to build a full product
+// record (matching what the frontend used to create via POST /products).
+//
+// Idempotency: before creating, it looks up an existing product for the user
+// by item_code. If found, the existing product_id is reused — this prevents
+// duplicate products when a previous save created the product but the
+// response was lost and the client retried.
+//
+// On success the new/existing product_id is written back to the bill item row
+// and is_new_item is cleared so a reload treats the line as a regular product.
+func ensureProductForAdhocItem(tx *gorm.DB, userID uuid.UUID, item *models.PurchaseBillItem) error {
 	if item.ProductID != nil {
 		return nil
 	}
@@ -405,34 +414,87 @@ func ensureProductForAdhocItem(userID uuid.UUID, item *models.PurchaseBillItem) 
 		return nil
 	}
 
-	product := models.Product{
-		ID:        uuid.New(),
-		UserID:    userID,
-		Name:      desc,
-		Unit:      item.Unit,
-		HSNCode:   item.HSNCode,
-		TaxRate:   item.TaxRate,
-		ItemCode:  item.ItemCode,
-		IsActive:  true,
+	// Dedup by item_code (natural key per user) — mirrors the check in
+	// CreateProduct. This catches retries after a lost response even when
+	// client_item_ref is absent (e.g. legacy bills).
+	itemCode := strings.TrimSpace(item.ItemCode)
+	if itemCode != "" {
+		var existing models.Product
+		if err := tx.Where("user_id = ? AND TRIM(item_code) = ?", userID, itemCode).First(&existing).Error; err == nil {
+			item.ProductID = &existing.ID
+			item.IsNewItem = false
+			return tx.Model(item).Updates(map[string]interface{}{
+				"product_id":   existing.ID,
+				"is_new_item":  false,
+			}).Error
+		}
 	}
+
+	product := models.Product{
+		ID:                   uuid.New(),
+		UserID:               userID,
+		Name:                 desc,
+		Unit:                 item.Unit,
+		HSNCode:              item.HSNCode,
+		TaxRate:              item.TaxRate,
+		ItemCode:             item.ItemCode,
+		IsActive:             true,
+		PurchasePrice:        item.UnitPrice,
+		SalePrice:            item.SalePrice,
+		MRP:                  item.MRP,
+		EnableBatching:       item.BatchNo != "",
+		SalePriceWithTax:     true,
+		PurchasePriceWithTax: false,
+	}
+	// Generate a unique SKU — Product.SKU has a uniqueIndex, so leaving it
+	// empty ("") would cause the second new-item product in the same
+	// transaction to fail with a duplicate-key error. Mirrors CreateProduct.
+	product.SKU = utils.GenerateUniqueProductSKU(desc)
+	// GenerateUniqueProductSKU checks the global DB, but within a transaction
+	// a previous product with the same name may not be committed yet. Check
+	// within the tx and append a short suffix if the SKU already exists here.
+	var skuCount int64
+	tx.Model(&models.Product{}).Where("sku = ?", product.SKU).Count(&skuCount)
+	if skuCount > 0 {
+		product.SKU = product.SKU + "-" + uuid.New().String()[:8]
+	}
+	if item.IsNewItem && strings.TrimSpace(item.Category) != "" {
+		product.Category = utils.ResolveCategoryName(item.Category)
+	} else {
+		product.Category = utils.ResolveCategoryName("")
+	}
+	_ = utils.EnsureDefaultCategories(tx, userID)
 	if product.Unit == "" {
 		product.Unit = "PCS"
 	}
 	if err := utils.AssignProductPLU(userID, &product); err != nil {
 		return err
 	}
-	if err := utils.DB.Create(&product).Error; err != nil {
+	if err := tx.Create(&product).Error; err != nil {
 		return err
 	}
 
 	item.ProductID = &product.ID
-	return utils.DB.Model(item).Update("product_id", product.ID).Error
+	item.IsNewItem = false
+	return tx.Model(item).Updates(map[string]interface{}{
+		"product_id":  product.ID,
+		"is_new_item": false,
+	}).Error
 }
 
+// createPendingPurchaseStockEntries is the legacy entry point that runs on the
+// global DB handle. Kept for any callers outside the bill save flow.
 func createPendingPurchaseStockEntries(userID uuid.UUID, bill *models.PurchaseBill) error {
+	return createPendingPurchaseStockEntriesTx(utils.DB, userID, bill)
+}
+
+// createPendingPurchaseStockEntriesTx is the transaction-aware variant used by
+// CreatePurchaseBill / UpdatePurchaseBill so product creation, stock entries,
+// and the bill row all commit or roll back together.
+func createPendingPurchaseStockEntriesTx(tx *gorm.DB, userID uuid.UUID, bill *models.PurchaseBill) error {
 	if bill == nil || bill.Status == "draft" {
 		bill.StockStatus = "none"
-		return utils.DB.Model(bill).Update("stock_status", "none").Error
+		return tx.Model(bill).Update("stock_status", "none").Error
 	}
 
 	warehouseID := uuid.Nil
@@ -443,17 +505,17 @@ func createPendingPurchaseStockEntries(userID uuid.UUID, bill *models.PurchaseBi
 		warehouseID = resolveDefaultWarehouseID(userID)
 		if warehouseID != uuid.Nil {
 			bill.WarehouseID = &warehouseID
-			utils.DB.Model(bill).Update("warehouse_id", warehouseID)
+			tx.Model(bill).Update("warehouse_id", warehouseID)
 		}
 	}
 	if warehouseID == uuid.Nil {
 		bill.StockStatus = "none"
-		return utils.DB.Model(bill).Update("stock_status", "none").Error
+		return tx.Model(bill).Update("stock_status", "none").Error
 	}
 
 	// Auto-create products for ad-hoc line items that have no product_id.
 	for i := range bill.Items {
-		if err := ensureProductForAdhocItem(userID, &bill.Items[i]); err != nil {
+		if err := ensureProductForAdhocItem(tx, userID, &bill.Items[i]); err != nil {
 			return fmt.Errorf("failed to auto-create product for '%s': %w", bill.Items[i].Description, err)
 		}
 	}
@@ -486,10 +548,10 @@ func createPendingPurchaseStockEntries(userID uuid.UUID, bill *models.PurchaseBi
 			ApprovedAt:     &now,
 			EntryDate:      bill.BillDate,
 		}
-		if err := utils.DB.Create(&entry).Error; err != nil {
+		if err := tx.Create(&entry).Error; err != nil {
 			return err
 		}
-		updateInventoryStock(userID, *item.ProductID, warehouseID, "purchase", item.Quantity, item.UnitPrice, item.BatchNo, item.MfgDate, item.ExpDate)
+		updateInventoryStock(userID, *item.ProductID, warehouseID, "purchase", item.Quantity, item.UnitPrice, item.BatchNo, item.MfgDate, item.ExpDate, tx)
 		created++
 	}
 
@@ -498,21 +560,28 @@ func createPendingPurchaseStockEntries(userID uuid.UUID, bill *models.PurchaseBi
 		stockStatus = "approved"
 	}
 	bill.StockStatus = stockStatus
-	return utils.DB.Model(bill).Update("stock_status", stockStatus).Error
+	return tx.Model(bill).Update("stock_status", stockStatus).Error
 }
 
 func removePurchaseStockEntries(userID, billID uuid.UUID) error {
+	return removePurchaseStockEntriesTx(utils.DB, userID, billID)
+}
+
+// removePurchaseStockEntriesTx is the transaction-aware variant used inside
+// the bill save transaction so stock-entry cleanup commits/rolls back with
+// the bill update.
+func removePurchaseStockEntriesTx(tx *gorm.DB, userID, billID uuid.UUID) error {
 	var entries []models.StockEntry
-	if err := utils.DB.Where("user_id = ? AND reference_id = ? AND reference_type = ?", userID, billID, "purchase_bill").Find(&entries).Error; err != nil {
+	if err := tx.Where("user_id = ? AND reference_id = ? AND reference_type = ?", userID, billID, "purchase_bill").Find(&entries).Error; err != nil {
 		return err
 	}
 
 	for _, entry := range entries {
 		if stockEntryIsApproved(entry.ApprovalStatus) && entry.ProductID != nil {
 			// Reverse previously applied stock
-			updateInventoryStock(userID, *entry.ProductID, entry.OutletID, "adjustment", -entry.Quantity, entry.CostPrice, entry.BatchNo, entry.MfgDate, entry.ExpDate)
+			updateInventoryStock(userID, *entry.ProductID, entry.OutletID, "adjustment", -entry.Quantity, entry.CostPrice, entry.BatchNo, entry.MfgDate, entry.ExpDate, tx)
 		}
-		if err := utils.DB.Delete(&entry).Error; err != nil {
+		if err := tx.Delete(&entry).Error; err != nil {
 			return err
 		}
 	}
@@ -704,12 +773,21 @@ func ApproveAllPendingStockEntries(c *gin.Context) {
 	})
 }
 
-func updateInventoryStock(userID, productID, outletID uuid.UUID, entryType string, quantity, costPrice float64, batchNo string, mfgDate, expDate *time.Time) {
+// updateInventoryStock updates the InventoryStock row for a product/batch.
+// The optional tx argument lets callers run the update on the same DB
+// connection as an enclosing transaction — required for SQLite, where a
+// second connection would deadlock waiting for the write lock the
+// transaction already holds. When omitted, the global utils.DB is used.
+func updateInventoryStock(userID, productID, outletID uuid.UUID, entryType string, quantity, costPrice float64, batchNo string, mfgDate, expDate *time.Time, tx ...*gorm.DB) {
+	db := utils.DB
+	if len(tx) > 0 && tx[0] != nil {
+		db = tx[0]
+	}
 	batchNo = strings.TrimSpace(batchNo)
 	fmt.Printf("[DEBUG] updateInventoryStock - UserID: %s, ProductID: %s, OutletID: %s, BatchNo: %q, EntryType: %s, Quantity: %f\n", userID, productID, outletID, batchNo, entryType, quantity)
 
 	var stock models.InventoryStock
-	err := utils.DB.Where(
+	err := db.Where(
 		"user_id = ? AND product_id = ? AND outlet_id = ? AND batch_no = ?",
 		userID, productID, outletID, batchNo,
 	).First(&stock).Error
@@ -767,7 +845,7 @@ func updateInventoryStock(userID, productID, outletID uuid.UUID, entryType strin
 	stock.AvailableQty = stock.Quantity - stock.ReservedQty
 	stock.LastUpdated = time.Now()
 
-	if err := utils.DB.Save(&stock).Error; err != nil {
+	if err := db.Save(&stock).Error; err != nil {
 		fmt.Printf("[DEBUG] updateInventoryStock - DB save error: %v\n", err)
 	} else {
 		fmt.Printf("[DEBUG] updateInventoryStock - Stock updated successfully: Batch=%q Quantity=%f, Available=%f\n", batchNo, stock.Quantity, stock.AvailableQty)

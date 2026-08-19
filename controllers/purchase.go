@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-pdf/fpdf"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 func GetPurchaseOrders(c *gin.Context) {
@@ -391,29 +392,47 @@ func CreatePurchaseBill(c *gin.Context) {
 		Status            string     `json:"status"`
 		Notes             string     `json:"notes"`
 		TaxExempt         bool       `json:"tax_exempt"`
+		ClientBillID      *uuid.UUID `json:"client_bill_id"`
 		Items             []struct {
-			ProductID   *uuid.UUID           `json:"product_id"`
-			ItemCode    string               `json:"item_code"`
-			Description string               `json:"description" binding:"required"`
-			Quantity    models.FlexibleFloat `json:"quantity" binding:"required"`
-			Unit        string               `json:"unit"`
-			UnitPrice   models.FlexibleFloat `json:"unit_price"`
-			Discount    models.FlexibleFloat `json:"discount"`
-			TaxRate     models.FlexibleFloat `json:"tax_rate"`
-			MRP         models.FlexibleFloat `json:"mrp"`
-			SalePrice   models.FlexibleFloat `json:"sale_price"`
-			HSNCode     string               `json:"hsn_code"`
-			BatchNo     string               `json:"batch_no"`
-			MfgDate     *models.FlexibleTime `json:"mfg_date"`
-			ExpDate     *models.FlexibleTime `json:"exp_date"`
-			IsNewItem   bool                 `json:"is_new_item"`
-			Category    string               `json:"category"`
+			ProductID     *uuid.UUID           `json:"product_id"`
+			ItemCode      string               `json:"item_code"`
+			Description   string               `json:"description" binding:"required"`
+			Quantity      models.FlexibleFloat `json:"quantity" binding:"required"`
+			Unit          string               `json:"unit"`
+			UnitPrice     models.FlexibleFloat `json:"unit_price"`
+			Discount      models.FlexibleFloat `json:"discount"`
+			TaxRate       models.FlexibleFloat `json:"tax_rate"`
+			MRP           models.FlexibleFloat `json:"mrp"`
+			SalePrice     models.FlexibleFloat `json:"sale_price"`
+			HSNCode       string               `json:"hsn_code"`
+			BatchNo       string               `json:"batch_no"`
+			MfgDate       *models.FlexibleTime `json:"mfg_date"`
+			ExpDate       *models.FlexibleTime `json:"exp_date"`
+			IsNewItem     bool                 `json:"is_new_item"`
+			Category      string               `json:"category"`
+			ClientItemRef *string              `json:"client_item_ref"`
 		} `json:"items" binding:"required,min=1"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Idempotency: a retry with the same client_bill_id (or Idempotency-Key
+	// header) returns the already-saved bill instead of creating a duplicate.
+	// This guards against network drops after the bill was successfully saved
+	// but before the client received the response.
+	if input.ClientBillID == nil || *input.ClientBillID == uuid.Nil {
+		if headerID := parseOptionalUUID(c.GetHeader("Idempotency-Key")); headerID != uuid.Nil {
+			input.ClientBillID = &headerID
+		}
+	}
+	if input.ClientBillID != nil && *input.ClientBillID != uuid.Nil {
+		if existing, ok := findPurchaseBillByClientBillID(userID, *input.ClientBillID); ok {
+			c.JSON(http.StatusOK, existing)
+			return
+		}
 	}
 
 	status := input.Status
@@ -469,6 +488,7 @@ func CreatePurchaseBill(c *gin.Context) {
 		StockStatus:       "none",
 		Status:            status,
 		TaxExempt:         input.TaxExempt,
+		ClientBillID:      input.ClientBillID,
 		TotalAmount: input.TotalAmount,
 		PaidAmount:  input.PaidAmount,
 		BalanceDue: func() float64 {
@@ -504,26 +524,27 @@ func CreatePurchaseBill(c *gin.Context) {
 		total := taxable + taxAmount
 
 		bill.Items = append(bill.Items, models.PurchaseBillItem{
-			ID:          uuid.New(),
-			BillID:      bill.ID,
-			ProductID:   item.ProductID,
-			ItemCode:    item.ItemCode,
-			Description: item.Description,
-			Quantity:    qty,
-			Unit:        item.Unit,
-			UnitPrice:   unitPrice,
-			Discount:    discount,
-			TaxRate:     taxRate,
-			TaxAmount:   taxAmount,
-			Total:       total,
-			MRP:         item.MRP.Float64(),
-			SalePrice:   item.SalePrice.Float64(),
-			HSNCode:     item.HSNCode,
-			BatchNo:     item.BatchNo,
-			MfgDate:     item.MfgDate.Ptr(),
-			ExpDate:     item.ExpDate.Ptr(),
-			IsNewItem:   item.IsNewItem,
-			Category:    item.Category,
+			ID:            uuid.New(),
+			BillID:        bill.ID,
+			ProductID:     item.ProductID,
+			ItemCode:      item.ItemCode,
+			Description:   item.Description,
+			Quantity:      qty,
+			Unit:          item.Unit,
+			UnitPrice:     unitPrice,
+			Discount:      discount,
+			TaxRate:       taxRate,
+			TaxAmount:     taxAmount,
+			Total:         total,
+			MRP:           item.MRP.Float64(),
+			SalePrice:     item.SalePrice.Float64(),
+			HSNCode:       item.HSNCode,
+			BatchNo:       item.BatchNo,
+			MfgDate:       item.MfgDate.Ptr(),
+			ExpDate:       item.ExpDate.Ptr(),
+			IsNewItem:     item.IsNewItem,
+			Category:      item.Category,
+			ClientItemRef: item.ClientItemRef,
 		})
 
 		subTotal += itemTotal
@@ -533,34 +554,57 @@ func CreatePurchaseBill(c *gin.Context) {
 	bill.SubTotal = subTotal
 	bill.TaxTotal = taxTotal
 
-	if err := utils.DB.Create(&bill).Error; err != nil {
+	// Wrap bill + accounting + payment + stock in a single transaction so a
+	// failure in any step rolls back the whole save (no orphan products or
+	// half-saved bills when the network drops mid-save).
+	if err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&bill).Error; err != nil {
+			return err
+		}
+
+		if bill.Status != "draft" {
+			if err := postPurchaseBillAccounting(tx, userID, &bill); err != nil {
+				return err
+			}
+
+			// Full invoice amount is purchase expense (Dr Purchases / Cr AP).
+			// Paid amount auto-creates Payment Out and reduces AP; unpaid remains Accounts Payable.
+			if bill.PaidAmount > 0 {
+				notes := fmt.Sprintf("Auto-created from purchase bill %s", bill.BillNumber)
+				if err := createLinkedPurchasePaymentOut(tx, userID, &bill, bill.PaidAmount, bill.BillDate, notes); err != nil {
+					return err
+				}
+			}
+		}
+
+		if err := createPendingPurchaseStockEntriesTx(tx, userID, &bill); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create bill"})
 		return
 	}
 
-	if bill.Status != "draft" {
-		if err := postPurchaseBillAccounting(utils.DB, userID, &bill); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill saved but failed to post to accounting"})
-			return
-		}
-
-		// Full invoice amount is purchase expense (Dr Purchases / Cr AP).
-		// Paid amount auto-creates Payment Out and reduces AP; unpaid remains Accounts Payable.
-		if bill.PaidAmount > 0 {
-			notes := fmt.Sprintf("Auto-created from purchase bill %s", bill.BillNumber)
-			if err := createLinkedPurchasePaymentOut(utils.DB, userID, &bill, bill.PaidAmount, bill.BillDate, notes); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill saved but failed to create payment out"})
-				return
-			}
-		}
-	}
-
-	if err := createPendingPurchaseStockEntries(userID, &bill); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill saved but failed to update inventory stock"})
-		return
-	}
-
 	c.JSON(http.StatusCreated, bill)
+}
+
+// findPurchaseBillByClientBillID returns an already-saved bill matching the
+// frontend-supplied client_bill_id, enabling idempotent retries of bill
+// creation. Mirrors findInvoiceByClientSaleID.
+func findPurchaseBillByClientBillID(userID uuid.UUID, clientBillID uuid.UUID) (*models.PurchaseBill, bool) {
+	if clientBillID == uuid.Nil {
+		return nil, false
+	}
+	var bill models.PurchaseBill
+	err := utils.DB.Where("user_id = ? AND client_bill_id = ?", userID, clientBillID).
+		Preload("Party").
+		Preload("Items").
+		First(&bill).Error
+	if err != nil {
+		return nil, false
+	}
+	return &bill, true
 }
 
 func GetPurchaseBill(c *gin.Context) {
@@ -601,22 +645,23 @@ func UpdatePurchaseBill(c *gin.Context) {
 		Notes         string     `json:"notes"`
 		TaxExempt     bool       `json:"tax_exempt"`
 		Items         []struct {
-			ProductID   *uuid.UUID           `json:"product_id"`
-			ItemCode    string               `json:"item_code"`
-			Description string               `json:"description"`
-			Quantity    models.FlexibleFloat `json:"quantity"`
-			Unit        string               `json:"unit"`
-			UnitPrice   models.FlexibleFloat `json:"unit_price"`
-			Discount    models.FlexibleFloat `json:"discount"`
-			TaxRate     models.FlexibleFloat `json:"tax_rate"`
-			MRP         models.FlexibleFloat `json:"mrp"`
-			SalePrice   models.FlexibleFloat `json:"sale_price"`
-			HSNCode     string               `json:"hsn_code"`
-			BatchNo     string               `json:"batch_no"`
-			MfgDate     *models.FlexibleTime `json:"mfg_date"`
-			ExpDate     *models.FlexibleTime `json:"exp_date"`
-			IsNewItem   bool                 `json:"is_new_item"`
-			Category    string               `json:"category"`
+			ProductID     *uuid.UUID           `json:"product_id"`
+			ItemCode      string               `json:"item_code"`
+			Description   string               `json:"description"`
+			Quantity      models.FlexibleFloat `json:"quantity"`
+			Unit          string               `json:"unit"`
+			UnitPrice     models.FlexibleFloat `json:"unit_price"`
+			Discount      models.FlexibleFloat `json:"discount"`
+			TaxRate       models.FlexibleFloat `json:"tax_rate"`
+			MRP           models.FlexibleFloat `json:"mrp"`
+			SalePrice     models.FlexibleFloat `json:"sale_price"`
+			HSNCode       string               `json:"hsn_code"`
+			BatchNo       string               `json:"batch_no"`
+			MfgDate       *models.FlexibleTime `json:"mfg_date"`
+			ExpDate       *models.FlexibleTime `json:"exp_date"`
+			IsNewItem     bool                 `json:"is_new_item"`
+			Category      string               `json:"category"`
+			ClientItemRef *string              `json:"client_item_ref"`
 		} `json:"items"`
 	}
 
@@ -723,6 +768,20 @@ func UpdatePurchaseBill(c *gin.Context) {
 	bill.Notes = input.Notes
 	bill.TaxExempt = input.TaxExempt
 
+	// Capture existing client_item_ref -> product_id mapping BEFORE deleting
+	// old items. On a retry after a lost response, the frontend still sends
+	// is_new_item=true with no product_id for lines whose product was already
+	// created on the previous (unacknowledged) save. Restoring the product_id
+	// here prevents ensureProductForAdhocItem from creating a duplicate.
+	var existingItems []models.PurchaseBillItem
+	utils.DB.Where("bill_id = ?", bill.ID).Find(&existingItems)
+	productIDByRef := make(map[string]uuid.UUID)
+	for _, ei := range existingItems {
+		if ei.ClientItemRef != nil && ei.ProductID != nil {
+			productIDByRef[*ei.ClientItemRef] = *ei.ProductID
+		}
+	}
+
 	// Delete old items and recreate
 	utils.DB.Where("bill_id = ?", bill.ID).Delete(&models.PurchaseBillItem{})
 
@@ -747,27 +806,40 @@ func UpdatePurchaseBill(c *gin.Context) {
 		taxAmount := taxable * (taxRate / 100)
 		total := taxable + taxAmount
 
+		// Restore product_id for new-item lines whose product was already
+		// created on a previous save (matched by client_item_ref). This keeps
+		// the line linked to the same product instead of creating a duplicate.
+		resolvedProductID := item.ProductID
+		isNewItem := item.IsNewItem
+		if isNewItem && resolvedProductID == nil && item.ClientItemRef != nil {
+			if existingPID, ok := productIDByRef[*item.ClientItemRef]; ok {
+				resolvedProductID = &existingPID
+				isNewItem = false
+			}
+		}
+
 		bill.Items = append(bill.Items, models.PurchaseBillItem{
-			ID:          uuid.New(),
-			BillID:      bill.ID,
-			ProductID:   item.ProductID,
-			ItemCode:    item.ItemCode,
-			Description: item.Description,
-			Quantity:    qty,
-			Unit:        item.Unit,
-			UnitPrice:   unitPrice,
-			Discount:    discount,
-			TaxRate:     taxRate,
-			TaxAmount:   taxAmount,
-			Total:       total,
-			MRP:         item.MRP.Float64(),
-			SalePrice:   item.SalePrice.Float64(),
-			HSNCode:     item.HSNCode,
-			BatchNo:     item.BatchNo,
-			MfgDate:     item.MfgDate.Ptr(),
-			ExpDate:     item.ExpDate.Ptr(),
-			IsNewItem:   item.IsNewItem,
-			Category:    item.Category,
+			ID:            uuid.New(),
+			BillID:        bill.ID,
+			ProductID:     resolvedProductID,
+			ItemCode:      item.ItemCode,
+			Description:   item.Description,
+			Quantity:      qty,
+			Unit:          item.Unit,
+			UnitPrice:     unitPrice,
+			Discount:      discount,
+			TaxRate:       taxRate,
+			TaxAmount:     taxAmount,
+			Total:         total,
+			MRP:           item.MRP.Float64(),
+			SalePrice:     item.SalePrice.Float64(),
+			HSNCode:       item.HSNCode,
+			BatchNo:       item.BatchNo,
+			MfgDate:       item.MfgDate.Ptr(),
+			ExpDate:       item.ExpDate.Ptr(),
+			IsNewItem:     isNewItem,
+			Category:      item.Category,
+			ClientItemRef: item.ClientItemRef,
 		})
 
 		subTotal += itemTotal
@@ -777,38 +849,43 @@ func UpdatePurchaseBill(c *gin.Context) {
 	bill.SubTotal = subTotal
 	bill.TaxTotal = taxTotal
 
-	// Reset linked stock entries so edits re-apply inventory immediately
-	if err := removePurchaseStockEntries(userID, bill.ID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset stock entries for bill"})
-		return
-	}
-
-	if err := utils.DB.Save(&bill).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update bill"})
-		return
-	}
-
-	// Reverse all existing linked payment outs using the previous bill state,
-	// then create a single fresh payment out for the new paid amount (if > 0).
-	reversalBill := models.PurchaseBill{
-		ID:         bill.ID,
-		PartyID:    previousPartyID,
-		BillNumber: previousBillNumber,
-	}
-	if err := reverseLinkedPurchasePaymentOuts(utils.DB, userID, &reversalBill); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to reverse existing payment outs"})
-		return
-	}
-	if bill.PaidAmount > 0 {
-		notes := fmt.Sprintf("Auto-created from purchase bill %s (payment update)", bill.BillNumber)
-		if err := createLinkedPurchasePaymentOut(utils.DB, userID, &bill, bill.PaidAmount, bill.BillDate, notes); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to create payment out"})
-			return
+	// Wrap the whole update (stock reset, bill save, payment reversal +
+	// recreate, stock entries) in a single transaction so a failure in any
+	// step rolls back the entire edit — no half-updated bills or orphan
+	// products when the network drops mid-save.
+	if err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		// Reset linked stock entries so edits re-apply inventory immediately
+		if err := removePurchaseStockEntriesTx(tx, userID, bill.ID); err != nil {
+			return err
 		}
-	}
 
-	if err := createPendingPurchaseStockEntries(userID, &bill); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Bill updated but failed to update inventory stock"})
+		if err := tx.Save(&bill).Error; err != nil {
+			return err
+		}
+
+		// Reverse all existing linked payment outs using the previous bill state,
+		// then create a single fresh payment out for the new paid amount (if > 0).
+		reversalBill := models.PurchaseBill{
+			ID:         bill.ID,
+			PartyID:    previousPartyID,
+			BillNumber: previousBillNumber,
+		}
+		if err := reverseLinkedPurchasePaymentOuts(tx, userID, &reversalBill); err != nil {
+			return err
+		}
+		if bill.PaidAmount > 0 {
+			notes := fmt.Sprintf("Auto-created from purchase bill %s (payment update)", bill.BillNumber)
+			if err := createLinkedPurchasePaymentOut(tx, userID, &bill, bill.PaidAmount, bill.BillDate, notes); err != nil {
+				return err
+			}
+		}
+
+		if err := createPendingPurchaseStockEntriesTx(tx, userID, &bill); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update bill"})
 		return
 	}
 

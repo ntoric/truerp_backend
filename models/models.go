@@ -620,6 +620,10 @@ type PurchaseBill struct {
 	PartyID           uuid.UUID          `json:"party_id" gorm:"type:uuid;not null"`
 	VendorID          *uuid.UUID         `json:"vendor_id,omitempty" gorm:"type:uuid"` // legacy alias for party_id
 	Party             Party              `json:"party,omitempty" gorm:"foreignKey:PartyID"`
+	// ClientBillID is a frontend-generated UUID that makes bill creation
+	// idempotent: a retry with the same value returns the already-saved bill
+	// instead of creating a duplicate. Mirrors Invoice.ClientSaleID.
+	ClientBillID      *uuid.UUID         `json:"client_bill_id,omitempty" gorm:"type:uuid;index;uniqueIndex:idx_purchase_bill_user_client_bill"`
 	BillNumber        string             `json:"bill_number" gorm:"not null;index"`
 	BillDate          time.Time          `json:"bill_date" gorm:"not null"`
 	DueDate           *time.Time         `json:"due_date,omitempty"`
@@ -662,6 +666,11 @@ type PurchaseBillItem struct {
 	ExpDate     *time.Time `json:"exp_date,omitempty"`
 	IsNewItem   bool       `json:"is_new_item" gorm:"default:false"`
 	Category    string     `json:"category"`
+	// ClientItemRef is a frontend-generated UUID per new-item line that survives
+	// across save/retry/reload cycles. On edit+resave, the backend uses it to
+	// restore the product_id created on a previous (possibly unacknowledged)
+	// save instead of creating a duplicate product.
+	ClientItemRef *string   `json:"client_item_ref,omitempty" gorm:"type:varchar(36);index:idx_purchase_item_client_ref"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
