@@ -190,6 +190,62 @@ func bankAccountIDValue(id *uuid.UUID) interface{} {
 	return *id
 }
 
+// cashTxnSignedSumSQL nets cash/bank movements: money in is positive, money out
+// (reduce, expense, payroll, transfer_out) is negative.
+const cashTxnSignedSumSQL = "COALESCE(SUM(CASE WHEN transaction_type IN ('add', 'transfer_in') THEN amount ELSE -amount END), 0)"
+
+func sumSignedCashMovements(db *gorm.DB, userID uuid.UUID, accountID *uuid.UUID) float64 {
+	var total float64
+	q := db.Model(&models.CashTransaction{}).Where("user_id = ?", userID)
+	if accountID == nil {
+		q = q.Where("account_id IS NULL")
+	} else {
+		q = q.Where("account_id = ?", *accountID)
+	}
+	q = q.Where("deleted_at IS NULL")
+	// "? AS total" forces GORM to treat the aggregate as an expression instead of column names.
+	if err := q.Select("? AS total", gorm.Expr(cashTxnSignedSumSQL)).Scan(&total).Error; err != nil {
+		return 0
+	}
+	return total
+}
+
+func applyLedgerBalancesToAccounts(db *gorm.DB, userID uuid.UUID, accounts []models.BankAccount) {
+	for i := range accounts {
+		accountID := accounts[i].ID
+		accounts[i].Balance = accounts[i].OpeningBalance + sumSignedCashMovements(db, userID, &accountID)
+	}
+}
+
+func buildCashBankSummary(db *gorm.DB, userID uuid.UUID, accounts []models.BankAccount) models.CashBankSummary {
+	applyLedgerBalancesToAccounts(db, userID, accounts)
+
+	cashInHand := sumSignedCashMovements(db, userID, nil)
+
+	totalBankBalance := 0.0
+	for _, acc := range accounts {
+		totalBankBalance += acc.Balance
+	}
+
+	var unlinkedCount int64
+	var unlinkedAmount float64
+	db.Model(&models.CashTransaction{}).
+		Where("user_id = ? AND is_linked = ?", userID, false).
+		Count(&unlinkedCount)
+	db.Model(&models.CashTransaction{}).
+		Where("user_id = ? AND is_linked = ?", userID, false).
+		Select("? AS total", gorm.Expr("COALESCE(SUM(amount), 0)")).
+		Scan(&unlinkedAmount)
+
+	return models.CashBankSummary{
+		TotalBalance:   totalBankBalance + cashInHand,
+		CashInHand:     cashInHand,
+		BankAccounts:   accounts,
+		UnlinkedCount:  unlinkedCount,
+		UnlinkedAmount: unlinkedAmount,
+	}
+}
+
 func adjustBankAccountBalance(tx *gorm.DB, userID uuid.UUID, accountID *uuid.UUID, delta float64, requireActive bool) error {
 	if accountID == nil || delta == 0 {
 		return nil

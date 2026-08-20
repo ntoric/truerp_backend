@@ -477,37 +477,5 @@ func GetCashBankSummary(c *gin.Context) {
 		return
 	}
 
-	// Calculate total balance from bank accounts
-	totalBankBalance := 0.0
-	for _, acc := range accounts {
-		totalBankBalance += acc.Balance
-	}
-
-	// Calculate cash in hand (transactions without account)
-	var cashInHand float64
-	utils.DB.Model(&models.CashTransaction{}).
-		Where("user_id = ? AND account_id IS NULL", userID).
-		Select("COALESCE(SUM(CASE WHEN transaction_type = 'add' THEN amount ELSE -amount END), 0)").
-		Scan(&cashInHand)
-
-	// Calculate unlinked transactions
-	var unlinkedCount int64
-	var unlinkedAmount float64
-	utils.DB.Model(&models.CashTransaction{}).
-		Where("user_id = ? AND is_linked = ?", userID, false).
-		Count(&unlinkedCount)
-	utils.DB.Model(&models.CashTransaction{}).
-		Where("user_id = ? AND is_linked = ?", userID, false).
-		Select("COALESCE(SUM(amount), 0)").
-		Scan(&unlinkedAmount)
-
-	summary := models.CashBankSummary{
-		TotalBalance:   totalBankBalance + cashInHand,
-		CashInHand:     cashInHand,
-		BankAccounts:   accounts,
-		UnlinkedCount:  unlinkedCount,
-		UnlinkedAmount: unlinkedAmount,
-	}
-
-	c.JSON(http.StatusOK, summary)
+	c.JSON(http.StatusOK, buildCashBankSummary(utils.DB, userID, accounts))
 }

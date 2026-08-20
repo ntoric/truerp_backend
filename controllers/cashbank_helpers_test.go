@@ -2,9 +2,13 @@ package controllers
 
 import (
 	"testing"
+	"time"
+	"truerp/models"
 
 	"github.com/google/uuid"
-	"truerp/models"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestInvoiceCashLedgerNeedsResync(t *testing.T) {
@@ -100,5 +104,85 @@ func TestParsePaymentNumberSequence(t *testing.T) {
 		if got := parsePaymentNumberSequence(tt.number, tt.prefix); got != tt.want {
 			t.Errorf("parsePaymentNumberSequence(%q, %q) = %d, want %d", tt.number, tt.prefix, got, tt.want)
 		}
+	}
+}
+
+func openCashBankTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file::memory:"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&models.BankAccount{}, &models.CashTransaction{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return db
+}
+
+func TestBuildCashBankSummaryDeductsCashInHandExpense(t *testing.T) {
+	db := openCashBankTestDB(t)
+	userID := uuid.New()
+	now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+
+	add := models.CashTransaction{
+		ID:              uuid.New(),
+		UserID:          userID,
+		TransactionType: "add",
+		Amount:          1000,
+		Date:            now,
+		Description:     "Cash sale",
+		Reference:       "INV-0001",
+		IsLinked:        true,
+	}
+	if err := db.Create(&add).Error; err != nil {
+		t.Fatalf("seed cash in-hand: %v", err)
+	}
+	if err := recordExpenseCashOut(db, userID, nil, 250, now, "EXP-0001", "Office supplies"); err != nil {
+		t.Fatalf("record expense: %v", err)
+	}
+
+	summary := buildCashBankSummary(db, userID, nil)
+	if summary.CashInHand != 750 {
+		t.Fatalf("cash in-hand = %.2f, want 750", summary.CashInHand)
+	}
+	if summary.TotalBalance != 750 {
+		t.Fatalf("total balance = %.2f, want 750", summary.TotalBalance)
+	}
+}
+
+func TestBuildCashBankSummaryDeductsBankExpense(t *testing.T) {
+	db := openCashBankTestDB(t)
+	userID := uuid.New()
+	accountID := uuid.New()
+	now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+
+	account := models.BankAccount{
+		ID:             accountID,
+		UserID:         userID,
+		AccountName:    "HDFC Current",
+		AccountNumber:  "123",
+		BankName:       "HDFC",
+		OpeningBalance: 5000,
+		Balance:        5000,
+		IsActive:       true,
+	}
+	if err := db.Create(&account).Error; err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if err := recordExpenseCashOut(db, userID, &accountID, 800, now, "EXP-0002", "Rent"); err != nil {
+		t.Fatalf("record expense: %v", err)
+	}
+
+	summary := buildCashBankSummary(db, userID, []models.BankAccount{account})
+	if summary.CashInHand != 0 {
+		t.Fatalf("cash in-hand = %.2f, want 0", summary.CashInHand)
+	}
+	if len(summary.BankAccounts) != 1 || summary.BankAccounts[0].Balance != 4200 {
+		t.Fatalf("bank balance = %.2f, want 4200", summary.BankAccounts[0].Balance)
+	}
+	if summary.TotalBalance != 4200 {
+		t.Fatalf("total balance = %.2f, want 4200", summary.TotalBalance)
 	}
 }
