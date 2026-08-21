@@ -151,8 +151,17 @@ func SendNotification(c *gin.Context) {
 
 		switch channel {
 		case "email":
-			// TODO: Implement email sending
-			success = true
+			// Send to the store owner's email using their DeveloperSettings SMTP config.
+			var user models.User
+			if err := utils.DB.First(&user, "id = ?", userID).Error; err == nil && user.Email != "" {
+				if err := utils.SendEmailForUser(userID, user.Email, notification.Title, notification.Message); err != nil {
+					notification.ErrorMessage = fmt.Sprintf("email: %v", err)
+				} else {
+					success = true
+				}
+			} else if err != nil {
+				notification.ErrorMessage = fmt.Sprintf("email: user lookup failed: %v", err)
+			}
 		case "sms":
 			// TODO: Implement SMS sending
 			success = true

@@ -256,14 +256,18 @@ func SendEmailCampaign(c *gin.Context) {
 		return
 	}
 
+	// Verify SMTP is configured for this user (store) before attempting to send.
+	if !utils.EmailConfiguredForUser(userID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "SMTP is not configured. Configure email settings in Developer Settings before sending campaigns."})
+		return
+	}
+
 	// Update campaign status
 	now := time.Now()
 	campaign.Status = "sent"
 	campaign.SentDate = &now
 	utils.DB.Save(&campaign)
 
-	// In a real implementation, you would integrate with an email service here
-	// For now, we'll mark all recipients as sent
 	var recipients []models.EmailRecipient
 	utils.DB.Where("campaign_id = ?", campaign.ID).Find(&recipients)
 
@@ -271,7 +275,18 @@ func SendEmailCampaign(c *gin.Context) {
 	failedCount := 0
 
 	for _, recipient := range recipients {
-		// Simulate email sending
+		if recipient.EmailAddress == "" {
+			recipient.Status = "failed"
+			utils.DB.Save(&recipient)
+			failedCount++
+			continue
+		}
+		if err := utils.SendEmailForUser(userID, recipient.EmailAddress, campaign.Subject, campaign.Body); err != nil {
+			recipient.Status = "failed"
+			utils.DB.Save(&recipient)
+			failedCount++
+			continue
+		}
 		recipient.Status = "sent"
 		recipient.SentAt = &now
 		utils.DB.Save(&recipient)

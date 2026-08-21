@@ -594,6 +594,36 @@ func SendQuotation(c *gin.Context) {
 		return
 	}
 
+	// Load the party to resolve the recipient email address.
+	var party models.Party
+	if err := utils.DB.First(&party, "id = ?", quotation.PartyID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Quotation party not found"})
+		return
+	}
+
+	if party.Email == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "This party does not have an email address"})
+		return
+	}
+
+	if !utils.EmailConfiguredForUser(userID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "SMTP is not configured. Configure email settings in Developer Settings before sending quotations."})
+		return
+	}
+
+	subject := fmt.Sprintf("Quotation %s from %s", quotation.QuotationNumber, party.Name)
+	body := fmt.Sprintf(`<p>Hello %s,</p>
+<p>Please find your quotation <strong>%s</strong> below.</p>
+<p>Total amount: ₹%.2f</p>
+<p>Notes: %s</p>
+<p>Terms: %s</p>
+<p>Thank you for your business.</p>`, party.Name, quotation.QuotationNumber, quotation.TotalAmount, quotation.Notes, quotation.Terms)
+
+	if err := utils.SendEmailForUser(userID, party.Email, subject, body); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to send quotation email: %v", err)})
+		return
+	}
+
 	quotation.Status = "sent"
 	if err := utils.DB.Save(&quotation).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update quotation status"})

@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"truerp/models"
+
+	"github.com/google/uuid"
 )
 
 type EmailConfig struct {
@@ -30,7 +32,7 @@ func GetEmailConfig() EmailConfig {
 	if fromName == "" {
 		fromName = "TruERP"
 	}
-	cfg := EmailConfig{
+	return EmailConfig{
 		Host:     strings.TrimSpace(os.Getenv("SMTP_HOST")),
 		Port:     port,
 		Username: strings.TrimSpace(os.Getenv("SMTP_USERNAME")),
@@ -38,40 +40,16 @@ func GetEmailConfig() EmailConfig {
 		From:     strings.TrimSpace(os.Getenv("SMTP_FROM_EMAIL")),
 		FromName: fromName,
 	}
-
-	// Fall back to DeveloperSettings stored in the database when env vars are not set.
-	if cfg.Host == "" || cfg.From == "" {
-		if dbCfg, err := getEmailConfigFromDB(); err == nil {
-			if cfg.Host == "" {
-				cfg.Host = dbCfg.Host
-			}
-			if cfg.Port == 587 && os.Getenv("SMTP_PORT") == "" {
-				cfg.Port = dbCfg.Port
-			}
-			if cfg.Username == "" {
-				cfg.Username = dbCfg.Username
-			}
-			if cfg.Password == "" {
-				cfg.Password = dbCfg.Password
-			}
-			if cfg.From == "" {
-				cfg.From = dbCfg.From
-			}
-			if os.Getenv("SMTP_FROM_NAME") == "" && dbCfg.FromName != "" {
-				cfg.FromName = dbCfg.FromName
-			}
-		}
-	}
-
-	return cfg
 }
 
-// getEmailConfigFromDB loads SMTP settings from the first DeveloperSettings
-// record that has SMTP configured. The password is decrypted from storage.
-func getEmailConfigFromDB() (EmailConfig, error) {
+// GetEmailConfigForUser loads SMTP settings from the DeveloperSettings
+// record belonging to the given user (store owner). The stored password is
+// decrypted before being returned. This is used for store-specific emails
+// such as email marketing campaigns, notifications, and quotations.
+func GetEmailConfigForUser(userID uuid.UUID) (EmailConfig, error) {
 	var settings models.DeveloperSettings
-	if err := DB.Where("smtp_host <> '' AND from_email <> ''").First(&settings).Error; err != nil {
-		return EmailConfig{}, err
+	if err := DB.Where("user_id = ?", userID).First(&settings).Error; err != nil {
+		return EmailConfig{}, fmt.Errorf("developer settings not found for user: %w", err)
 	}
 
 	port := settings.SMTPPort
@@ -101,6 +79,30 @@ func getEmailConfigFromDB() (EmailConfig, error) {
 		From:     strings.TrimSpace(settings.FromEmail),
 		FromName: fromName,
 	}, nil
+}
+
+// EmailConfiguredForUser reports whether the given user has SMTP settings
+// configured in DeveloperSettings.
+func EmailConfiguredForUser(userID uuid.UUID) bool {
+	cfg, err := GetEmailConfigForUser(userID)
+	if err != nil {
+		return false
+	}
+	return cfg.Host != "" && cfg.From != ""
+}
+
+// SendEmailForUser sends an email using the SMTP credentials configured in
+// the given user's DeveloperSettings. Returns an error if SMTP is not
+// configured for the user or the send fails.
+func SendEmailForUser(userID uuid.UUID, to, subject, body string) error {
+	cfg, err := GetEmailConfigForUser(userID)
+	if err != nil {
+		return err
+	}
+	if cfg.Host == "" || cfg.From == "" {
+		return fmt.Errorf("SMTP not configured for user in developer settings")
+	}
+	return SendEmailWithConfig(cfg, to, subject, body)
 }
 
 func EmailConfigured() bool {
