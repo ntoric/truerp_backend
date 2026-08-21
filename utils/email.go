@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"truerp/models"
 )
 
 type EmailConfig struct {
@@ -29,7 +30,7 @@ func GetEmailConfig() EmailConfig {
 	if fromName == "" {
 		fromName = "TruERP"
 	}
-	return EmailConfig{
+	cfg := EmailConfig{
 		Host:     strings.TrimSpace(os.Getenv("SMTP_HOST")),
 		Port:     port,
 		Username: strings.TrimSpace(os.Getenv("SMTP_USERNAME")),
@@ -37,6 +38,69 @@ func GetEmailConfig() EmailConfig {
 		From:     strings.TrimSpace(os.Getenv("SMTP_FROM_EMAIL")),
 		FromName: fromName,
 	}
+
+	// Fall back to DeveloperSettings stored in the database when env vars are not set.
+	if cfg.Host == "" || cfg.From == "" {
+		if dbCfg, err := getEmailConfigFromDB(); err == nil {
+			if cfg.Host == "" {
+				cfg.Host = dbCfg.Host
+			}
+			if cfg.Port == 587 && os.Getenv("SMTP_PORT") == "" {
+				cfg.Port = dbCfg.Port
+			}
+			if cfg.Username == "" {
+				cfg.Username = dbCfg.Username
+			}
+			if cfg.Password == "" {
+				cfg.Password = dbCfg.Password
+			}
+			if cfg.From == "" {
+				cfg.From = dbCfg.From
+			}
+			if os.Getenv("SMTP_FROM_NAME") == "" && dbCfg.FromName != "" {
+				cfg.FromName = dbCfg.FromName
+			}
+		}
+	}
+
+	return cfg
+}
+
+// getEmailConfigFromDB loads SMTP settings from the first DeveloperSettings
+// record that has SMTP configured. The password is decrypted from storage.
+func getEmailConfigFromDB() (EmailConfig, error) {
+	var settings models.DeveloperSettings
+	if err := DB.Where("smtp_host <> '' AND from_email <> ''").First(&settings).Error; err != nil {
+		return EmailConfig{}, err
+	}
+
+	port := settings.SMTPPort
+	if port == 0 {
+		port = 587
+	}
+
+	password := ""
+	if settings.EncryptedSMTPPassword != "" {
+		decrypted, err := Decrypt(settings.EncryptedSMTPPassword)
+		if err != nil {
+			return EmailConfig{}, fmt.Errorf("failed to decrypt SMTP password: %w", err)
+		}
+		password = decrypted
+	}
+
+	fromName := settings.FromName
+	if fromName == "" {
+		fromName = "TruERP"
+	}
+
+	return EmailConfig{
+		Host:     strings.TrimSpace(settings.SMTPHost),
+		Port:     port,
+		Username: strings.TrimSpace(settings.SMTPUsername),
+		Password: password,
+		From:     strings.TrimSpace(settings.FromEmail),
+		FromName: fromName,
+	}, nil
 }
 
 func EmailConfigured() bool {
