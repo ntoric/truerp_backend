@@ -213,7 +213,45 @@ func loadReportForRange(userID uuid.UUID, startDate, endDate string) (models.Dai
 
 	report.ProductProfit = computeProductProfitForRange(userID, startDate, endDate)
 
+	report.Loyalty = loadLoyaltyReportSummary(userID, startDate, endDate)
+
 	return report, nil
+}
+
+// loadLoyaltyReportSummary aggregates loyalty points earned and redeemed in [startDate, endDate].
+// Returns nil when the loyalty program is disabled, so the report payload stays unchanged for
+// stores that don't use loyalty.
+func loadLoyaltyReportSummary(userID uuid.UUID, startDate, endDate string) *models.LoyaltyReportSummary {
+	settings, err := GetOrCreateLoyaltySettings(userID)
+	if err != nil || settings == nil || !settings.IsEnabled {
+		return nil
+	}
+
+	summary := &models.LoyaltyReportSummary{Enabled: true}
+
+	utils.DB.Model(&models.LoyaltyTransaction{}).
+		Where("user_id = ? AND transaction_type = ? AND DATE(created_at) >= ? AND DATE(created_at) <= ?",
+			userID, "earn", startDate, endDate).
+		Select("COALESCE(SUM(points), 0), COUNT(*)").
+		Row().Scan(&summary.PointsEarned, &summary.EarnTransactions)
+
+	var redeemed int64
+	var redeemCount int64
+	utils.DB.Model(&models.LoyaltyTransaction{}).
+		Where("user_id = ? AND transaction_type = ? AND DATE(created_at) >= ? AND DATE(created_at) <= ?",
+			userID, "redeem", startDate, endDate).
+		Select("COALESCE(SUM(ABS(points)), 0), COUNT(*)").
+		Row().Scan(&redeemed, &redeemCount)
+	summary.PointsRedeemed = redeemed
+	summary.RedeemTransactions = redeemCount
+
+	// Redemption value = redeemed points × point value (₹ discount granted).
+	summary.RedemptionValue = float64(redeemed) * settings.PointValue
+
+	if summary.PointsEarned == 0 && summary.PointsRedeemed == 0 {
+		return summary
+	}
+	return summary
 }
 
 func paymentMethodLabel(method string) string {
@@ -474,6 +512,23 @@ func writePeriodReportCSV(c *gin.Context, report models.PeriodReport, filename s
 	_ = writer.Write([]string{"Period Profit (Sales − Purchases − Expenses ± returns/notes)", "", fmt.Sprintf("%.2f", report.DailyProfit)})
 	_ = writer.Write([]string{"Product Profit (sale value − purchase cost on items sold)", "", fmt.Sprintf("%.2f", report.ProductProfit)})
 	_ = writer.Write([]string{"Net Cash Flow (In − Out − Expenses)", "", fmt.Sprintf("%.2f", report.NetCashFlow)})
+	if report.Loyalty != nil && report.Loyalty.Enabled {
+		_ = writer.Write([]string{""})
+		_ = writer.Write([]string{"Loyalty points"})
+		_ = writer.Write([]string{"Activity", "Transactions", "Points", "Value (INR)"})
+		_ = writer.Write([]string{
+			"Points earned",
+			fmt.Sprintf("%d", report.Loyalty.EarnTransactions),
+			fmt.Sprintf("%d", report.Loyalty.PointsEarned),
+			"-",
+		})
+		_ = writer.Write([]string{
+			"Points redeemed",
+			fmt.Sprintf("%d", report.Loyalty.RedeemTransactions),
+			fmt.Sprintf("%d", report.Loyalty.PointsRedeemed),
+			fmt.Sprintf("%.2f", report.Loyalty.RedemptionValue),
+		})
+	}
 	_ = writer.Write([]string{""})
 	_ = writer.Write([]string{"Payments by method"})
 	_ = writer.Write([]string{"Method", "Received count", "Received amount (INR)", "Paid count", "Paid amount (INR)"})
@@ -788,6 +843,60 @@ func buildDailyReportPDF(report models.DailyReport) ([]byte, error) {
 	})
 }
 
+// writeLoyaltySummaryPDF renders a loyalty points earned/redeemed table when
+// the loyalty program is enabled and there was any activity in the period.
+func writeLoyaltySummaryPDF(pdf *fpdf.Fpdf, report models.PeriodReport) {
+	loyalty := report.Loyalty
+	if loyalty == nil || !loyalty.Enabled {
+		return
+	}
+	if loyalty.PointsEarned == 0 && loyalty.PointsRedeemed == 0 {
+		return
+	}
+
+	pdf.Ln(8)
+	pdf.SetFont("Arial", "B", 11)
+	pdf.SetTextColor(37, 99, 235)
+	pdf.CellFormat(0, 7, "LOYALTY POINTS", "", 1, "L", false, 0, "")
+	pdf.SetFont("Arial", "", 8)
+	pdf.SetTextColor(100, 100, 100)
+	pdf.CellFormat(0, 5, "Points credited to customers and redeemed against bills in this period.", "", 1, "L", false, 0, "")
+	pdf.Ln(2)
+
+	pageW, _ := pdf.GetPageSize()
+	leftM, _, rightM, _ := pdf.GetMargins()
+	usable := pageW - leftM - rightM
+	colActivity := usable * 0.46
+	colTxn := usable * 0.18
+	colPoints := usable * 0.18
+	colValue := usable * 0.18
+
+	pdf.SetFillColor(254, 243, 199)
+	pdf.SetDrawColor(253, 230, 138)
+	pdf.SetFont("Arial", "B", 8)
+	pdf.SetTextColor(120, 53, 15)
+	pdf.CellFormat(colActivity, 8, "Activity", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colTxn, 8, "Transactions", "1", 0, "R", true, 0, "")
+	pdf.CellFormat(colPoints, 8, "Points", "1", 0, "R", true, 0, "")
+	pdf.CellFormat(colValue, 8, "Value (INR)", "1", 1, "R", true, 0, "")
+
+	pdf.SetFillColor(254, 249, 235)
+	pdf.SetFont("Arial", "", 9)
+	pdf.SetTextColor(40, 40, 40)
+	pdf.CellFormat(colActivity, 7, "Points earned", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colTxn, 7, fmt.Sprintf("%d", loyalty.EarnTransactions), "1", 0, "R", true, 0, "")
+	pdf.SetTextColor(22, 101, 52)
+	pdf.CellFormat(colPoints, 7, fmt.Sprintf("%d", loyalty.PointsEarned), "1", 0, "R", true, 0, "")
+	pdf.SetTextColor(40, 40, 40)
+	pdf.CellFormat(colValue, 7, "-", "1", 1, "R", true, 0, "")
+
+	pdf.CellFormat(colActivity, 7, "Points redeemed", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colTxn, 7, fmt.Sprintf("%d", loyalty.RedeemTransactions), "1", 0, "R", true, 0, "")
+	pdf.SetTextColor(154, 52, 18)
+	pdf.CellFormat(colPoints, 7, fmt.Sprintf("%d", loyalty.PointsRedeemed), "1", 0, "R", true, 0, "")
+	pdf.CellFormat(colValue, 7, fmt.Sprintf("%.2f", loyalty.RedemptionValue), "1", 1, "R", true, 0, "")
+}
+
 func buildPeriodReportPDF(report models.PeriodReport) ([]byte, error) {
 	pdf := fpdf.New("P", "mm", "A4", "")
 	pdf.SetMargins(14, 16, 14)
@@ -968,6 +1077,8 @@ func buildPeriodReportPDF(report models.PeriodReport) ([]byte, error) {
 	writePaymentsByMethodPDF(pdf, report)
 
 	writeExpenseLinesPDF(pdf, report)
+
+	writeLoyaltySummaryPDF(pdf, report)
 
 	pdf.Ln(8)
 	pdf.SetFont("Arial", "I", 8)

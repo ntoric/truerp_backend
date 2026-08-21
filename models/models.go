@@ -393,6 +393,18 @@ type DailyReport struct {
 	DailyProfit float64 `json:"daily_profit"`
 	// ProductProfit = gross margin on products sold (sale value − purchase cost), net of returns/credit notes.
 	ProductProfit float64 `json:"product_profit"`
+	// Loyalty summary for the period. Populated only when the loyalty program is enabled.
+	Loyalty *LoyaltyReportSummary `json:"loyalty,omitempty"`
+}
+
+// LoyaltyReportSummary aggregates loyalty points earned and redeemed in a report period.
+type LoyaltyReportSummary struct {
+	Enabled            bool    `json:"enabled"`
+	PointsEarned       int64   `json:"points_earned"`
+	PointsRedeemed     int64   `json:"points_redeemed"`
+	EarnTransactions   int64   `json:"earn_transactions"`
+	RedeemTransactions int64   `json:"redeem_transactions"`
+	RedemptionValue    float64 `json:"redemption_value"`
 }
 
 // PeriodReport is a DailyReport-style summary over an arbitrary date range.
