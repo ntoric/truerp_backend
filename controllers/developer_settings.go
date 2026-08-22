@@ -41,6 +41,7 @@ type developerSettingsInput struct {
 	AWSSecretKey              string `json:"aws_secret_key"`
 	AWSRegion                 string `json:"aws_region"`
 	SendGridSMSAPIKey         string `json:"sendgrid_sms_api_key"`
+	Timezone                  string `json:"timezone"`
 }
 
 type testEmailInput struct {
@@ -80,6 +81,7 @@ func applyDeveloperSettingsInput(settings *models.DeveloperSettings, input devel
 	settings.TextLocalSenderID = input.TextLocalSenderID
 	settings.AWSAccessKey = input.AWSAccessKey
 	settings.AWSRegion = input.AWSRegion
+	settings.Timezone = input.Timezone
 
 	var err error
 	if input.SMTPPassword != "" {
@@ -179,6 +181,7 @@ func developerSettingsUpdates(input developerSettingsInput) (map[string]interfac
 		"textlocal_sender_id":            input.TextLocalSenderID,
 		"aws_access_key":                 input.AWSAccessKey,
 		"aws_region":                     input.AWSRegion,
+		"timezone":                       input.Timezone,
 	}
 
 	secretFields := []struct {
@@ -239,6 +242,11 @@ func UpdateDeveloperSettings(c *gin.Context) {
 
 	var input developerSettingsInput
 	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := ValidateTimezone(input.Timezone); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

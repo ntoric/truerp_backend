@@ -2,6 +2,7 @@ package utils
 
 import (
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net"
@@ -272,4 +273,117 @@ func SendPasswordResetOTPEmail(to, otp string) error {
 
 func LogPasswordResetOTP(email, otp string) {
 	log.Printf("[password-reset] email=%s otp=%s (SMTP not configured — use this code for testing)", email, otp)
+}
+
+// PDFAttachment describes a single PDF file to attach to an email.
+type PDFAttachment struct {
+	Filename string
+	Content  []byte
+}
+
+// SendEmailWithPDFAttachmentForUser sends an HTML email with one or more PDF
+// attachments using the SMTP credentials configured in the given user's
+// DeveloperSettings. The message is encoded as multipart/mixed with a
+// text/html body part followed by base64-encoded PDF attachment parts.
+func SendEmailWithPDFAttachmentForUser(userID uuid.UUID, to, subject, body string, attachments []PDFAttachment) error {
+	cfg, err := GetEmailConfigForUser(userID)
+	if err != nil {
+		return err
+	}
+	if cfg.Host == "" || cfg.From == "" {
+		return fmt.Errorf("SMTP not configured for user in developer settings")
+	}
+	return SendEmailWithPDFAttachmentAndConfig(cfg, to, subject, body, attachments)
+}
+
+// SendEmailWithPDFAttachmentAndConfig sends an HTML email with PDF attachments
+// using the provided EmailConfig.
+func SendEmailWithPDFAttachmentAndConfig(cfg EmailConfig, to, subject, body string, attachments []PDFAttachment) error {
+	if cfg.Host == "" || cfg.From == "" {
+		return fmt.Errorf("email not configured")
+	}
+	if cfg.Port == 0 {
+		cfg.Port = 587
+	}
+
+	from := cfg.From
+	if cfg.FromName != "" {
+		from = fmt.Sprintf("%s <%s>", cfg.FromName, cfg.From)
+	}
+
+	boundary := "truerp_boundary_" + strings.ReplaceAll(uuid.New().String(), "-", "")
+
+	var msg strings.Builder
+	msg.WriteString(fmt.Sprintf("From: %s\r\n", from))
+	msg.WriteString(fmt.Sprintf("To: %s\r\n", to))
+	msg.WriteString(fmt.Sprintf("Subject: %s\r\n", subject))
+	msg.WriteString("MIME-Version: 1.0\r\n")
+	msg.WriteString(fmt.Sprintf("Content-Type: multipart/mixed; boundary=\"%s\"\r\n", boundary))
+	msg.WriteString("\r\n")
+
+	// HTML body part
+	msg.WriteString(fmt.Sprintf("--%s\r\n", boundary))
+	msg.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
+	msg.WriteString("Content-Transfer-Encoding: 8bit\r\n")
+	msg.WriteString("\r\n")
+	msg.WriteString(body)
+	msg.WriteString("\r\n")
+
+	// Attachment parts
+	for _, att := range attachments {
+		if len(att.Content) == 0 {
+			continue
+		}
+		msg.WriteString(fmt.Sprintf("--%s\r\n", boundary))
+		msg.WriteString(fmt.Sprintf("Content-Type: application/pdf; name=\"%s\"\r\n", att.Filename))
+		msg.WriteString("Content-Transfer-Encoding: base64\r\n")
+		msg.WriteString(fmt.Sprintf("Content-Disposition: attachment; filename=\"%s\"\r\n", att.Filename))
+		msg.WriteString("\r\n")
+
+		encoded := base64.StdEncoding.EncodeToString(att.Content)
+		// Wrap base64 at 76 characters per RFC 2045.
+		for i := 0; i < len(encoded); i += 76 {
+			end := i + 76
+			if end > len(encoded) {
+				end = len(encoded)
+			}
+			msg.WriteString(encoded[i:end])
+			msg.WriteString("\r\n")
+		}
+	}
+
+	msg.WriteString(fmt.Sprintf("--%s--\r\n", boundary))
+
+	client, err := dialSMTPClient(cfg)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	if cfg.Username != "" {
+		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+		if err = client.Auth(auth); err != nil {
+			return fmt.Errorf("SMTP authentication failed: %w", err)
+		}
+	}
+
+	if err = client.Mail(cfg.From); err != nil {
+		return fmt.Errorf("SMTP MAIL FROM failed: %w", err)
+	}
+	if err = client.Rcpt(to); err != nil {
+		return fmt.Errorf("SMTP RCPT TO failed: %w", err)
+	}
+
+	w, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("SMTP DATA failed: %w", err)
+	}
+	if _, err = w.Write([]byte(msg.String())); err != nil {
+		return fmt.Errorf("SMTP write failed: %w", err)
+	}
+	if err = w.Close(); err != nil {
+		return fmt.Errorf("SMTP message close failed: %w", err)
+	}
+
+	return client.Quit()
 }

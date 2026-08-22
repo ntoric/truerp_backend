@@ -177,6 +177,7 @@ func allApplicationModels() []interface{} {
 		&models.IPRestriction{},
 		&models.DataBackup{},
 		&models.GDPRRequest{},
+		&models.DailyReportEmailSettings{},
 	}
 }
 

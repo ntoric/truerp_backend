@@ -181,6 +181,12 @@ func SetupRoutes(r *gin.Engine) {
 		dashboard.GET("/periodic-report", controllers.GetPeriodicReport)
 		dashboard.GET("/periodic-report/export", controllers.ExportPeriodicReportCSV)
 		dashboard.GET("/periodic-report/pdf", controllers.ExportPeriodicReportPDF)
+
+		// Daily report email automation (auto-mail PDF export to configured recipients)
+		dashboard.GET("/report-email-settings", controllers.GetDailyReportEmailSettingsHandler)
+		dashboard.PUT("/report-email-settings", controllers.UpdateDailyReportEmailSettingsHandler)
+		dashboard.POST("/report-email-settings/send-now", controllers.SendDailyReportEmailNowHandler)
+		dashboard.GET("/report-email-settings/server-time", controllers.GetServerTimeHandler)
 	}
 
 	reports := r.Group("/api/v1/reports")
@@ -823,6 +829,7 @@ func SetupRoutes(r *gin.Engine) {
 		emailMarketing.PUT("/:id", controllers.UpdateEmailCampaign)
 		emailMarketing.DELETE("/:id", controllers.DeleteEmailCampaign)
 		emailMarketing.POST("/:id/send", controllers.SendEmailCampaign)
+		emailMarketing.POST("/:id/resend", controllers.ResendEmailCampaign)
 		emailMarketing.POST("/:id/schedule", controllers.ScheduleEmailCampaign)
 	}
 

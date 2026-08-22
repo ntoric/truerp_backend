@@ -1539,6 +1539,7 @@ type SMSMarketing struct {
 	SentCount       int            `json:"sent_count" gorm:"default:0"`
 	FailedCount     int            `json:"failed_count" gorm:"default:0"`
 	Notes           string         `json:"notes"`
+	Recipients      []SMSRecipient `json:"recipients,omitempty" gorm:"foreignKey:CampaignID"`
 	CreatedAt       time.Time      `json:"created_at"`
 	UpdatedAt       time.Time      `json:"updated_at"`
 	DeletedAt       gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
@@ -1559,24 +1560,30 @@ type SMSRecipient struct {
 }
 
 type EmailMarketing struct {
-	ID              uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
-	CampaignName    string         `json:"campaign_name" gorm:"not null"`
-	Subject         string         `json:"subject" gorm:"not null"`
-	Body            string         `json:"body" gorm:"not null"`
-	TargetAudience  string         `json:"target_audience" gorm:"not null"` // all_customers, specific_customers, all_vendors, specific_vendors
-	ScheduledDate   *time.Time     `json:"scheduled_date,omitempty"`
-	SentDate        *time.Time     `json:"sent_date,omitempty"`
-	Status          string         `json:"status" gorm:"default:'draft'"` // draft, scheduled, sent, failed
-	TotalRecipients int            `json:"total_recipients" gorm:"default:0"`
-	SentCount       int            `json:"sent_count" gorm:"default:0"`
-	FailedCount     int            `json:"failed_count" gorm:"default:0"`
-	OpenedCount     int            `json:"opened_count" gorm:"default:0"`
-	ClickedCount    int            `json:"clicked_count" gorm:"default:0"`
-	Notes           string         `json:"notes"`
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at"`
-	DeletedAt       gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+	ID                 uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID             uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	CampaignName       string         `json:"campaign_name" gorm:"not null"`
+	Subject            string         `json:"subject" gorm:"not null"`
+	Body               string         `json:"body" gorm:"not null"`
+	TargetAudience     string         `json:"target_audience" gorm:"not null"` // all_customers, specific_customers, all_vendors, specific_vendors
+	ScheduledDate      *time.Time     `json:"scheduled_date,omitempty"`
+	SentDate           *time.Time     `json:"sent_date,omitempty"`
+	Status             string         `json:"status" gorm:"default:'draft'"` // draft, scheduled, sent, failed, completed
+	TotalRecipients    int            `json:"total_recipients" gorm:"default:0"`
+	SentCount          int            `json:"sent_count" gorm:"default:0"`
+	FailedCount        int            `json:"failed_count" gorm:"default:0"`
+	OpenedCount        int            `json:"opened_count" gorm:"default:0"`
+	ClickedCount       int            `json:"clicked_count" gorm:"default:0"`
+	IsRecurring        bool           `json:"is_recurring" gorm:"default:false"`
+	RecurrenceFrequency string        `json:"recurrence_frequency" gorm:"default:''"` // daily, weekly, monthly
+	RecurrenceInterval int            `json:"recurrence_interval" gorm:"default:0"`
+	RecurrenceEndDate  *time.Time     `json:"recurrence_end_date,omitempty"`
+	LastSentAt         *time.Time     `json:"last_sent_at,omitempty"`
+	Notes              string           `json:"notes"`
+	Recipients         []EmailRecipient `json:"recipients,omitempty" gorm:"foreignKey:CampaignID"`
+	CreatedAt          time.Time        `json:"created_at"`
+	UpdatedAt          time.Time        `json:"updated_at"`
+	DeletedAt          gorm.DeletedAt   `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type EmailRecipient struct {
@@ -1610,10 +1617,11 @@ type WhatsAppMarketing struct {
 	FailedCount     int            `json:"failed_count" gorm:"default:0"`
 	DeliveredCount  int            `json:"delivered_count" gorm:"default:0"`
 	ReadCount       int            `json:"read_count" gorm:"default:0"`
-	Notes           string         `json:"notes"`
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at"`
-	DeletedAt       gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+	Notes           string               `json:"notes"`
+	Recipients      []WhatsAppRecipient  `json:"recipients,omitempty" gorm:"foreignKey:CampaignID"`
+	CreatedAt       time.Time            `json:"created_at"`
+	UpdatedAt       time.Time            `json:"updated_at"`
+	DeletedAt       gorm.DeletedAt       `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type WhatsAppRecipient struct {
@@ -2079,24 +2087,24 @@ type DeveloperSettings struct {
 	MailgunDomain  string `json:"mailgun_domain"`
 
 	// WhatsApp Service Configuration
-	WhatsAppProvider          string `json:"whatsapp_provider" gorm:"default:'meta'"` // meta, twilio
+	WhatsAppProvider          string `json:"whatsapp_provider" gorm:"column:whatsapp_provider;default:'meta'"` // meta, twilio
 	WhatsAppAPIKey            string `json:"-" gorm:"-"`
-	WhatsAppPhoneNumberID     string `json:"whatsapp_phone_number_id"`
-	WhatsAppBusinessAccountID string `json:"whatsapp_business_account_id"`
+	WhatsAppPhoneNumberID     string `json:"whatsapp_phone_number_id" gorm:"column:whatsapp_phone_number_id"`
+	WhatsAppBusinessAccountID string `json:"whatsapp_business_account_id" gorm:"column:whatsapp_business_account_id"`
 
 	// Twilio Configuration
-	TwilioAccountSID  string `json:"twilio_account_sid"`
+	TwilioAccountSID  string `json:"twilio_account_sid" gorm:"column:twilio_account_sid"`
 	TwilioAuthToken   string `json:"-" gorm:"-"`
 	TwilioPhoneNumber string `json:"twilio_phone_number"`
 
 	// SMS Service Configuration
 	SMSProvider          string `json:"sms_provider" gorm:"default:'twilio'"` // twilio, msg91, textlocal, aws_sns, sendgrid
-	TwilioSMSAccountSID  string `json:"twilio_sms_account_sid"`
+	TwilioSMSAccountSID  string `json:"twilio_sms_account_sid" gorm:"column:twilio_sms_account_sid"`
 	TwilioSMSAuthToken   string `json:"-" gorm:"-"`
 	TwilioSMSPhoneNumber string `json:"twilio_sms_phone_number"`
 	Msg91SenderID        string `json:"msg91_sender_id"`
 	Msg91AuthKey         string `json:"-" gorm:"-"`
-	TextLocalSenderID    string `json:"textlocal_sender_id"`
+	TextLocalSenderID    string `json:"textlocal_sender_id" gorm:"column:textlocal_sender_id"`
 	TextLocalAPIKey      string `json:"-" gorm:"-"`
 
 	// AWS SNS Configuration
@@ -2106,6 +2114,11 @@ type DeveloperSettings struct {
 
 	// SendGrid SMS Configuration
 	SendGridSMSAPIKey string `json:"-" gorm:"-"`
+
+	// Timezone is the IANA timezone name (e.g. "Asia/Kolkata") used to interpret
+	// scheduled send times for the daily report email scheduler and other
+	// time-based automations. Empty falls back to the server's local timezone.
+	Timezone string `json:"timezone" gorm:"default:''"`
 
 	// Encrypted fields (database storage only)
 	EncryptedSMTPPassword        string `json:"-" gorm:"column:smtp_password"`
@@ -2216,4 +2229,25 @@ type PageFeatureSettings struct {
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
 	DeletedAt gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// DailyReportEmailSettings stores per-user configuration for automatically
+// emailing a daily/periodic report PDF export to a list of recipients.
+// One row per user (UserID is unique). The scheduler reads these rows and
+// sends the configured report PDF at the configured time each day.
+type DailyReportEmailSettings struct {
+	ID              uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
+	IsEnabled       bool           `json:"is_enabled" gorm:"default:false"`
+	RecipientEmails string         `json:"recipient_emails" gorm:"type:text"` // comma/newline separated
+	Period          string         `json:"period" gorm:"default:'daily'"`     // today, daily, weekly, monthly
+	SendTime        string         `json:"send_time" gorm:"default:'09:00'"`  // HH:MM (24h, server local)
+	Subject         string         `json:"subject"`                           // optional custom subject
+	LastSentAt      *time.Time     `json:"last_sent_at,omitempty"`            // any send (manual or scheduled)
+	LastSentStatus  string         `json:"last_sent_status"`                  // success, partial, failed
+	LastSentError   string         `json:"last_sent_error,omitempty"`
+	LastScheduledAt *time.Time     `json:"last_scheduled_at,omitempty" gorm:"index"` // scheduler sends only
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+	DeletedAt       gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
