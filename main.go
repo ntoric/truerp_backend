@@ -35,6 +35,14 @@ func main() {
 	// report PDF to configured recipients at the configured time each day.
 	controllers.StartDailyReportEmailScheduler()
 
+	// Start the background scheduler that auto-sends the daily/periodic
+	// report PDF to configured Telegram chats via the user's bot.
+	controllers.StartDailyReportTelegramScheduler()
+
+	// Start the background scheduler that auto-sends scheduled Telegram
+	// marketing campaigns when their scheduled date/time arrives.
+	controllers.StartTelegramCampaignScheduler()
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 

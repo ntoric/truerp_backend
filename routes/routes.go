@@ -187,6 +187,11 @@ func SetupRoutes(r *gin.Engine) {
 		dashboard.PUT("/report-email-settings", controllers.UpdateDailyReportEmailSettingsHandler)
 		dashboard.POST("/report-email-settings/send-now", controllers.SendDailyReportEmailNowHandler)
 		dashboard.GET("/report-email-settings/server-time", controllers.GetServerTimeHandler)
+
+		// Daily report Telegram automation (auto-send PDF export to configured chats via bot)
+		dashboard.GET("/report-telegram-settings", controllers.GetDailyReportTelegramSettingsHandler)
+		dashboard.PUT("/report-telegram-settings", controllers.UpdateDailyReportTelegramSettingsHandler)
+		dashboard.POST("/report-telegram-settings/send-now", controllers.SendDailyReportTelegramNowHandler)
 	}
 
 	reports := r.Group("/api/v1/reports")
@@ -847,6 +852,20 @@ func SetupRoutes(r *gin.Engine) {
 		whatsappMarketing.POST("/:id/schedule", controllers.ScheduleWhatsAppCampaign)
 	}
 
+	// Telegram Marketing routes
+	telegramMarketing := r.Group("/api/v1/telegram-marketing")
+	telegramMarketing.Use(middleware.AuthRequired())
+	{
+		telegramMarketing.GET("", controllers.GetTelegramCampaigns)
+		telegramMarketing.GET("/stats", controllers.GetTelegramStats)
+		telegramMarketing.POST("", controllers.CreateTelegramCampaign)
+		telegramMarketing.GET("/:id", controllers.GetTelegramCampaign)
+		telegramMarketing.PUT("/:id", controllers.UpdateTelegramCampaign)
+		telegramMarketing.DELETE("/:id", controllers.DeleteTelegramCampaign)
+		telegramMarketing.POST("/:id/send", controllers.SendTelegramCampaign)
+		telegramMarketing.POST("/:id/schedule", controllers.ScheduleTelegramCampaign)
+	}
+
 	// Developer Settings routes (super admin only)
 	developerSettings := r.Group("/api/v1/developer-settings")
 	developerSettings.Use(middleware.AuthRequired(), middleware.SuperAdminRequired())
@@ -856,6 +875,7 @@ func SetupRoutes(r *gin.Engine) {
 		developerSettings.POST("/test-email", controllers.TestEmailConnection)
 		developerSettings.POST("/test-whatsapp", controllers.TestWhatsAppConnection)
 		developerSettings.POST("/test-sms", controllers.TestSMSConnection)
+		developerSettings.POST("/test-telegram", controllers.TestTelegramConnection)
 	}
 
 	// Page / menu feature flags (read: any auth user; write: super admin)

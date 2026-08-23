@@ -2,6 +2,8 @@ package controllers
 
 import (
 	"net/http"
+	"os"
+	"strings"
 	"truerp/models"
 	"truerp/utils"
 
@@ -29,6 +31,7 @@ type developerSettingsInput struct {
 	TwilioAccountSID          string `json:"twilio_account_sid"`
 	TwilioAuthToken           string `json:"twilio_auth_token"`
 	TwilioPhoneNumber         string `json:"twilio_phone_number"`
+	TelegramBotToken          string `json:"telegram_bot_token"`
 	SMSProvider               string `json:"sms_provider"`
 	TwilioSMSAccountSID       string `json:"twilio_sms_account_sid"`
 	TwilioSMSAuthToken        string `json:"twilio_sms_auth_token"`
@@ -132,6 +135,12 @@ func applyDeveloperSettingsInput(settings *models.DeveloperSettings, input devel
 			return err
 		}
 	}
+	if input.TelegramBotToken != "" {
+		settings.EncryptedTelegramBotToken, err = encryptIfPresent(input.TelegramBotToken)
+		if err != nil {
+			return err
+		}
+	}
 	if input.Msg91AuthKey != "" {
 		settings.EncryptedMsg91AuthKey, err = encryptIfPresent(input.Msg91AuthKey)
 		if err != nil {
@@ -196,6 +205,7 @@ func developerSettingsUpdates(input developerSettingsInput) (map[string]interfac
 		{input.WhatsAppAPIKey, "whatsapp_api_key"},
 		{input.TwilioAuthToken, "twilio_auth_token"},
 		{input.TwilioSMSAuthToken, "twilio_sms_auth_token"},
+		{input.TelegramBotToken, "telegram_bot_token"},
 		{input.Msg91AuthKey, "msg91_auth_key"},
 		{input.TextLocalAPIKey, "textlocal_api_key"},
 		{input.AWSSecretKey, "aws_secret_key"},
@@ -405,6 +415,52 @@ func TestSMSConnection(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message":  "SMS configuration saved",
 		"provider": settings.SMSProvider,
+		"status":   "configured",
+	})
+}
+
+// TestTelegramConnection validates the configured Telegram bot token by
+// calling the Bot API getMe method. Accepts an inline token in the request
+// body (so the user can test before saving) and falls back to the saved
+// encrypted token.
+func TestTelegramConnection(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	var input struct {
+		TelegramBotToken string `json:"telegram_bot_token"`
+	}
+	_ = c.ShouldBindJSON(&input)
+
+	token := strings.TrimSpace(input.TelegramBotToken)
+	if token == "" {
+		var saved models.DeveloperSettings
+		if err := utils.DB.Where("user_id = ?", userID).First(&saved).Error; err == nil && saved.EncryptedTelegramBotToken != "" {
+			decrypted, err := utils.Decrypt(saved.EncryptedTelegramBotToken)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decrypt saved Telegram bot token"})
+				return
+			}
+			token = decrypted
+		}
+	}
+	if token == "" {
+		// Fall back to the global env token.
+		token = strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
+	}
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Telegram bot token is required"})
+		return
+	}
+
+	username, err := utils.TestTelegramBot(token)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":  "Telegram connection successful",
+		"bot_username": username,
 		"status":   "configured",
 	})
 }

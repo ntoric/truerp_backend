@@ -174,10 +174,13 @@ func allApplicationModels() []interface{} {
 		&models.EmailRecipient{},
 		&models.WhatsAppMarketing{},
 		&models.WhatsAppRecipient{},
+		&models.TelegramMarketing{},
+		&models.TelegramRecipient{},
 		&models.IPRestriction{},
 		&models.DataBackup{},
 		&models.GDPRRequest{},
 		&models.DailyReportEmailSettings{},
+		&models.DailyReportTelegramSettings{},
 	}
 }
 

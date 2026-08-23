@@ -838,6 +838,7 @@ type Party struct {
 	Name           string         `json:"name" gorm:"not null"`
 	Phone          string         `json:"phone"`
 	Email          string         `json:"email"`
+	TelegramChatID string         `json:"telegram_chat_id" gorm:"column:telegram_chat_id"` // numeric chat id or @channelusername
 	GSTIN          string         `json:"gstin"`
 	Address        string         `json:"address"`
 	City           string         `json:"city"`
@@ -1640,6 +1641,45 @@ type WhatsAppRecipient struct {
 	UpdatedAt    time.Time         `json:"updated_at"`
 }
 
+// TelegramMarketing is a Telegram bot broadcast campaign. Recipients are
+// Telegram chat IDs or @channel usernames — either pulled from each Party's
+// TelegramChatID field (audience-based) or supplied manually (custom_chats).
+type TelegramMarketing struct {
+	ID              uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	CampaignName    string         `json:"campaign_name" gorm:"not null"`
+	Message         string         `json:"message" gorm:"not null"`
+	MediaURL        string         `json:"media_url"`                       // optional file/URL to attach
+	TargetAudience  string         `json:"target_audience" gorm:"not null"` // all_customers, specific_customers, all_vendors, specific_vendors, custom_chats
+	ScheduledDate   *time.Time     `json:"scheduled_date,omitempty"`
+	SentDate        *time.Time     `json:"sent_date,omitempty"`
+	Status          string         `json:"status" gorm:"default:'draft'"` // draft, scheduled, sent, failed
+	TotalRecipients int            `json:"total_recipients" gorm:"default:0"`
+	SentCount       int            `json:"sent_count" gorm:"default:0"`
+	FailedCount     int            `json:"failed_count" gorm:"default:0"`
+	Notes           string                `json:"notes"`
+	Recipients      []TelegramRecipient  `json:"recipients,omitempty" gorm:"foreignKey:CampaignID"`
+	CreatedAt       time.Time            `json:"created_at"`
+	UpdatedAt       time.Time            `json:"updated_at"`
+	DeletedAt       gorm.DeletedAt       `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// TelegramRecipient is one chat targeted by a Telegram campaign. ChatTarget
+// is the numeric chat ID or @channelusername the bot will send to.
+type TelegramRecipient struct {
+	ID           uuid.UUID         `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	CampaignID   uuid.UUID         `json:"campaign_id" gorm:"type:uuid;not null;index"`
+	Campaign     TelegramMarketing `json:"campaign,omitempty" gorm:"foreignKey:CampaignID"`
+	PartyID      *uuid.UUID        `json:"party_id,omitempty" gorm:"type:uuid"`
+	Party        *Party            `json:"party,omitempty" gorm:"foreignKey:PartyID"`
+	ChatTarget   string            `json:"chat_target" gorm:"not null"` // numeric chat id or @channelusername
+	Status       string            `json:"status" gorm:"default:'pending'"` // pending, sent, failed
+	ErrorMessage string            `json:"error_message"`
+	SentAt       *time.Time        `json:"sent_at,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at"`
+}
+
 type AuditLog struct {
 	ID           uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID       uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index"`
@@ -2092,6 +2132,9 @@ type DeveloperSettings struct {
 	WhatsAppPhoneNumberID     string `json:"whatsapp_phone_number_id" gorm:"column:whatsapp_phone_number_id"`
 	WhatsAppBusinessAccountID string `json:"whatsapp_business_account_id" gorm:"column:whatsapp_business_account_id"`
 
+	// Telegram Bot Configuration (Bot API token from @BotFather)
+	TelegramBotToken string `json:"-" gorm:"-"`
+
 	// Twilio Configuration
 	TwilioAccountSID  string `json:"twilio_account_sid" gorm:"column:twilio_account_sid"`
 	TwilioAuthToken   string `json:"-" gorm:"-"`
@@ -2127,6 +2170,7 @@ type DeveloperSettings struct {
 	EncryptedSESSecretKey        string `json:"-" gorm:"column:ses_secret_key"`
 	EncryptedMailgunAPIKey       string `json:"-" gorm:"column:mailgun_api_key"`
 	EncryptedWhatsAppAPIKey      string `json:"-" gorm:"column:whatsapp_api_key"`
+	EncryptedTelegramBotToken    string `json:"-" gorm:"column:telegram_bot_token"`
 	EncryptedTwilioAccountSID    string `json:"-" gorm:"-"`
 	EncryptedTwilioAuthToken     string `json:"-" gorm:"column:twilio_auth_token"`
 	EncryptedTwilioSMSAccountSID string `json:"-" gorm:"-"`
@@ -2247,6 +2291,27 @@ type DailyReportEmailSettings struct {
 	LastSentStatus  string         `json:"last_sent_status"`                  // success, partial, failed
 	LastSentError   string         `json:"last_sent_error,omitempty"`
 	LastScheduledAt *time.Time     `json:"last_scheduled_at,omitempty" gorm:"index"` // scheduler sends only
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+	DeletedAt       gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// DailyReportTelegramSettings stores per-user configuration for automatically
+// sending a daily/periodic report PDF export to a list of Telegram chats via
+// the configured bot. One row per user (UserID is unique). The scheduler reads
+// these rows and sends the report PDF (with a caption) at the configured time.
+type DailyReportTelegramSettings struct {
+	ID              uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
+	IsEnabled       bool           `json:"is_enabled" gorm:"default:false"`
+	TargetChats     string         `json:"target_chats" gorm:"type:text"`     // comma/newline separated chat ids / @channelusernames
+	Period          string         `json:"period" gorm:"default:'daily'"`     // today, daily, weekly, monthly
+	SendTime        string         `json:"send_time" gorm:"default:'09:00'"`  // HH:MM (24h, configured tz)
+	Caption         string         `json:"caption"`                           // optional custom caption
+	LastSentAt      *time.Time     `json:"last_sent_at,omitempty"`
+	LastSentStatus  string         `json:"last_sent_status"` // success, partial, failed
+	LastSentError   string         `json:"last_sent_error,omitempty"`
+	LastScheduledAt *time.Time     `json:"last_scheduled_at,omitempty" gorm:"index"`
 	CreatedAt       time.Time      `json:"created_at"`
 	UpdatedAt       time.Time      `json:"updated_at"`
 	DeletedAt       gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
