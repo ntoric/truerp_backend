@@ -17,6 +17,7 @@ import (
 	"github.com/go-pdf/fpdf"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func GetPurchaseOrders(c *gin.Context) {
@@ -768,98 +769,109 @@ func UpdatePurchaseBill(c *gin.Context) {
 	bill.Notes = input.Notes
 	bill.TaxExempt = input.TaxExempt
 
-	// Capture existing client_item_ref -> product_id mapping BEFORE deleting
-	// old items. On a retry after a lost response, the frontend still sends
-	// is_new_item=true with no product_id for lines whose product was already
-	// created on the previous (unacknowledged) save. Restoring the product_id
-	// here prevents ensureProductForAdhocItem from creating a duplicate.
-	var existingItems []models.PurchaseBillItem
-	utils.DB.Where("bill_id = ?", bill.ID).Find(&existingItems)
-	productIDByRef := make(map[string]uuid.UUID)
-	for _, ei := range existingItems {
-		if ei.ClientItemRef != nil && ei.ProductID != nil {
-			productIDByRef[*ei.ClientItemRef] = *ei.ProductID
-		}
-	}
-
-	// Delete old items and recreate
-	utils.DB.Where("bill_id = ?", bill.ID).Delete(&models.PurchaseBillItem{})
-
-	var subTotal, taxTotal float64
-	bill.Items = nil
+	// Validate quantities before opening the transaction so a bad payload
+	// cannot hold a row lock or leave the bill with no lines.
 	for _, item := range input.Items {
-		qty := item.Quantity.Float64()
-		unitPrice := item.UnitPrice.Float64()
-		discount := item.Discount.Float64()
-		taxRate := item.TaxRate.Float64()
-		if input.TaxExempt {
-			taxRate = 0
-		}
-		if qty <= 0 {
+		if item.Quantity.Float64() <= 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Item quantity must be greater than 0"})
 			return
 		}
+	}
 
-		itemTotal := unitPrice * qty
-		itemDiscount := itemTotal * (discount / 100)
-		taxable := itemTotal - itemDiscount
-		taxAmount := taxable * (taxRate / 100)
-		total := taxable + taxAmount
+	// Wrap lock + item replace + stock reset + bill save + payment reversal
+	// in a single transaction. Item delete used to run outside this tx, so
+	// overlapping draft-autosave and Save PUTs could each insert a full copy
+	// of the lines (duplicate purchase_bill_items).
+	if err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockPurchaseBillRow(tx, userID, bill.ID); err != nil {
+			return err
+		}
 
-		// Restore product_id for new-item lines whose product was already
-		// created on a previous save (matched by client_item_ref). This keeps
-		// the line linked to the same product instead of creating a duplicate.
-		resolvedProductID := item.ProductID
-		isNewItem := item.IsNewItem
-		if isNewItem && resolvedProductID == nil && item.ClientItemRef != nil {
-			if existingPID, ok := productIDByRef[*item.ClientItemRef]; ok {
-				resolvedProductID = &existingPID
-				isNewItem = false
+		// Capture existing client_item_ref -> product_id mapping BEFORE deleting
+		// old items. On a retry after a lost response, the frontend still sends
+		// is_new_item=true with no product_id for lines whose product was already
+		// created on the previous (unacknowledged) save. Restoring the product_id
+		// here prevents ensureProductForAdhocItem from creating a duplicate.
+		var existingItems []models.PurchaseBillItem
+		if err := tx.Where("bill_id = ?", bill.ID).Find(&existingItems).Error; err != nil {
+			return err
+		}
+		productIDByRef := make(map[string]uuid.UUID)
+		for _, ei := range existingItems {
+			if ei.ClientItemRef != nil && ei.ProductID != nil {
+				productIDByRef[*ei.ClientItemRef] = *ei.ProductID
 			}
 		}
 
-		bill.Items = append(bill.Items, models.PurchaseBillItem{
-			ID:            uuid.New(),
-			BillID:        bill.ID,
-			ProductID:     resolvedProductID,
-			ItemCode:      item.ItemCode,
-			Description:   item.Description,
-			Quantity:      qty,
-			Unit:          item.Unit,
-			UnitPrice:     unitPrice,
-			Discount:      discount,
-			TaxRate:       taxRate,
-			TaxAmount:     taxAmount,
-			Total:         total,
-			MRP:           item.MRP.Float64(),
-			SalePrice:     item.SalePrice.Float64(),
-			HSNCode:       item.HSNCode,
-			BatchNo:       item.BatchNo,
-			MfgDate:       item.MfgDate.Ptr(),
-			ExpDate:       item.ExpDate.Ptr(),
-			IsNewItem:     isNewItem,
-			Category:      item.Category,
-			ClientItemRef: item.ClientItemRef,
-		})
+		var subTotal, taxTotal float64
+		bill.Items = nil
+		for _, item := range input.Items {
+			qty := item.Quantity.Float64()
+			unitPrice := item.UnitPrice.Float64()
+			discount := item.Discount.Float64()
+			taxRate := item.TaxRate.Float64()
+			if input.TaxExempt {
+				taxRate = 0
+			}
 
-		subTotal += itemTotal
-		taxTotal += taxAmount
-	}
+			itemTotal := unitPrice * qty
+			itemDiscount := itemTotal * (discount / 100)
+			taxable := itemTotal - itemDiscount
+			taxAmount := taxable * (taxRate / 100)
+			total := taxable + taxAmount
 
-	bill.SubTotal = subTotal
-	bill.TaxTotal = taxTotal
+			// Restore product_id for new-item lines whose product was already
+			// created on a previous save (matched by client_item_ref). This keeps
+			// the line linked to the same product instead of creating a duplicate.
+			resolvedProductID := item.ProductID
+			isNewItem := item.IsNewItem
+			if isNewItem && resolvedProductID == nil && item.ClientItemRef != nil {
+				if existingPID, ok := productIDByRef[*item.ClientItemRef]; ok {
+					resolvedProductID = &existingPID
+					isNewItem = false
+				}
+			}
 
-	// Wrap the whole update (stock reset, bill save, payment reversal +
-	// recreate, stock entries) in a single transaction so a failure in any
-	// step rolls back the entire edit — no half-updated bills or orphan
-	// products when the network drops mid-save.
-	if err := utils.DB.Transaction(func(tx *gorm.DB) error {
+			bill.Items = append(bill.Items, models.PurchaseBillItem{
+				ID:            uuid.New(),
+				BillID:        bill.ID,
+				ProductID:     resolvedProductID,
+				ItemCode:      item.ItemCode,
+				Description:   item.Description,
+				Quantity:      qty,
+				Unit:          item.Unit,
+				UnitPrice:     unitPrice,
+				Discount:      discount,
+				TaxRate:       taxRate,
+				TaxAmount:     taxAmount,
+				Total:         total,
+				MRP:           item.MRP.Float64(),
+				SalePrice:     item.SalePrice.Float64(),
+				HSNCode:       item.HSNCode,
+				BatchNo:       item.BatchNo,
+				MfgDate:       item.MfgDate.Ptr(),
+				ExpDate:       item.ExpDate.Ptr(),
+				IsNewItem:     isNewItem,
+				Category:      item.Category,
+				ClientItemRef: item.ClientItemRef,
+			})
+
+			subTotal += itemTotal
+			taxTotal += taxAmount
+		}
+
+		bill.SubTotal = subTotal
+		bill.TaxTotal = taxTotal
+
 		// Reset linked stock entries so edits re-apply inventory immediately
 		if err := removePurchaseStockEntriesTx(tx, userID, bill.ID); err != nil {
 			return err
 		}
 
-		if err := tx.Save(&bill).Error; err != nil {
+		if err := tx.Omit("Items").Save(&bill).Error; err != nil {
+			return err
+		}
+		if err := replacePurchaseBillItemsTx(tx, bill.ID, bill.Items); err != nil {
 			return err
 		}
 
@@ -890,6 +902,38 @@ func UpdatePurchaseBill(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, bill)
+}
+
+func lockPurchaseBillRow(tx *gorm.DB, userID, billID uuid.UUID) error {
+	q := tx.Model(&models.PurchaseBill{}).Where("user_id = ? AND id = ?", userID, billID)
+	if utils.IsPostgres() {
+		var row models.PurchaseBill
+		return q.Clauses(clause.Locking{Strength: "UPDATE"}).First(&row).Error
+	}
+	// SQLite does not honor SELECT FOR UPDATE. Touch the row so this
+	// transaction takes the write lock before replacing line items.
+	res := q.UpdateColumn("updated_at", time.Now())
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+// replacePurchaseBillItemsTx deletes all lines for a bill and inserts the
+// replacement set in the same transaction. Callers must already hold a lock
+// on the parent bill (see lockPurchaseBillRow) so concurrent PUTs serialize
+// as replace-not-append.
+func replacePurchaseBillItemsTx(tx *gorm.DB, billID uuid.UUID, items []models.PurchaseBillItem) error {
+	if err := tx.Where("bill_id = ?", billID).Delete(&models.PurchaseBillItem{}).Error; err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	return tx.Create(&items).Error
 }
 
 func DeletePurchaseBill(c *gin.Context) {

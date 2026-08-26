@@ -124,9 +124,15 @@ func createLinkedSalePaymentInWithMode(tx *gorm.DB, userID uuid.UUID, invoice *m
 		return err
 	}
 
-	desc := salePaymentDescription(invoice)
-	if err := recordSalePaymentIn(tx, userID, accountID, amount, date, invoice.InvoiceNumber, desc); err != nil {
-		return err
+	if isInitialInvestmentPayment(mode) {
+		if err := postStandalonePaymentInAccounting(tx, userID, &payment, amount); err != nil {
+			return err
+		}
+	} else {
+		desc := salePaymentDescription(invoice)
+		if err := recordSalePaymentIn(tx, userID, accountID, amount, date, invoice.InvoiceNumber, desc); err != nil {
+			return err
+		}
 	}
 
 	var party models.Party
@@ -217,6 +223,19 @@ func applyLedgerBalancesToAccounts(db *gorm.DB, userID uuid.UUID, accounts []mod
 	}
 }
 
+func sumInitialInvestmentCapital(db *gorm.DB, userID uuid.UUID) float64 {
+	var total float64
+	// Opening stock and other purchases settled as owner's capital.
+	err := db.Model(&models.PaymentOut{}).
+		Where("user_id = ? AND LOWER(TRIM(COALESCE(mode, ''))) = ?", userID, paymentMethodInitialInvestment).
+		Select("? AS total", gorm.Expr("COALESCE(SUM(amount_paid - COALESCE(payment_out_discount, 0)), 0)")).
+		Scan(&total).Error
+	if err != nil {
+		return 0
+	}
+	return total
+}
+
 func buildCashBankSummary(db *gorm.DB, userID uuid.UUID, accounts []models.BankAccount) models.CashBankSummary {
 	applyLedgerBalancesToAccounts(db, userID, accounts)
 
@@ -238,11 +257,12 @@ func buildCashBankSummary(db *gorm.DB, userID uuid.UUID, accounts []models.BankA
 		Scan(&unlinkedAmount)
 
 	return models.CashBankSummary{
-		TotalBalance:   totalBankBalance + cashInHand,
-		CashInHand:     cashInHand,
-		BankAccounts:   accounts,
-		UnlinkedCount:  unlinkedCount,
-		UnlinkedAmount: unlinkedAmount,
+		TotalBalance:      totalBankBalance + cashInHand,
+		CashInHand:        cashInHand,
+		InitialInvestment: sumInitialInvestmentCapital(db, userID),
+		BankAccounts:      accounts,
+		UnlinkedCount:     unlinkedCount,
+		UnlinkedAmount:    unlinkedAmount,
 	}
 }
 
@@ -551,10 +571,7 @@ func createLinkedPurchasePaymentOut(tx *gorm.DB, userID uuid.UUID, bill *models.
 	}
 	number := fmt.Sprintf("POUT-%04d", count+1)
 
-	mode := bill.PaymentMode
-	if mode == "" {
-		mode = "cash"
-	}
+	mode := normalizePaymentMethod(bill.PaymentMode)
 
 	billID := bill.ID
 	paymentOut := models.PaymentOut{
@@ -573,9 +590,15 @@ func createLinkedPurchasePaymentOut(tx *gorm.DB, userID uuid.UUID, bill *models.
 		return err
 	}
 
-	desc := fmt.Sprintf("Payment out %s for purchase %s", number, bill.BillNumber)
-	if err := recordPurchasePaymentOut(tx, userID, bill.BankAccountID, amount, date, bill.BillNumber, desc); err != nil {
-		return err
+	if isInitialInvestmentPayment(mode) {
+		if err := postStandalonePaymentOutAccounting(tx, userID, &paymentOut, amount); err != nil {
+			return err
+		}
+	} else {
+		desc := fmt.Sprintf("Payment out %s for purchase %s", number, bill.BillNumber)
+		if err := recordPurchasePaymentOut(tx, userID, bill.BankAccountID, amount, date, bill.BillNumber, desc); err != nil {
+			return err
+		}
 	}
 
 	// Match standalone PaymentOut behaviour: bump party balance by amount paid.

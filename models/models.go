@@ -252,7 +252,7 @@ type Payment struct {
 	AmountReceived    float64        `json:"amount_received" gorm:"default:0"`
 	PaymentInDiscount float64        `json:"payment_in_discount" gorm:"default:0"`
 	PaymentInNumber   string         `json:"payment_in_number"`
-	Mode              string         `json:"mode"` // cash, upi, bank_transfer, cheque, card
+	Mode              string         `json:"mode"` // cash, upi, bank_transfer, cheque, card, initial_investment
 	Date              time.Time      `json:"date"`
 	Reference         string         `json:"reference"`
 	Notes             string         `json:"notes"`
@@ -271,7 +271,7 @@ type PaymentOut struct {
 	AmountPaid         float64        `json:"amount_paid" gorm:"default:0"`
 	PaymentOutDiscount float64        `json:"payment_out_discount" gorm:"default:0"`
 	PaymentOutNumber   string         `json:"payment_out_number"`
-	Mode               string         `json:"mode"` // cash, upi, bank_transfer, cheque, card
+	Mode               string         `json:"mode"` // cash, upi, bank_transfer, cheque, card, initial_investment
 	Date               time.Time      `json:"date"`
 	Reference          string         `json:"reference"`
 	Notes              string         `json:"notes"`
@@ -1010,11 +1010,12 @@ type CashTransaction struct {
 }
 
 type CashBankSummary struct {
-	TotalBalance   float64       `json:"total_balance"`
-	CashInHand     float64       `json:"cash_in_hand"`
-	BankAccounts   []BankAccount `json:"bank_accounts"`
-	UnlinkedCount  int64         `json:"unlinked_count"`
-	UnlinkedAmount float64       `json:"unlinked_amount"`
+	TotalBalance        float64       `json:"total_balance"`
+	CashInHand          float64       `json:"cash_in_hand"`
+	InitialInvestment   float64       `json:"initial_investment"`
+	BankAccounts        []BankAccount `json:"bank_accounts"`
+	UnlinkedCount       int64         `json:"unlinked_count"`
+	UnlinkedAmount      float64       `json:"unlinked_amount"`
 }
 
 type PaymentMethodAccountMap struct {

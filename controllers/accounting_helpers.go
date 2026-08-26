@@ -377,18 +377,25 @@ func postPayrollSalaryAccounting(tx *gorm.DB, userID uuid.UUID, payroll *models.
 	})
 }
 
+func settlementAccountCodeForMode(tx *gorm.DB, userID uuid.UUID, mode string) string {
+	if isInitialInvestmentPayment(mode) {
+		return acCodeEquity
+	}
+	if id, err := glAssetAccountForPaymentMode(tx, userID, mode); err == nil {
+		var account models.Account
+		if tx.Where("id = ?", id).First(&account).Error == nil && account.Code == acCodeBank {
+			return acCodeBank
+		}
+	}
+	return acCodeCash
+}
+
 func postStandalonePaymentInAccounting(tx *gorm.DB, userID uuid.UUID, payment *models.Payment, netAmount float64) error {
 	if netAmount <= 0 {
 		return nil
 	}
 	desc := fmt.Sprintf("Payment in %s", payment.PaymentInNumber)
-	assetCode := acCodeCash
-	if id, err := glAssetAccountForPaymentMode(tx, userID, payment.Mode); err == nil {
-		var account models.Account
-		if tx.Where("id = ?", id).First(&account).Error == nil && account.Code == acCodeBank {
-			assetCode = acCodeBank
-		}
-	}
+	assetCode := settlementAccountCodeForMode(tx, userID, payment.Mode)
 	refNumber := payment.PaymentInNumber
 	if refNumber == "" {
 		refNumber = payment.ID.String()
@@ -404,13 +411,7 @@ func postStandalonePaymentOutAccounting(tx *gorm.DB, userID uuid.UUID, payment *
 		return nil
 	}
 	desc := fmt.Sprintf("Payment out %s", payment.PaymentOutNumber)
-	assetCode := acCodeCash
-	if id, err := glAssetAccountForPaymentMode(tx, userID, payment.Mode); err == nil {
-		var account models.Account
-		if tx.Where("id = ?", id).First(&account).Error == nil && account.Code == acCodeBank {
-			assetCode = acCodeBank
-		}
-	}
+	assetCode := settlementAccountCodeForMode(tx, userID, payment.Mode)
 	refNumber := payment.PaymentOutNumber
 	if refNumber == "" {
 		refNumber = payment.ID.String()

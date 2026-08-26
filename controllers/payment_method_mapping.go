@@ -10,6 +10,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const paymentMethodInitialInvestment = "initial_investment"
+
 var standardPaymentMethods = []struct {
 	Key   string `json:"payment_method"`
 	Label string `json:"label"`
@@ -19,6 +21,7 @@ var standardPaymentMethods = []struct {
 	{Key: "card", Label: "Card"},
 	{Key: "bank_transfer", Label: "Bank Transfer"},
 	{Key: "cheque", Label: "Cheque"},
+	{Key: paymentMethodInitialInvestment, Label: "Initial Investment"},
 }
 
 func normalizePaymentMethod(mode string) string {
@@ -29,7 +32,16 @@ func normalizePaymentMethod(mode string) string {
 	return m
 }
 
+func isInitialInvestmentPayment(mode string) bool {
+	return normalizePaymentMethod(mode) == paymentMethodInitialInvestment
+}
+
 func resolveBankAccountForPaymentMode(userID uuid.UUID, paymentMode string, explicit *uuid.UUID) (*uuid.UUID, error) {
+	// Opening stock / capital contributions must never hit cash or bank.
+	if isInitialInvestmentPayment(paymentMode) {
+		return nil, nil
+	}
+
 	if explicit != nil {
 		if err := validateUserBankAccount(userID, explicit); err != nil {
 			return nil, err

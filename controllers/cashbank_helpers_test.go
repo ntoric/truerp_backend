@@ -115,7 +115,7 @@ func openCashBankTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&models.BankAccount{}, &models.CashTransaction{}); err != nil {
+	if err := db.AutoMigrate(&models.BankAccount{}, &models.CashTransaction{}, &models.PaymentOut{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
@@ -184,5 +184,179 @@ func TestBuildCashBankSummaryDeductsBankExpense(t *testing.T) {
 	}
 	if summary.TotalBalance != 4200 {
 		t.Fatalf("total balance = %.2f, want 4200", summary.TotalBalance)
+	}
+}
+
+func TestIsInitialInvestmentPayment(t *testing.T) {
+	if !isInitialInvestmentPayment("initial_investment") {
+		t.Fatal("expected initial_investment to be recognized")
+	}
+	if !isInitialInvestmentPayment(" Initial_Investment ") {
+		t.Fatal("expected normalized initial_investment to be recognized")
+	}
+	if isInitialInvestmentPayment("cash") || isInitialInvestmentPayment("") {
+		t.Fatal("cash / empty should not be treated as initial investment")
+	}
+}
+
+func TestPaymentMethodLabelInitialInvestment(t *testing.T) {
+	if got := paymentMethodLabel("initial_investment"); got != "Initial Investment" {
+		t.Fatalf("label = %q, want Initial Investment", got)
+	}
+}
+
+func TestResolveBankAccountForPaymentModeInitialInvestment(t *testing.T) {
+	bankID := uuid.New()
+	got, err := resolveBankAccountForPaymentMode(uuid.New(), "initial_investment", &bankID)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("got account %v, want nil so cash/bank are not used", *got)
+	}
+}
+
+func openPurchasePaymentTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file::memory:"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(
+		&models.Party{},
+		&models.PurchaseBill{},
+		&models.PaymentOut{},
+		&models.CashTransaction{},
+		&models.Account{},
+		&models.JournalEntry{},
+		&models.JournalEntryLine{},
+		&models.Ledger{},
+	); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return db
+}
+
+func TestCreateLinkedPurchasePaymentOutInitialInvestmentDoesNotMoveCash(t *testing.T) {
+	db := openPurchasePaymentTestDB(t)
+	userID := uuid.New()
+	partyID := uuid.New()
+	now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+
+	party := models.Party{
+		ID:        partyID,
+		UserID:    userID,
+		Name:      "Opening Vendor",
+		PartyType: "vendor",
+		IsActive:  true,
+	}
+	if err := db.Create(&party).Error; err != nil {
+		t.Fatalf("create party: %v", err)
+	}
+
+	bill := models.PurchaseBill{
+		ID:          uuid.New(),
+		UserID:      userID,
+		PartyID:     partyID,
+		BillNumber:  "PINV-OPEN-1",
+		BillDate:    now,
+		TotalAmount: 5000,
+		PaidAmount:  5000,
+		PaymentMode: "initial_investment",
+		Status:      "paid",
+	}
+	if err := db.Create(&bill).Error; err != nil {
+		t.Fatalf("create bill: %v", err)
+	}
+
+	if err := createLinkedPurchasePaymentOut(db, userID, &bill, bill.PaidAmount, bill.BillDate, "opening stock"); err != nil {
+		t.Fatalf("create payment out: %v", err)
+	}
+
+	summary := buildCashBankSummary(db, userID, nil)
+	if summary.CashInHand != 0 {
+		t.Fatalf("cash in-hand = %.2f, want 0", summary.CashInHand)
+	}
+	if summary.InitialInvestment != 5000 {
+		t.Fatalf("initial investment = %.2f, want 5000", summary.InitialInvestment)
+	}
+
+	var txnCount int64
+	if err := db.Model(&models.CashTransaction{}).Where("user_id = ?", userID).Count(&txnCount).Error; err != nil {
+		t.Fatalf("count cash txns: %v", err)
+	}
+	if txnCount != 0 {
+		t.Fatalf("cash transactions = %d, want 0", txnCount)
+	}
+
+	var paymentOut models.PaymentOut
+	if err := db.Where("user_id = ? AND purchase_bill_id = ?", userID, bill.ID).First(&paymentOut).Error; err != nil {
+		t.Fatalf("payment out: %v", err)
+	}
+	if paymentOut.Mode != "initial_investment" {
+		t.Fatalf("payment out mode = %q, want initial_investment", paymentOut.Mode)
+	}
+
+	var equity models.Account
+	if err := db.Where("user_id = ? AND code = ?", userID, acCodeEquity).First(&equity).Error; err != nil {
+		t.Fatalf("equity account: %v", err)
+	}
+	if equity.Balance != 5000 {
+		t.Fatalf("owner's equity = %.2f, want 5000", equity.Balance)
+	}
+
+	var cash models.Account
+	if err := db.Where("user_id = ? AND code = ?", userID, acCodeCash).First(&cash).Error; err != nil {
+		t.Fatalf("cash account: %v", err)
+	}
+	if cash.Balance != 0 {
+		t.Fatalf("GL cash = %.2f, want 0", cash.Balance)
+	}
+}
+
+func TestCreateLinkedPurchasePaymentOutCashReducesCashInHand(t *testing.T) {
+	db := openPurchasePaymentTestDB(t)
+	userID := uuid.New()
+	partyID := uuid.New()
+	now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+
+	party := models.Party{
+		ID:        partyID,
+		UserID:    userID,
+		Name:      "Cash Vendor",
+		PartyType: "vendor",
+		IsActive:  true,
+	}
+	if err := db.Create(&party).Error; err != nil {
+		t.Fatalf("create party: %v", err)
+	}
+
+	bill := models.PurchaseBill{
+		ID:          uuid.New(),
+		UserID:      userID,
+		PartyID:     partyID,
+		BillNumber:  "PINV-CASH-1",
+		BillDate:    now,
+		TotalAmount: 1200,
+		PaidAmount:  1200,
+		PaymentMode: "cash",
+		Status:      "paid",
+	}
+	if err := db.Create(&bill).Error; err != nil {
+		t.Fatalf("create bill: %v", err)
+	}
+
+	if err := createLinkedPurchasePaymentOut(db, userID, &bill, bill.PaidAmount, bill.BillDate, "paid in cash"); err != nil {
+		t.Fatalf("create payment out: %v", err)
+	}
+
+	summary := buildCashBankSummary(db, userID, nil)
+	if summary.CashInHand != -1200 {
+		t.Fatalf("cash in-hand = %.2f, want -1200", summary.CashInHand)
+	}
+	if summary.InitialInvestment != 0 {
+		t.Fatalf("initial investment = %.2f, want 0", summary.InitialInvestment)
 	}
 }

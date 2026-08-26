@@ -266,6 +266,8 @@ func paymentMethodLabel(method string) string {
 		return "Bank Transfer"
 	case "cheque", "check":
 		return "Cheque"
+	case paymentMethodInitialInvestment:
+		return "Initial Investment"
 	default:
 		label := strings.ReplaceAll(normalizePaymentMethod(method), "_", " ")
 		if label == "" {
