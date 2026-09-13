@@ -77,6 +77,22 @@ func (ls *LocalStorage) GetFile(path string) (io.ReadCloser, error) {
 	return os.Open(fullPath)
 }
 
+// UploadBytes writes raw bytes to local storage and returns the public URL.
+func (ls *LocalStorage) UploadBytes(path string, body []byte, _ string) (string, error) {
+	fullPath := filepath.Join(ls.basePath, path)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(fullPath, body, 0o644); err != nil {
+		return "", err
+	}
+	return ls.GetFileURL(path), nil
+}
+
+// BasePath returns the local storage root directory. Exposed so background
+// jobs can write files outside the multipart upload path when needed.
+func (ls *LocalStorage) BasePath() string { return ls.basePath }
+
 // GenerateUniquePath generates a unique file path with timestamp
 func GenerateUniquePath(originalFilename string) string {
 	ext := filepath.Ext(originalFilename)

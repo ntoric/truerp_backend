@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bytes"
 	"io"
 	"mime/multipart"
 	"strings"
@@ -98,4 +99,21 @@ func (s3s *S3Storage) GetFile(path string) (io.ReadCloser, error) {
 		return nil, err
 	}
 	return result.Body, nil
+}
+
+// UploadBytes uploads raw bytes to S3 and returns the public URL.
+func (s3s *S3Storage) UploadBytes(path string, body []byte, contentType string) (string, error) {
+	input := &s3.PutObjectInput{
+		Bucket: aws.String(s3s.bucket),
+		Key:    aws.String(path),
+		Body:   bytes.NewReader(body),
+		ACL:    aws.String("public-read"),
+	}
+	if contentType != "" {
+		input.ContentType = aws.String(contentType)
+	}
+	if _, err := s3s.s3Client.PutObject(input); err != nil {
+		return "", err
+	}
+	return s3s.GetFileURL(path), nil
 }

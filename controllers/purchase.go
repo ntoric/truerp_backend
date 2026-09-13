@@ -8,6 +8,8 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"truerp/models"
@@ -619,6 +621,146 @@ func GetPurchaseBill(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, bill)
+}
+
+// purchaseInvoiceDir returns the directory where local purchase invoice PDFs
+// are stored. Defaults to "<local_storage_path>/purchase-invoices" but can be
+// overridden with the PURCHASE_INVOICE_DIR environment variable.
+func purchaseInvoiceDir() string {
+	if dir := os.Getenv("PURCHASE_INVOICE_DIR"); dir != "" {
+		return dir
+	}
+	base := os.Getenv("LOCAL_STORAGE_PATH")
+	if base == "" {
+		base = "uploads"
+	}
+	return filepath.Join(base, "purchase-invoices")
+}
+
+// sanitizeInvoiceName replaces characters that are unsafe in filenames with
+// underscores, matching the naming convention used when placing invoice
+// PDFs in the directory (e.g. "MARKET PURCHASE_Purchase_128.pdf" →
+// "MARKET_PURCHASE_Purchase_128.pdf").
+func sanitizeInvoiceName(name string) string {
+	r := strings.NewReplacer(" ", "_", "/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_")
+	return r.Replace(name)
+}
+
+// findPurchaseInvoiceFile searches the invoice directory for a PDF matching
+// the bill's party name and purchase number. The expected filename pattern is
+// "<PartyName>_Purchase_<PurchaseNo>.pdf" (e.g.
+// "MARKET_PURCHASE_Purchase_128.pdf"). The match is case-insensitive.
+func findPurchaseInvoiceFile(bill *models.PurchaseBill) (string, bool) {
+	dir := purchaseInvoiceDir()
+
+	// Extract the raw purchase number from the bill number. Bill numbers are
+	// stored as "P-0128" but the invoice files use the raw number ("128").
+	purchaseNo := bill.BillNumber
+	if strings.HasPrefix(purchaseNo, "P-") {
+		purchaseNo = strings.TrimPrefix(purchaseNo, "P-")
+		// Strip leading zeros for matching.
+		purchaseNo = strings.TrimLeft(purchaseNo, "0")
+		if purchaseNo == "" {
+			purchaseNo = "0"
+		}
+	}
+
+	partyName := ""
+	if bill.Party.Name != "" {
+		partyName = bill.Party.Name
+	}
+
+	// Build the expected filename.
+	pattern := fmt.Sprintf("%s_Purchase_%s", sanitizeInvoiceName(partyName), purchaseNo)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false
+	}
+
+	// Case-insensitive match on the base name (without extension).
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		ext := filepath.Ext(name)
+		if !strings.EqualFold(ext, ".pdf") {
+			continue
+		}
+		base := strings.TrimSuffix(name, ext)
+		if strings.EqualFold(base, pattern) {
+			return filepath.Join(dir, name), true
+		}
+	}
+	return "", false
+}
+
+// GetPurchaseBillInvoiceFile serves the local invoice PDF for a purchase bill
+// if one exists in the invoice directory. Returns JSON with the file URL when
+// found, or the available fallbacks (source_url) when not.
+//
+// GET /api/v1/purchase/bills/:id/invoice-file
+func GetPurchaseBillInvoiceFile(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	id := c.Param("id")
+
+	var bill models.PurchaseBill
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).Preload("Party").First(&bill).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Bill not found"})
+		return
+	}
+
+	// 1. Check the local invoice directory.
+	if filePath, ok := findPurchaseInvoiceFile(&bill); ok {
+		c.JSON(http.StatusOK, gin.H{
+			"found":      true,
+			"source":     "local",
+			"file_url":   fmt.Sprintf("/purchase/bills/%s/invoice-file/serve", id),
+			"file_name":  filepath.Base(filePath),
+		})
+		return
+	}
+
+	// 2. Fall back to the myBillBook source URL.
+	if bill.SourceURL != "" {
+		c.JSON(http.StatusOK, gin.H{
+			"found":      true,
+			"source":     "mybillbook",
+			"source_url": bill.SourceURL,
+		})
+		return
+	}
+
+	// 3. No invoice available.
+	c.JSON(http.StatusOK, gin.H{
+		"found":  false,
+		"error":  "No invoice file found. Place a PDF named \"" + sanitizeInvoiceName(bill.Party.Name) + "_Purchase_" + strings.TrimPrefix(bill.BillNumber, "P-") + ".pdf\" in the invoice directory.",
+	})
+}
+
+// ServePurchaseBillInvoiceFile streams the local invoice PDF file.
+//
+// GET /api/v1/purchase/bills/:id/invoice-file/serve
+func ServePurchaseBillInvoiceFile(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	id := c.Param("id")
+
+	var bill models.PurchaseBill
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).Preload("Party").First(&bill).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Bill not found"})
+		return
+	}
+
+	filePath, ok := findPurchaseInvoiceFile(&bill)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Invoice file not found"})
+		return
+	}
+
+	c.Header("Content-Type", "application/pdf")
+	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=\"%s\"", filepath.Base(filePath)))
+	c.File(filePath)
 }
 
 func UpdatePurchaseBill(c *gin.Context) {

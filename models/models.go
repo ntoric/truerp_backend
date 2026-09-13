@@ -651,6 +651,14 @@ type PurchaseBill struct {
 	PaymentMode       string             `json:"payment_mode"`
 	BankAccountID     *uuid.UUID         `json:"bank_account_id,omitempty" gorm:"type:uuid;index"`
 	Notes             string             `json:"notes"`
+	// SourceURL is the original external bill link (e.g. myBillBook
+	// https://mybillbook.in/cpp/<id>). Populated during migration import so
+	// the source document can be re-opened or re-downloaded later.
+	SourceURL     string `json:"source_url" gorm:"type:text"`
+	// SourceHTMLURL is the object-storage URL of an HTML snapshot of the
+	// SourceURL page, captured once during migration. Empty when no snapshot
+	// was taken (e.g. link unreachable at import time).
+	SourceHTMLURL string `json:"source_html_url" gorm:"type:text"`
 	Items             []PurchaseBillItem `json:"items" gorm:"foreignKey:BillID;constraint:OnDelete:CASCADE;"`
 	CreatedAt         time.Time          `json:"created_at"`
 	UpdatedAt         time.Time          `json:"updated_at"`

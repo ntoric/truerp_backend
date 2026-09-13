@@ -122,6 +122,7 @@ func SetupRoutes(r *gin.Engine) {
 		payments.POST("", controllers.CreatePayment)
 		payments.DELETE("/:id", controllers.DeletePayment)
 		payments.GET("/:id/pdf", controllers.GenerateReceiptPDF)
+		payments.POST("/import/csv", middleware.SuperAdminRequired(), controllers.ImportPaymentsCSV)
 	}
 
 	// Document generation routes
@@ -152,6 +153,7 @@ func SetupRoutes(r *gin.Engine) {
 		expenses.GET("/:id", controllers.GetExpense)
 		expenses.PUT("/:id", controllers.UpdateExpense)
 		expenses.DELETE("/:id", controllers.DeleteExpense)
+		expenses.POST("/import/csv", middleware.SuperAdminRequired(), controllers.ImportExpensesCSV)
 	}
 
 	// Expense category routes (separate from product categories)
@@ -326,6 +328,8 @@ func SetupRoutes(r *gin.Engine) {
 		purchase.POST("/bills", controllers.CreatePurchaseBill)
 		purchase.GET("/bills/stats", controllers.GetPurchaseBillStats)
 		purchase.GET("/bills/:id", controllers.GetPurchaseBill)
+		purchase.GET("/bills/:id/invoice-file", controllers.GetPurchaseBillInvoiceFile)
+		purchase.GET("/bills/:id/invoice-file/serve", controllers.ServePurchaseBillInvoiceFile)
 		purchase.GET("/bills/:id/pdf", controllers.GeneratePurchaseBillPDF)
 		purchase.GET("/bills/:id/download-pdf", controllers.DownloadPurchaseBillPDF)
 		purchase.PUT("/bills/:id", controllers.UpdatePurchaseBill)
@@ -333,6 +337,8 @@ func SetupRoutes(r *gin.Engine) {
 		purchase.GET("/bills/vendor/:vendorId/recent-products", controllers.GetVendorRecentProducts)
 		purchase.POST("/bills/labels", controllers.PrintPurchaseBillLabels)
 		purchase.POST("/parse-bill-ai", controllers.ParseBillWithAI)
+		purchase.POST("/bills/import/csv", middleware.SuperAdminRequired(), controllers.ImportPurchaseBillsCSV)
+		purchase.POST("/bills/download-source", middleware.SuperAdminRequired(), controllers.DownloadSourcePurchaseBills)
 	}
 
 	// GST routes
@@ -536,6 +542,7 @@ func SetupRoutes(r *gin.Engine) {
 		parties.DELETE("/:id", controllers.DeleteParty)
 		parties.POST("/bulk/delete", controllers.BulkDeleteParties)
 		parties.POST("/bulk/update-category", controllers.BulkUpdatePartyCategory)
+		parties.POST("/import/csv", middleware.SuperAdminRequired(), controllers.ImportPartiesCSV)
 	}
 
 	// Sales Return routes
@@ -923,5 +930,24 @@ func SetupRoutes(r *gin.Engine) {
 		portal.GET("/statements/:id/pdf", controllers.PortalStatementPDF)
 		portal.GET("/tickets", controllers.PortalListTickets)
 		portal.POST("/tickets", controllers.PortalCreateTicket)
+	}
+
+	// Migration routes (myBillBook and other source imports) — super admin only
+	migration := r.Group("/api/v1/migration")
+	migration.Use(middleware.AuthRequired(), middleware.SuperAdminRequired())
+	{
+		migration.POST("/mybillbook", controllers.MigrateMyBillBookZIP)
+
+		// Per-entity CSV importers (generic, header-first CSV).
+		migration.POST("/categories/import/csv", controllers.ImportCategoriesCSV)
+		migration.POST("/expense-categories/import/csv", controllers.ImportExpenseCategoriesCSV)
+		migration.POST("/inventory/import/csv", controllers.ImportInventoryCSV)
+		migration.POST("/bank-accounts/import/csv", controllers.ImportBankAccountsCSV)
+		migration.POST("/cash-transactions/import/csv", controllers.ImportCashTransactionsCSV)
+		migration.POST("/users/import/csv", controllers.ImportUsersCSV)
+		migration.POST("/staff/import/csv", controllers.ImportStaffCSV)
+		migration.POST("/stock-summary/import/csv", controllers.ImportStockSummaryCSV)
+		migration.POST("/purchase-payments/import/csv", controllers.ImportPurchasePaymentStatusCSV)
+		migration.POST("/purchase-items/import/csv", controllers.ImportPurchaseItemsCSV)
 	}
 }

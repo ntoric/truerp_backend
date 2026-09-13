@@ -34,6 +34,14 @@ type invoiceImportLine struct {
 	taxRate         float64
 }
 
+// invoiceImportDefaults holds optional default values applied when a CSV cell
+// is blank. Populated from form fields on the import request.
+type invoiceImportDefaults struct {
+	status  string
+	unit    string
+	taxRate float64
+}
+
 func ImportInvoicesCSV(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 	userName := ""
@@ -67,6 +75,14 @@ func ImportInvoicesCSV(c *gin.Context) {
 	}
 
 	headers := records[0]
+
+	// Optional defaults applied when the CSV cell is blank.
+	def := invoiceImportDefaults{
+		status:  strings.TrimSpace(c.PostForm("default_status")),
+		unit:    strings.TrimSpace(c.PostForm("default_unit")),
+		taxRate: parseFloat(c.PostForm("default_tax_rate")),
+	}
+
 	groups := make(map[string][]invoiceImportLine)
 	groupOrder := []string{}
 	var errors []string
@@ -77,7 +93,7 @@ func ImportInvoicesCSV(c *gin.Context) {
 			continue
 		}
 
-		line, parseErr := parseInvoiceImportRow(rowNum, record, headers)
+		line, parseErr := parseInvoiceImportRow(rowNum, record, headers, def)
 		if parseErr != nil {
 			errors = append(errors, parseErr.Error())
 			continue
@@ -114,7 +130,7 @@ func ImportInvoicesCSV(c *gin.Context) {
 	})
 }
 
-func parseInvoiceImportRow(rowNum int, record, headers []string) (invoiceImportLine, error) {
+func parseInvoiceImportRow(rowNum int, record, headers []string, def invoiceImportDefaults) (invoiceImportLine, error) {
 	line := invoiceImportLine{rowNum: rowNum}
 
 	line.invoiceNumber = strings.TrimSpace(firstCSVValue(record, headers,
@@ -139,7 +155,11 @@ func parseInvoiceImportRow(rowNum int, record, headers []string) (invoiceImportL
 
 	line.status = strings.ToLower(strings.TrimSpace(firstCSVValue(record, headers, "Status")))
 	if line.status == "" {
-		line.status = "draft"
+		if def.status != "" {
+			line.status = def.status
+		} else {
+			line.status = "draft"
+		}
 	}
 	if !allowedInvoiceStatuses[line.status] {
 		return line, fmt.Errorf("Row %d: Invalid status %q", rowNum, line.status)
@@ -157,7 +177,11 @@ func parseInvoiceImportRow(rowNum int, record, headers []string) (invoiceImportL
 	line.discount = parseFloat(firstCSVValue(record, headers, "Discount %", "Discount", "Disc %"))
 	line.taxRate = parseFloat(firstCSVValue(record, headers, "Tax Rate %", "Tax Rate", "Tax %", "GST %"))
 	if line.taxRate == 0 {
-		line.taxRate = 18
+		if def.taxRate > 0 {
+			line.taxRate = def.taxRate
+		} else {
+			line.taxRate = 18
+		}
 	}
 
 	amount := parseCurrencyAmount(firstCSVValue(record, headers, "Amount", "Total Amount", "Total"))
@@ -174,7 +198,11 @@ func parseInvoiceImportRow(rowNum int, record, headers []string) (invoiceImportL
 		line.quantity = 1
 	}
 	if line.unit == "" {
-		line.unit = "pcs"
+		if def.unit != "" {
+			line.unit = def.unit
+		} else {
+			line.unit = "pcs"
+		}
 	}
 	if line.unitPrice <= 0 {
 		return line, fmt.Errorf("Row %d: Unit Price or Amount is required", rowNum)
