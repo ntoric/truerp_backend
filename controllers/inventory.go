@@ -1,14 +1,14 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"encoding/csv"
 	"fmt"
 	"math"
 	"net/http"
 	"strings"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -424,8 +424,8 @@ func ensureProductForAdhocItem(tx *gorm.DB, userID uuid.UUID, item *models.Purch
 			item.ProductID = &existing.ID
 			item.IsNewItem = false
 			return tx.Model(item).Updates(map[string]interface{}{
-				"product_id":   existing.ID,
-				"is_new_item":  false,
+				"product_id":  existing.ID,
+				"is_new_item": false,
 			}).Error
 		}
 	}
@@ -1062,13 +1062,13 @@ func CreateStockTransfer(c *gin.Context) {
 	fmt.Printf("[DEBUG] CreateStockTransfer - UserID: %s, ToOutletID: %s, Items: %d\n", userID, input.ToOutletID, len(input.Items))
 
 	transfer := models.StockTransfer{
-		ID:            uuid.New(),
-		UserID:        userID,
-		FromOutletID:  input.FromOutletID,
-		ToOutletID:    input.ToOutletID,
-		Status:        "draft",
-		TotalItems:    len(input.Items),
-		Notes:         input.Notes,
+		ID:           uuid.New(),
+		UserID:       userID,
+		FromOutletID: input.FromOutletID,
+		ToOutletID:   input.ToOutletID,
+		Status:       "draft",
+		TotalItems:   len(input.Items),
+		Notes:        input.Notes,
 	}
 
 	for _, item := range input.Items {
@@ -1076,10 +1076,10 @@ func CreateStockTransfer(c *gin.Context) {
 		var product models.Product
 		if err := utils.DB.Where("user_id = ? AND id = ?", userID, item.ProductID).First(&product).Error; err == nil {
 			transfer.Items = append(transfer.Items, models.StockTransferItem{
-				ID:        uuid.New(),
+				ID:         uuid.New(),
 				TransferID: transfer.ID,
-				ProductID: item.ProductID,
-				Quantity:  item.Quantity,
+				ProductID:  item.ProductID,
+				Quantity:   item.Quantity,
 			})
 			transfer.TotalQuantity += item.Quantity
 		}
@@ -1792,12 +1792,12 @@ func GetInventoryItems(c *gin.Context) {
 	fmt.Printf("[DEBUG] GetInventoryItems - UserID: %s\n", userID)
 
 	type InventoryItem struct {
-		ID              uuid.UUID `json:"id"`
-		Name            string    `json:"name"`
-		SKU             string    `json:"sku"`
-		Type            string    `json:"type"` // "product" or "standalone"
-		IsActive        bool      `json:"is_active"`
-		EnableBatching  bool      `json:"enable_batching"`
+		ID             uuid.UUID `json:"id"`
+		Name           string    `json:"name"`
+		SKU            string    `json:"sku"`
+		Type           string    `json:"type"` // "product" or "standalone"
+		IsActive       bool      `json:"is_active"`
+		EnableBatching bool      `json:"enable_batching"`
 	}
 
 	items := make([]InventoryItem, 0)

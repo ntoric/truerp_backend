@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"net/http"
 	"strconv"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -54,20 +54,20 @@ func CreateTaxRule(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		Country         string    `json:"country" binding:"required"`
-		CountryCode     string    `json:"country_code" binding:"required"`
-		State           string    `json:"state"`
-		StateCode       string    `json:"state_code"`
-		TaxType         string    `json:"tax_type" binding:"required"`
-		TaxName         string    `json:"tax_name" binding:"required"`
-		Rate            float64   `json:"rate" binding:"required"`
-		IsCompound      bool      `json:"is_compound"`
-		ThresholdAmount float64   `json:"threshold_amount"`
-		HSNCode         string    `json:"hsn_code"`
-		Category        string    `json:"category"`
+		Country         string     `json:"country" binding:"required"`
+		CountryCode     string     `json:"country_code" binding:"required"`
+		State           string     `json:"state"`
+		StateCode       string     `json:"state_code"`
+		TaxType         string     `json:"tax_type" binding:"required"`
+		TaxName         string     `json:"tax_name" binding:"required"`
+		Rate            float64    `json:"rate" binding:"required"`
+		IsCompound      bool       `json:"is_compound"`
+		ThresholdAmount float64    `json:"threshold_amount"`
+		HSNCode         string     `json:"hsn_code"`
+		Category        string     `json:"category"`
 		EffectiveFrom   *time.Time `json:"effective_from"`
 		EffectiveUntil  *time.Time `json:"effective_until"`
-		Notes           string    `json:"notes"`
+		Notes           string     `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -86,11 +86,11 @@ func CreateTaxRule(c *gin.Context) {
 		TaxName:         input.TaxName,
 		Rate:            input.Rate,
 		IsCompound:      input.IsCompound,
-		ThresholdAmount:  input.ThresholdAmount,
+		ThresholdAmount: input.ThresholdAmount,
 		HSNCode:         input.HSNCode,
 		Category:        input.Category,
-		EffectiveFrom:  input.EffectiveFrom,
-		EffectiveUntil: input.EffectiveUntil,
+		EffectiveFrom:   input.EffectiveFrom,
+		EffectiveUntil:  input.EffectiveUntil,
 		IsActive:        true,
 		Notes:           input.Notes,
 	}
@@ -108,21 +108,21 @@ func UpdateTaxRule(c *gin.Context) {
 	id := c.Param("id")
 
 	var input struct {
-		Country         string    `json:"country"`
-		CountryCode     string    `json:"country_code"`
-		State           string    `json:"state"`
-		StateCode       string    `json:"state_code"`
-		TaxType         string    `json:"tax_type"`
-		TaxName         string    `json:"tax_name"`
-		Rate            float64   `json:"rate"`
-		IsCompound      bool      `json:"is_compound"`
-		ThresholdAmount float64   `json:"threshold_amount"`
-		HSNCode         string    `json:"hsn_code"`
-		Category        string    `json:"category"`
+		Country         string     `json:"country"`
+		CountryCode     string     `json:"country_code"`
+		State           string     `json:"state"`
+		StateCode       string     `json:"state_code"`
+		TaxType         string     `json:"tax_type"`
+		TaxName         string     `json:"tax_name"`
+		Rate            float64    `json:"rate"`
+		IsCompound      bool       `json:"is_compound"`
+		ThresholdAmount float64    `json:"threshold_amount"`
+		HSNCode         string     `json:"hsn_code"`
+		Category        string     `json:"category"`
 		EffectiveFrom   *time.Time `json:"effective_from"`
 		EffectiveUntil  *time.Time `json:"effective_until"`
-		IsActive        *bool     `json:"is_active"`
-		Notes           string    `json:"notes"`
+		IsActive        *bool      `json:"is_active"`
+		Notes           string     `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {

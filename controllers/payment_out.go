@@ -1,10 +1,10 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -65,17 +65,17 @@ func CreatePaymentOut(c *gin.Context) {
 	netAmount := input.AmountPaid - input.PaymentOutDiscount
 
 	paymentOut := models.PaymentOut{
-		ID:                   uuid.New(),
-		UserID:               userID,
-		PurchaseBillID:       input.PurchaseBillID,
-		PartyID:              input.PartyID,
-		AmountPaid:           input.AmountPaid,
-		PaymentOutDiscount:   input.PaymentOutDiscount,
-		PaymentOutNumber:     input.PaymentOutNumber,
-		Mode:                 input.Mode,
-		Date:                 input.Date,
-		Reference:            input.Reference,
-		Notes:                input.Notes,
+		ID:                 uuid.New(),
+		UserID:             userID,
+		PurchaseBillID:     input.PurchaseBillID,
+		PartyID:            input.PartyID,
+		AmountPaid:         input.AmountPaid,
+		PaymentOutDiscount: input.PaymentOutDiscount,
+		PaymentOutNumber:   input.PaymentOutNumber,
+		Mode:               input.Mode,
+		Date:               input.Date,
+		Reference:          input.Reference,
+		Notes:              input.Notes,
 	}
 
 	if err := utils.DB.Create(&paymentOut).Error; err != nil {
@@ -100,9 +100,9 @@ func CreatePaymentOut(c *gin.Context) {
 				status = "partial"
 			}
 			utils.DB.Model(&bill).Updates(map[string]interface{}{
-				"paid_amount":  newPaid,
-				"balance_due":  bill.TotalAmount - newPaid,
-				"status":       status,
+				"paid_amount": newPaid,
+				"balance_due": bill.TotalAmount - newPaid,
+				"status":      status,
 			})
 		}
 	}
@@ -144,9 +144,9 @@ func DeletePaymentOut(c *gin.Context) {
 				status = "paid"
 			}
 			utils.DB.Model(&bill).Updates(map[string]interface{}{
-				"paid_amount":  newPaid,
-				"balance_due":  bill.TotalAmount - newPaid,
-				"status":       status,
+				"paid_amount": newPaid,
+				"balance_due": bill.TotalAmount - newPaid,
+				"status":      status,
 			})
 		}
 	}

@@ -1,10 +1,10 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -49,14 +49,14 @@ func CreateTaxExemption(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		Name          string    `json:"name" binding:"required"`
-		Code          string    `json:"code" binding:"required"`
-		Description   string    `json:"description"`
-		ExemptionType string    `json:"exemption_type" binding:"required"`
-		MaxAmount     float64   `json:"max_amount"`
+		Name          string     `json:"name" binding:"required"`
+		Code          string     `json:"code" binding:"required"`
+		Description   string     `json:"description"`
+		ExemptionType string     `json:"exemption_type" binding:"required"`
+		MaxAmount     float64    `json:"max_amount"`
 		ValidFrom     *time.Time `json:"valid_from"`
 		ValidUntil    *time.Time `json:"valid_until"`
-		Notes         string    `json:"notes"`
+		Notes         string     `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -91,15 +91,15 @@ func UpdateTaxExemption(c *gin.Context) {
 	id := c.Param("id")
 
 	var input struct {
-		Name          string    `json:"name"`
-		Code          string    `json:"code"`
-		Description   string    `json:"description"`
-		ExemptionType string    `json:"exemption_type"`
-		MaxAmount     float64   `json:"max_amount"`
+		Name          string     `json:"name"`
+		Code          string     `json:"code"`
+		Description   string     `json:"description"`
+		ExemptionType string     `json:"exemption_type"`
+		MaxAmount     float64    `json:"max_amount"`
 		ValidFrom     *time.Time `json:"valid_from"`
 		ValidUntil    *time.Time `json:"valid_until"`
-		IsApplicable  *bool     `json:"is_applicable"`
-		Notes         string    `json:"notes"`
+		IsApplicable  *bool      `json:"is_applicable"`
+		Notes         string     `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 	"truerp/models"
+	"truerp/services"
 	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
@@ -118,10 +119,18 @@ func ImportCategoriesCSV(c *gin.Context) {
 		return
 	}
 
+	result, errs, perr := importCategoriesRows(userID, content, nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"imported": result["imported"], "errors": errs})
+}
+
+func importCategoriesRows(userID uuid.UUID, content []byte, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 	header, rows, err := readPlainCSV(content)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+		return nil, nil, err
 	}
 
 	imported := 0
@@ -131,6 +140,9 @@ func ImportCategoriesCSV(c *gin.Context) {
 	// second pass can resolve them.
 	nameToID := map[string]uuid.UUID{}
 	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
 		rowNum := i + 1
 		name := strings.TrimSpace(csvVal(row, header, "Name"))
 		if name == "" {
@@ -175,7 +187,7 @@ func ImportCategoriesCSV(c *gin.Context) {
 		imported++
 	}
 
-	c.JSON(http.StatusOK, gin.H{"imported": imported, "errors": errs})
+	return map[string]interface{}{"imported": imported}, errs, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -193,15 +205,26 @@ func ImportExpenseCategoriesCSV(c *gin.Context) {
 		return
 	}
 
+	result, errs, perr := importExpenseCategoriesRows(userID, content, nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"imported": result["imported"], "errors": errs})
+}
+
+func importExpenseCategoriesRows(userID uuid.UUID, content []byte, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 	header, rows, err := readPlainCSV(content)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+		return nil, nil, err
 	}
 
 	imported := 0
 	var errs []string
 	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
 		rowNum := i + 1
 		name := strings.TrimSpace(csvVal(row, header, "Name"))
 		if name == "" {
@@ -233,7 +256,7 @@ func ImportExpenseCategoriesCSV(c *gin.Context) {
 		imported++
 	}
 
-	c.JSON(http.StatusOK, gin.H{"imported": imported, "errors": errs})
+	return map[string]interface{}{"imported": imported}, errs, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -256,10 +279,18 @@ func ImportInventoryCSV(c *gin.Context) {
 		return
 	}
 
+	result, errs, perr := importInventoryRows(userID, content, nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"imported": result["imported"], "errors": errs})
+}
+
+func importInventoryRows(userID uuid.UUID, content []byte, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 	header, rows, err := readPlainCSV(content)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+		return nil, nil, err
 	}
 
 	defaultWH := resolveDefaultWarehouseID(userID)
@@ -267,6 +298,9 @@ func ImportInventoryCSV(c *gin.Context) {
 	imported := 0
 	var errs []string
 	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
 		rowNum := i + 1
 		productName := strings.TrimSpace(csvFirst(row, header, "Product Name", "Name"))
 		productCode := strings.TrimSpace(csvFirst(row, header, "Product Code", "SKU", "Item Code", "ItemCode"))
@@ -373,12 +407,12 @@ func ImportInventoryCSV(c *gin.Context) {
 			OutletID:       whID,
 			EntryType:      "opening",
 			Quantity:       qty,
-			BalanceQty:      stock.Quantity,
-			CostPrice:       cost,
-			BatchNo:         batchNo,
-			ItemCode:        product.ItemCode,
-			MfgDate:         mfgDate,
-			ExpDate:         expDate,
+			BalanceQty:     stock.Quantity,
+			CostPrice:      cost,
+			BatchNo:        batchNo,
+			ItemCode:       product.ItemCode,
+			MfgDate:        mfgDate,
+			ExpDate:        expDate,
 			ApprovalStatus: "approved",
 			EntryDate:      time.Now(),
 		}
@@ -395,7 +429,7 @@ func ImportInventoryCSV(c *gin.Context) {
 		imported++
 	}
 
-	c.JSON(http.StatusOK, gin.H{"imported": imported, "errors": errs})
+	return map[string]interface{}{"imported": imported}, errs, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -416,18 +450,32 @@ func ImportBankAccountsCSV(c *gin.Context) {
 		return
 	}
 
+	options := map[string]string{
+		"default_account_type": strings.TrimSpace(c.PostForm("default_account_type")),
+	}
+	result, errs, perr := importBankAccountsRows(userID, content, options, nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"imported": result["imported"], "errors": errs})
+}
+
+func importBankAccountsRows(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 	header, rows, err := readPlainCSV(content)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+		return nil, nil, err
 	}
 
 	// Optional default account type applied when the CSV cell is blank.
-	defaultAccountType := strings.TrimSpace(c.PostForm("default_account_type"))
+	defaultAccountType := options["default_account_type"]
 
 	imported := 0
 	var errs []string
 	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
 		rowNum := i + 1
 		accountName := strings.TrimSpace(csvFirst(row, header, "Account Name", "AccountName"))
 		accountNumber := strings.TrimSpace(csvFirst(row, header, "Account Number", "AccountNumber"))
@@ -454,17 +502,17 @@ func ImportBankAccountsCSV(c *gin.Context) {
 		opening := parseFloat(csvFirst(row, header, "Opening Balance", "OpeningBalance"))
 
 		account := models.BankAccount{
-			ID:              uuid.New(),
-			UserID:          userID,
-			AccountName:     accountName,
-			AccountNumber:   accountNumber,
-			BankName:        bankName,
-			IFSCCode:        strings.TrimSpace(csvFirst(row, header, "IFSC Code", "IFSC")),
-			AccountType:     accountType,
+			ID:             uuid.New(),
+			UserID:         userID,
+			AccountName:    accountName,
+			AccountNumber:  accountNumber,
+			BankName:       bankName,
+			IFSCCode:       strings.TrimSpace(csvFirst(row, header, "IFSC Code", "IFSC")),
+			AccountType:    accountType,
 			OpeningBalance: opening,
-			Balance:         opening,
-			IsActive:        true,
-			Notes:           csvVal(row, header, "Notes"),
+			Balance:        opening,
+			IsActive:       true,
+			Notes:          csvVal(row, header, "Notes"),
 		}
 
 		if err := utils.DB.Create(&account).Error; err != nil {
@@ -481,7 +529,7 @@ func ImportBankAccountsCSV(c *gin.Context) {
 		imported++
 	}
 
-	c.JSON(http.StatusOK, gin.H{"imported": imported, "errors": errs})
+	return map[string]interface{}{"imported": imported}, errs, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -502,15 +550,26 @@ func ImportCashTransactionsCSV(c *gin.Context) {
 		return
 	}
 
+	result, errs, perr := importCashTransactionsRows(userID, content, nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"imported": result["imported"], "errors": errs})
+}
+
+func importCashTransactionsRows(userID uuid.UUID, content []byte, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 	header, rows, err := readPlainCSV(content)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+		return nil, nil, err
 	}
 
 	imported := 0
 	var errs []string
 	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
 		rowNum := i + 1
 		dateStr := strings.TrimSpace(csvVal(row, header, "Date"))
 		date, derr := parseImportDate(dateStr)
@@ -564,7 +623,7 @@ func ImportCashTransactionsCSV(c *gin.Context) {
 		imported++
 	}
 
-	c.JSON(http.StatusOK, gin.H{"imported": imported, "errors": errs})
+	return map[string]interface{}{"imported": imported}, errs, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -584,10 +643,21 @@ func ImportUsersCSV(c *gin.Context) {
 		return
 	}
 
+	options := map[string]string{
+		"default_role": strings.TrimSpace(strings.ToLower(c.PostForm("default_role"))),
+	}
+	result, errs, perr := importUsersRows(userID, content, options, nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"imported": result["imported"], "errors": errs})
+}
+
+func importUsersRows(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 	header, rows, err := readPlainCSV(content)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+		return nil, nil, err
 	}
 
 	// The new users are attached to the same store as the importing user.
@@ -598,11 +668,14 @@ func ImportUsersCSV(c *gin.Context) {
 	}
 
 	// Optional default role applied when the CSV cell is blank.
-	defaultRole := strings.TrimSpace(strings.ToLower(c.PostForm("default_role")))
+	defaultRole := options["default_role"]
 
 	imported := 0
 	var errs []string
 	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
 		rowNum := i + 1
 		name := strings.TrimSpace(csvVal(row, header, "Name"))
 		email := strings.TrimSpace(strings.ToLower(csvVal(row, header, "Email")))
@@ -650,7 +723,7 @@ func ImportUsersCSV(c *gin.Context) {
 		imported++
 	}
 
-	c.JSON(http.StatusOK, gin.H{"imported": imported, "errors": errs})
+	return map[string]interface{}{"imported": imported}, errs, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -671,18 +744,32 @@ func ImportStaffCSV(c *gin.Context) {
 		return
 	}
 
+	options := map[string]string{
+		"default_salary_type": strings.TrimSpace(c.PostForm("default_salary_type")),
+	}
+	result, errs, perr := importStaffRows(userID, content, options, nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"imported": result["imported"], "errors": errs})
+}
+
+func importStaffRows(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 	header, rows, err := readPlainCSV(content)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+		return nil, nil, err
 	}
 
 	// Optional default salary type applied when the CSV cell is blank.
-	defaultSalaryType := strings.TrimSpace(c.PostForm("default_salary_type"))
+	defaultSalaryType := options["default_salary_type"]
 
 	imported := 0
 	var errs []string
 	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
 		rowNum := i + 1
 		name := strings.TrimSpace(csvVal(row, header, "Name"))
 		if name == "" {
@@ -747,7 +834,7 @@ func ImportStaffCSV(c *gin.Context) {
 		imported++
 	}
 
-	c.JSON(http.StatusOK, gin.H{"imported": imported, "errors": errs})
+	return map[string]interface{}{"imported": imported}, errs, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -786,19 +873,36 @@ func ImportStockSummaryCSV(c *gin.Context) {
 		return
 	}
 
+	options := map[string]string{
+		"default_category": strings.TrimSpace(c.PostForm("default_category")),
+	}
+	result, errs, perr := importStockSummaryRows(userID, content, options, nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"imported":           result["imported"],
+		"categories_created": result["categories_created"],
+		"products_created":   result["products_created"],
+		"stock_updated":      result["stock_updated"],
+		"errors":             errs,
+	})
+}
+
+func importStockSummaryRows(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 	// The stock summary report has a preamble (company name, phone, report
 	// title, date, total stock value) before the CSV header. We need to find
 	// the header row (the one starting with "Name").
 	header, rows, err := parseStockSummaryCSV(content)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+		return nil, nil, err
 	}
 
 	defaultWH := resolveDefaultWarehouseID(userID)
 
 	// Optional default category applied when the CSV cell is blank.
-	defaultCategory := strings.TrimSpace(c.PostForm("default_category"))
+	defaultCategory := options["default_category"]
 
 	categoriesCreated := 0
 	productsCreated := 0
@@ -807,7 +911,7 @@ func ImportStockSummaryCSV(c *gin.Context) {
 	var errs []string
 
 	// Caches to avoid repeated DB lookups within this import.
-	categoryCache := map[string]uuid.UUID{}    // lower(name) -> ID
+	categoryCache := map[string]uuid.UUID{}      // lower(name) -> ID
 	productCache := map[string]*models.Product{} // lower(name) -> product
 
 	// Resolve the default category up front so it can be reused for every
@@ -833,6 +937,9 @@ func ImportStockSummaryCSV(c *gin.Context) {
 	}
 
 	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
 		rowNum := i + 1
 		name := strings.TrimSpace(csvFirst(row, header, "Name", "Product Name", "Item Name"))
 		if name == "" {
@@ -901,20 +1008,20 @@ func ImportStockSummaryCSV(c *gin.Context) {
 				sku := utils.GenerateUniqueProductSKU(name)
 
 				newProduct := models.Product{
-					ID:            uuid.New(),
-					UserID:        userID,
-					Name:          name,
-					SKU:           sku,
-					PLU:           plu,
-					ItemCode:      itemCode,
-					Category:      categoryName,
-					PurchasePrice: purchasePrice,
-					SalePrice:     sellingPrice,
-					MRP:           mrp,
-					Unit:          unit,
-					ItemType:      "product",
+					ID:             uuid.New(),
+					UserID:         userID,
+					Name:           name,
+					SKU:            sku,
+					PLU:            plu,
+					ItemCode:       itemCode,
+					Category:       categoryName,
+					PurchasePrice:  purchasePrice,
+					SalePrice:      sellingPrice,
+					MRP:            mrp,
+					Unit:           unit,
+					ItemType:       "product",
 					EnableBatching: hasBatch,
-					IsActive:      true,
+					IsActive:       true,
 				}
 				if err := utils.DB.Create(&newProduct).Error; err != nil {
 					errs = append(errs, fmt.Sprintf("Row %d (%s): failed to create product: %v", rowNum, name, err))
@@ -1019,13 +1126,12 @@ func ImportStockSummaryCSV(c *gin.Context) {
 		imported++
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	return map[string]interface{}{
 		"imported":           imported,
 		"categories_created": categoriesCreated,
 		"products_created":   productsCreated,
 		"stock_updated":      stockUpdated,
-		"errors":             errs,
-	})
+	}, errs, nil
 }
 
 // parseStockSummaryCSV finds the header row in a stock summary report CSV
@@ -1120,6 +1226,15 @@ func ImportPurchasePaymentStatusCSV(c *gin.Context) {
 		return
 	}
 
+	result, errs, perr := importPurchasePaymentStatusRows(userID, content, nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"imported": result["imported"], "errors": errs})
+}
+
+func importPurchasePaymentStatusRows(userID uuid.UUID, content []byte, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 	content = stripBOM(content)
 	content = normalizeCRLF(content)
 
@@ -1128,12 +1243,10 @@ func ImportPurchasePaymentStatusCSV(c *gin.Context) {
 	reader.LazyQuotes = true
 	all, err := reader.ReadAll()
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("failed to parse CSV: %v", err)})
-		return
+		return nil, nil, fmt.Errorf("failed to parse CSV: %v", err)
 	}
 	if len(all) < 2 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "CSV file has no data rows"})
-		return
+		return nil, nil, errors.New("CSV file has no data rows")
 	}
 
 	header := all[0]
@@ -1143,6 +1256,9 @@ func ImportPurchasePaymentStatusCSV(c *gin.Context) {
 	var errs []string
 
 	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
 		rowNum := i + 1
 		if len(row) == 0 || strings.TrimSpace(strings.Join(row, "")) == "" {
 			continue
@@ -1229,7 +1345,7 @@ func ImportPurchasePaymentStatusCSV(c *gin.Context) {
 		imported++
 	}
 
-	c.JSON(http.StatusOK, gin.H{"imported": imported, "errors": errs})
+	return map[string]interface{}{"imported": imported}, errs, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -1256,6 +1372,15 @@ func ImportPurchaseItemsCSV(c *gin.Context) {
 		return
 	}
 
+	result, errs, perr := importPurchaseItemsRows(userID, content, nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"imported": result["imported"], "errors": errs})
+}
+
+func importPurchaseItemsRows(userID uuid.UUID, content []byte, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 	content = stripBOM(content)
 	content = normalizeCRLF(content)
 
@@ -1264,12 +1389,10 @@ func ImportPurchaseItemsCSV(c *gin.Context) {
 	reader.LazyQuotes = true
 	all, err := reader.ReadAll()
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("failed to parse CSV: %v", err)})
-		return
+		return nil, nil, fmt.Errorf("failed to parse CSV: %v", err)
 	}
 	if len(all) < 2 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "CSV file has no data rows"})
-		return
+		return nil, nil, errors.New("CSV file has no data rows")
 	}
 
 	header := all[0]
@@ -1283,6 +1406,9 @@ func ImportPurchaseItemsCSV(c *gin.Context) {
 	productCache := map[string]*models.Product{}
 
 	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
 		rowNum := i + 1
 		if len(row) == 0 || strings.TrimSpace(strings.Join(row, "")) == "" {
 			continue
@@ -1357,5 +1483,141 @@ func ImportPurchaseItemsCSV(c *gin.Context) {
 		imported++
 	}
 
-	c.JSON(http.StatusOK, gin.H{"imported": imported, "errors": errs})
+	return map[string]interface{}{"imported": imported}, errs, nil
+}
+
+// -----------------------------------------------------------------------------
+// Sales Bill Items CSV  —  POST /api/v1/migration/sales-items/import/csv
+//
+// Expected header:
+//   invoice number, item name, quantity, rate, amount
+//
+// Matches existing invoices by invoice number and creates InvoiceItem rows for
+// each line. Products are matched by item name (case-insensitive); if no
+// product is found, the item is still created with a nil product_id and the
+// description set to the item name.
+//
+// Returns:
+//   { "imported": <int>, "errors": [string, ...] }
+// -----------------------------------------------------------------------------
+
+func ImportSalesItemsCSV(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	content, err := importFile(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	result, errs, perr := importSalesItemsRows(userID, content, nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"imported": result["imported"], "errors": errs})
+}
+
+func importSalesItemsRows(userID uuid.UUID, content []byte, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
+	content = stripBOM(content)
+	content = normalizeCRLF(content)
+
+	reader := csv.NewReader(strings.NewReader(string(content)))
+	reader.FieldsPerRecord = -1
+	reader.LazyQuotes = true
+	all, err := reader.ReadAll()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse CSV: %v", err)
+	}
+	if len(all) < 2 {
+		return nil, nil, errors.New("CSV file has no data rows")
+	}
+
+	header := all[0]
+	rows := all[1:]
+
+	imported := 0
+	var errs []string
+
+	// Cache invoices and products to avoid repeated DB lookups.
+	invoiceCache := map[string]*models.Invoice{}
+	productCache := map[string]*models.Product{}
+
+	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
+		rowNum := i + 1
+		if len(row) == 0 || strings.TrimSpace(strings.Join(row, "")) == "" {
+			continue
+		}
+
+		invoiceNo := strings.TrimSpace(csvFirst(row, header, "invoice number", "Invoice No", "Invoice No.", "Invoice Number", "InvoiceNumber"))
+		if invoiceNo == "" {
+			errs = append(errs, fmt.Sprintf("Row %d: Invoice number is required", rowNum))
+			continue
+		}
+
+		invoice, ok := invoiceCache[invoiceNo]
+		if !ok {
+			var inv models.Invoice
+			if err := utils.DB.Where("user_id = ? AND invoice_number = ?", userID, invoiceNo).First(&inv).Error; err != nil {
+				errs = append(errs, fmt.Sprintf("Row %d (%s): invoice not found", rowNum, invoiceNo))
+				continue
+			}
+			invoice = &inv
+			invoiceCache[invoiceNo] = invoice
+		}
+
+		itemName := strings.TrimSpace(csvFirst(row, header, "item name", "Item Name", "Product Name", "Name"))
+		if itemName == "" {
+			errs = append(errs, fmt.Sprintf("Row %d (%s): item name is required", rowNum, invoiceNo))
+			continue
+		}
+
+		quantity := parseFloat(csvFirst(row, header, "quantity", "Quantity", "Qty"))
+		rate := parseFloat(csvFirst(row, header, "rate", "Rate", "Unit Price", "UnitPrice"))
+		amount := parseFloat(csvFirst(row, header, "amount", "Amount", "Total"))
+
+		if amount == 0 && quantity > 0 && rate > 0 {
+			amount = quantity * rate
+		}
+
+		var productID *uuid.UUID
+		var unit string
+		var hsnCode string
+		product, pOK := productCache[strings.ToLower(itemName)]
+		if !pOK {
+			var p models.Product
+			if err := utils.DB.Where("user_id = ? AND name = ?", userID, itemName).First(&p).Error; err == nil {
+				product = &p
+				productCache[strings.ToLower(itemName)] = product
+			}
+		}
+		if product != nil {
+			productID = &product.ID
+			unit = product.Unit
+			hsnCode = product.HSNCode
+		}
+
+		item := models.InvoiceItem{
+			ID:          uuid.New(),
+			InvoiceID:   invoice.ID,
+			ProductID:   productID,
+			Description: itemName,
+			Quantity:    quantity,
+			Unit:        unit,
+			UnitPrice:   rate,
+			Total:       amount,
+			HSNCode:     hsnCode,
+		}
+
+		if err := utils.DB.Create(&item).Error; err != nil {
+			errs = append(errs, fmt.Sprintf("Row %d (%s): failed to create item: %v", rowNum, invoiceNo, err))
+			continue
+		}
+		imported++
+	}
+
+	return map[string]interface{}{"imported": imported}, errs, nil
 }

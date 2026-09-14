@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -58,11 +58,11 @@ func CreateCreditNote(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		InvoiceID   uuid.UUID  `json:"invoice_id" binding:"required"`
-		Date        time.Time  `json:"date" binding:"required"`
-		Reason      string     `json:"reason"`
-		RefundMode  string     `json:"refund_mode"`
-		Items       []struct {
+		InvoiceID  uuid.UUID `json:"invoice_id" binding:"required"`
+		Date       time.Time `json:"date" binding:"required"`
+		Reason     string    `json:"reason"`
+		RefundMode string    `json:"refund_mode"`
+		Items      []struct {
 			InvoiceItemID uuid.UUID `json:"invoice_item_id"`
 			Description   string    `json:"description" binding:"required"`
 			Quantity      float64   `json:"quantity" binding:"required,gt=0"`

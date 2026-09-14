@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -62,17 +62,17 @@ func CreateDeliveryChallan(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		ChallanNumber string       `json:"challan_number" binding:"required"`
-		PartyID       uuid.UUID    `json:"party_id" binding:"required"`
-		InvoiceID     *uuid.UUID   `json:"invoice_id"`
-		Date          time.Time    `json:"date" binding:"required"`
-		DueDate       *time.Time   `json:"due_date"`
-		Status        string       `json:"status"`
-		Notes         string       `json:"notes"`
-		Terms         string       `json:"terms"`
-		Signature     string       `json:"signature"`
-		VehicleNumber string       `json:"vehicle_number"`
-		TransportMode string       `json:"transport_mode"`
+		ChallanNumber string     `json:"challan_number" binding:"required"`
+		PartyID       uuid.UUID  `json:"party_id" binding:"required"`
+		InvoiceID     *uuid.UUID `json:"invoice_id"`
+		Date          time.Time  `json:"date" binding:"required"`
+		DueDate       *time.Time `json:"due_date"`
+		Status        string     `json:"status"`
+		Notes         string     `json:"notes"`
+		Terms         string     `json:"terms"`
+		Signature     string     `json:"signature"`
+		VehicleNumber string     `json:"vehicle_number"`
+		TransportMode string     `json:"transport_mode"`
 		Items         []struct {
 			Description string               `json:"description"`
 			Quantity    models.FlexibleFloat `json:"quantity"`
@@ -182,13 +182,13 @@ func UpdateDeliveryChallan(c *gin.Context) {
 	}
 
 	updates := map[string]interface{}{
-		"status":        input.Status,
-		"notes":         input.Notes,
-		"terms":         input.Terms,
-		"signature":     input.Signature,
+		"status":         input.Status,
+		"notes":          input.Notes,
+		"terms":          input.Terms,
+		"signature":      input.Signature,
 		"vehicle_number": input.VehicleNumber,
 		"transport_mode": input.TransportMode,
-		"due_date":      input.DueDate,
+		"due_date":       input.DueDate,
 	}
 
 	if err := utils.DB.Model(&challan).Updates(updates).Error; err != nil {

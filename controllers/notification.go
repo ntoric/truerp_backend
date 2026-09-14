@@ -1,12 +1,12 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -74,8 +74,8 @@ func MarkAllAsRead(c *gin.Context) {
 	utils.DB.Model(&models.Notification{}).
 		Where("user_id = ? AND is_read = ?", userID, false).
 		Updates(map[string]interface{}{
-			"is_read":  true,
-			"read_at":  now,
+			"is_read": true,
+			"read_at": now,
 		})
 
 	c.JSON(http.StatusOK, gin.H{"message": "All notifications marked as read"})
@@ -85,14 +85,14 @@ func CreateNotification(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		Type         string     `json:"type" binding:"required"`
-		Title        string     `json:"title" binding:"required"`
-		Message      string     `json:"message" binding:"required"`
-		Channels     string     `json:"channels" binding:"required"` // email,sms,whatsapp,internal
-		RelatedID    *uuid.UUID `json:"related_id"`
-		RelatedType  string     `json:"related_type"`
-		Priority     string     `json:"priority"`
-		ScheduledAt  *time.Time `json:"scheduled_at"`
+		Type        string     `json:"type" binding:"required"`
+		Title       string     `json:"title" binding:"required"`
+		Message     string     `json:"message" binding:"required"`
+		Channels    string     `json:"channels" binding:"required"` // email,sms,whatsapp,internal
+		RelatedID   *uuid.UUID `json:"related_id"`
+		RelatedType string     `json:"related_type"`
+		Priority    string     `json:"priority"`
+		ScheduledAt *time.Time `json:"scheduled_at"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -263,7 +263,7 @@ func UpdateNotificationTemplate(c *gin.Context) {
 		Body         string `json:"body"`
 		SMSBody      string `json:"sms_body"`
 		WhatsAppBody string `json:"whatsapp_body"`
-		IsActive      bool   `json:"is_active"`
+		IsActive     bool   `json:"is_active"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -278,12 +278,12 @@ func UpdateNotificationTemplate(c *gin.Context) {
 	}
 
 	updates := map[string]interface{}{
-		"name":           input.Name,
-		"subject":        input.Subject,
-		"body":           input.Body,
-		"sms_body":       input.SMSBody,
-		"whatsapp_body":  input.WhatsAppBody,
-		"is_active":      input.IsActive,
+		"name":          input.Name,
+		"subject":       input.Subject,
+		"body":          input.Body,
+		"sms_body":      input.SMSBody,
+		"whatsapp_body": input.WhatsAppBody,
+		"is_active":     input.IsActive,
 	}
 
 	if err := utils.DB.Model(&template).Updates(updates).Error; err != nil {

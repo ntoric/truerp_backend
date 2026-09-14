@@ -27,32 +27,32 @@ func NewLocalStorage(basePath, baseURL string) *LocalStorage {
 func (ls *LocalStorage) UploadFile(file *multipart.FileHeader, path string) (string, error) {
 	// Create full file path
 	fullPath := filepath.Join(ls.basePath, path)
-	
+
 	// Create directory if it doesn't exist
 	dir := filepath.Dir(fullPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
-	
+
 	// Open the uploaded file
 	src, err := file.Open()
 	if err != nil {
 		return "", err
 	}
 	defer src.Close()
-	
+
 	// Create destination file
 	dst, err := os.Create(fullPath)
 	if err != nil {
 		return "", err
 	}
 	defer dst.Close()
-	
+
 	// Copy file content
 	if _, err := io.Copy(dst, src); err != nil {
 		return "", err
 	}
-	
+
 	// Return public URL
 	return ls.GetFileURL(path), nil
 }

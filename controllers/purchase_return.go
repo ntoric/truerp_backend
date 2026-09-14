@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -55,12 +55,12 @@ func CreatePurchaseReturn(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		PartyID         uuid.UUID  `json:"party_id" binding:"required"`
-		PurchaseBillID uuid.UUID  `json:"purchase_bill_id"`
-		Date           string     `json:"date" binding:"required"`
-		Reason         string     `json:"reason"`
-		RefundMode     string     `json:"refund_mode"`
-		Notes          string     `json:"notes"`
+		PartyID        uuid.UUID `json:"party_id" binding:"required"`
+		PurchaseBillID uuid.UUID `json:"purchase_bill_id"`
+		Date           string    `json:"date" binding:"required"`
+		Reason         string    `json:"reason"`
+		RefundMode     string    `json:"refund_mode"`
+		Notes          string    `json:"notes"`
 		Items          []struct {
 			PurchaseBillItemID uuid.UUID `json:"purchase_bill_item_id"`
 			Description        string    `json:"description" binding:"required"`
@@ -104,15 +104,15 @@ func CreatePurchaseReturn(c *gin.Context) {
 		total := item.UnitPrice*item.Quantity + taxAmount
 
 		purchaseReturn.Items = append(purchaseReturn.Items, models.PurchaseReturnItem{
-			ID:                uuid.New(),
-			ReturnID:          purchaseReturn.ID,
+			ID:                 uuid.New(),
+			ReturnID:           purchaseReturn.ID,
 			PurchaseBillItemID: item.PurchaseBillItemID,
-			Description:       item.Description,
-			Quantity:          item.Quantity,
-			UnitPrice:         item.UnitPrice,
-			TaxRate:           item.TaxRate,
-			Total:             total,
-			Reason:            item.Reason,
+			Description:        item.Description,
+			Quantity:           item.Quantity,
+			UnitPrice:          item.UnitPrice,
+			TaxRate:            item.TaxRate,
+			Total:              total,
+			Reason:             item.Reason,
 		})
 
 		totalAmount += total
@@ -144,10 +144,10 @@ func UpdatePurchaseReturn(c *gin.Context) {
 	}
 
 	var input struct {
-		Date       string     `json:"date"`
-		Reason     string     `json:"reason"`
-		RefundMode string     `json:"refund_mode"`
-		Notes      string     `json:"notes"`
+		Date       string `json:"date"`
+		Reason     string `json:"reason"`
+		RefundMode string `json:"refund_mode"`
+		Notes      string `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {

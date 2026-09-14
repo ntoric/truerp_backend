@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -94,9 +94,9 @@ func UpdateAccount(c *gin.Context) {
 	id := c.Param("id")
 
 	var input struct {
-		Name          string     `json:"name"`
-		ParentID      *uuid.UUID `json:"parent_id"`
-		IsActive      bool       `json:"is_active"`
+		Name     string     `json:"name"`
+		ParentID *uuid.UUID `json:"parent_id"`
+		IsActive bool       `json:"is_active"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -111,9 +111,9 @@ func UpdateAccount(c *gin.Context) {
 	}
 
 	updates := map[string]interface{}{
-		"name":       input.Name,
-		"parent_id":  input.ParentID,
-		"is_active":  input.IsActive,
+		"name":      input.Name,
+		"parent_id": input.ParentID,
+		"is_active": input.IsActive,
 	}
 
 	if err := utils.DB.Model(&account).Updates(updates).Error; err != nil {
@@ -219,14 +219,14 @@ func CreateJournalEntry(c *gin.Context) {
 	utils.DB.Model(&models.JournalEntry{}).Where("user_id = ?", userID).Count(&count)
 
 	entry := models.JournalEntry{
-		ID:            uuid.New(),
-		UserID:        userID,
-		EntryNumber:   fmt.Sprintf("JE-%04d", count+1),
-		EntryDate:     input.EntryDate,
-		Description:   input.Description,
-		TotalDebit:    totalDebit,
-		TotalCredit:   totalCredit,
-		Status:        "draft",
+		ID:          uuid.New(),
+		UserID:      userID,
+		EntryNumber: fmt.Sprintf("JE-%04d", count+1),
+		EntryDate:   input.EntryDate,
+		Description: input.Description,
+		TotalDebit:  totalDebit,
+		TotalCredit: totalCredit,
+		Status:      "draft",
 	}
 
 	for _, line := range input.Lines {
@@ -384,7 +384,7 @@ func GetTrialBalance(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"as_of_date":   asOfDate,
-		"items":       items,
+		"items":        items,
 		"total_debit":  totalDebit,
 		"total_credit": totalCredit,
 		"is_balanced":  totalDebit == totalCredit,
@@ -441,13 +441,13 @@ func GetProfitLoss(c *gin.Context) {
 	netProfit := totalIncome - totalExpense
 
 	c.JSON(http.StatusOK, gin.H{
-		"from_date":    fromDate,
-		"to_date":      toDate,
-		"income":       incomeItems,
-		"total_income": totalIncome,
-		"expenses":     expenseItems,
+		"from_date":     fromDate,
+		"to_date":       toDate,
+		"income":        incomeItems,
+		"total_income":  totalIncome,
+		"expenses":      expenseItems,
 		"total_expense": totalExpense,
-		"net_profit":   netProfit,
+		"net_profit":    netProfit,
 	})
 }
 
@@ -525,15 +525,15 @@ func GetBalanceSheet(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"as_of_date":          asOfDate,
-		"assets":              assets,
-		"total_assets":        totalAssets,
-		"liabilities":         liabilities,
-		"total_liabilities":   totalLiabilities,
-		"equity":             equity,
-		"total_equity":       totalEquity,
+		"as_of_date":               asOfDate,
+		"assets":                   assets,
+		"total_assets":             totalAssets,
+		"liabilities":              liabilities,
+		"total_liabilities":        totalLiabilities,
+		"equity":                   equity,
+		"total_equity":             totalEquity,
 		"total_liabilities_equity": totalLiabilities + totalEquity,
-		"is_balanced":         totalAssets == (totalLiabilities + totalEquity),
+		"is_balanced":              totalAssets == (totalLiabilities + totalEquity),
 	})
 }
 
@@ -581,10 +581,10 @@ func GetGeneralLedger(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"account":          account,
-		"opening_balance":  openingBalance,
-		"entries":          ledgerEntries,
-		"closing_balance":  account.Balance,
+		"account":         account,
+		"opening_balance": openingBalance,
+		"entries":         ledgerEntries,
+		"closing_balance": account.Balance,
 	})
 }
 
@@ -619,12 +619,12 @@ func CreateBankReconciliation(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		BankAccountID     uuid.UUID  `json:"bank_account_id" binding:"required"`
-		StatementDate     time.Time  `json:"statement_date" binding:"required"`
-		StatementBalance  float64    `json:"statement_balance" binding:"required"`
-		ReconciledItems  []string   `json:"reconciled_items"`
+		BankAccountID     uuid.UUID `json:"bank_account_id" binding:"required"`
+		StatementDate     time.Time `json:"statement_date" binding:"required"`
+		StatementBalance  float64   `json:"statement_balance" binding:"required"`
+		ReconciledItems   []string  `json:"reconciled_items"`
 		UnreconciledItems []string  `json:"unreconciled_items"`
-		Notes             string     `json:"notes"`
+		Notes             string    `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {

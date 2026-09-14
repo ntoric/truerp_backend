@@ -36,10 +36,10 @@ type InvoiceDetailVisibility struct {
 }
 
 type PartyDetailVisibility struct {
-	ShowPartyName      bool `json:"show_party_name"`
-	ShowPartyAddress   bool `json:"show_party_address"`
-	ShowPartyPhone     bool `json:"show_party_phone"`
-	ShowPartyGSTIN     bool `json:"show_party_gstin"`
+	ShowPartyName       bool `json:"show_party_name"`
+	ShowPartyAddress    bool `json:"show_party_address"`
+	ShowPartyPhone      bool `json:"show_party_phone"`
+	ShowPartyGSTIN      bool `json:"show_party_gstin"`
 	ShowShippingAddress bool `json:"show_shipping_address"`
 }
 

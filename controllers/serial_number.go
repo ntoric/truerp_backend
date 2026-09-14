@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -54,14 +54,14 @@ func CreateSerialNumber(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		ProductID   uuid.UUID  `json:"product_id" binding:"required"`
-		SerialNumber string   `json:"serial_number" binding:"required"`
-		WarehouseID *uuid.UUID `json:"warehouse_id"`
-		BatchNo     string    `json:"batch_no"`
-		MfgDate     *time.Time `json:"mfg_date"`
-		ExpDate     *time.Time `json:"exp_date"`
-		CostPrice   float64   `json:"cost_price"`
-		Notes       string    `json:"notes"`
+		ProductID    uuid.UUID  `json:"product_id" binding:"required"`
+		SerialNumber string     `json:"serial_number" binding:"required"`
+		WarehouseID  *uuid.UUID `json:"warehouse_id"`
+		BatchNo      string     `json:"batch_no"`
+		MfgDate      *time.Time `json:"mfg_date"`
+		ExpDate      *time.Time `json:"exp_date"`
+		CostPrice    float64    `json:"cost_price"`
+		Notes        string     `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -103,10 +103,10 @@ func UpdateSerialNumber(c *gin.Context) {
 	id := c.Param("id")
 
 	var input struct {
-		Status      string    `json:"status"`
+		Status      string     `json:"status"`
 		WarehouseID *uuid.UUID `json:"warehouse_id"`
 		InvoiceID   *uuid.UUID `json:"invoice_id"`
-		Notes       string    `json:"notes"`
+		Notes       string     `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -156,13 +156,13 @@ func BulkCreateSerialNumbers(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		ProductID   uuid.UUID  `json:"product_id" binding:"required"`
-		WarehouseID *uuid.UUID `json:"warehouse_id"`
-		BatchNo     string    `json:"batch_no"`
-		SerialNumbers []string `json:"serial_numbers" binding:"required,min=1"`
-		CostPrice   float64   `json:"cost_price"`
-		MfgDate     *time.Time `json:"mfg_date"`
-		ExpDate     *time.Time `json:"exp_date"`
+		ProductID     uuid.UUID  `json:"product_id" binding:"required"`
+		WarehouseID   *uuid.UUID `json:"warehouse_id"`
+		BatchNo       string     `json:"batch_no"`
+		SerialNumbers []string   `json:"serial_numbers" binding:"required,min=1"`
+		CostPrice     float64    `json:"cost_price"`
+		MfgDate       *time.Time `json:"mfg_date"`
+		ExpDate       *time.Time `json:"exp_date"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {

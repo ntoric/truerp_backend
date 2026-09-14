@@ -1,10 +1,10 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -222,8 +222,8 @@ func CalculateLoyaltyRedemption(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"discount":       discount,
-		"points":         input.Points,
+		"discount":         discount,
+		"points":           input.Points,
 		"available_points": party.LoyaltyPoints,
 	})
 }

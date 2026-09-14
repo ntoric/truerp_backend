@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -58,10 +58,10 @@ func CreateDebitNote(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		PurchaseBillID uuid.UUID  `json:"purchase_bill_id" binding:"required"`
-		Date           time.Time  `json:"date" binding:"required"`
-		Reason         string     `json:"reason"`
-		RefundMode     string     `json:"refund_mode"`
+		PurchaseBillID uuid.UUID `json:"purchase_bill_id" binding:"required"`
+		Date           time.Time `json:"date" binding:"required"`
+		Reason         string    `json:"reason"`
+		RefundMode     string    `json:"refund_mode"`
 		Items          []struct {
 			PurchaseBillItemID uuid.UUID `json:"purchase_bill_item_id"`
 			Description        string    `json:"description" binding:"required"`

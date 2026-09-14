@@ -626,43 +626,43 @@ type PurchaseReceiptItem struct {
 }
 
 type PurchaseBill struct {
-	ID                uuid.UUID          `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID            uuid.UUID          `json:"user_id" gorm:"type:uuid;not null;index"`
-	PurchaseReceiptID *uuid.UUID         `json:"purchase_receipt_id" gorm:"type:uuid"`
-	PartyID           uuid.UUID          `json:"party_id" gorm:"type:uuid;not null"`
-	VendorID          *uuid.UUID         `json:"vendor_id,omitempty" gorm:"type:uuid"` // legacy alias for party_id
-	Party             Party              `json:"party,omitempty" gorm:"foreignKey:PartyID"`
+	ID                uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID            uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index"`
+	PurchaseReceiptID *uuid.UUID `json:"purchase_receipt_id" gorm:"type:uuid"`
+	PartyID           uuid.UUID  `json:"party_id" gorm:"type:uuid;not null"`
+	VendorID          *uuid.UUID `json:"vendor_id,omitempty" gorm:"type:uuid"` // legacy alias for party_id
+	Party             Party      `json:"party,omitempty" gorm:"foreignKey:PartyID"`
 	// ClientBillID is a frontend-generated UUID that makes bill creation
 	// idempotent: a retry with the same value returns the already-saved bill
 	// instead of creating a duplicate. Mirrors Invoice.ClientSaleID.
-	ClientBillID      *uuid.UUID         `json:"client_bill_id,omitempty" gorm:"type:uuid;index;uniqueIndex:idx_purchase_bill_user_client_bill"`
-	BillNumber        string             `json:"bill_number" gorm:"not null;index"`
-	BillDate          time.Time          `json:"bill_date" gorm:"not null"`
-	DueDate           *time.Time         `json:"due_date,omitempty"`
-	Status            string             `json:"status" gorm:"default:'unpaid'"` // unpaid, paid, partial
-	WarehouseID       *uuid.UUID         `json:"warehouse_id,omitempty" gorm:"type:uuid;index"`
-	StockStatus       string             `json:"stock_status" gorm:"default:'none'"` // none, pending, approved, rejected, partial
-	SubTotal          float64            `json:"sub_total" gorm:"default:0"`
-	TaxTotal          float64            `json:"tax_total" gorm:"default:0"`
-	TaxExempt         bool               `json:"tax_exempt" gorm:"default:false"`
-	TotalAmount       float64            `json:"total_amount" gorm:"default:0"`
-	PaidAmount        float64            `json:"paid_amount" gorm:"default:0"`
-	BalanceDue        float64            `json:"balance_due" gorm:"default:0"`
-	PaymentMode       string             `json:"payment_mode"`
-	BankAccountID     *uuid.UUID         `json:"bank_account_id,omitempty" gorm:"type:uuid;index"`
-	Notes             string             `json:"notes"`
+	ClientBillID  *uuid.UUID `json:"client_bill_id,omitempty" gorm:"type:uuid;index;uniqueIndex:idx_purchase_bill_user_client_bill"`
+	BillNumber    string     `json:"bill_number" gorm:"not null;index"`
+	BillDate      time.Time  `json:"bill_date" gorm:"not null"`
+	DueDate       *time.Time `json:"due_date,omitempty"`
+	Status        string     `json:"status" gorm:"default:'unpaid'"` // unpaid, paid, partial
+	WarehouseID   *uuid.UUID `json:"warehouse_id,omitempty" gorm:"type:uuid;index"`
+	StockStatus   string     `json:"stock_status" gorm:"default:'none'"` // none, pending, approved, rejected, partial
+	SubTotal      float64    `json:"sub_total" gorm:"default:0"`
+	TaxTotal      float64    `json:"tax_total" gorm:"default:0"`
+	TaxExempt     bool       `json:"tax_exempt" gorm:"default:false"`
+	TotalAmount   float64    `json:"total_amount" gorm:"default:0"`
+	PaidAmount    float64    `json:"paid_amount" gorm:"default:0"`
+	BalanceDue    float64    `json:"balance_due" gorm:"default:0"`
+	PaymentMode   string     `json:"payment_mode"`
+	BankAccountID *uuid.UUID `json:"bank_account_id,omitempty" gorm:"type:uuid;index"`
+	Notes         string     `json:"notes"`
 	// SourceURL is the original external bill link (e.g. myBillBook
 	// https://mybillbook.in/cpp/<id>). Populated during migration import so
 	// the source document can be re-opened or re-downloaded later.
-	SourceURL     string `json:"source_url" gorm:"type:text"`
+	SourceURL string `json:"source_url" gorm:"type:text"`
 	// SourceHTMLURL is the object-storage URL of an HTML snapshot of the
 	// SourceURL page, captured once during migration. Empty when no snapshot
 	// was taken (e.g. link unreachable at import time).
-	SourceHTMLURL string `json:"source_html_url" gorm:"type:text"`
-	Items             []PurchaseBillItem `json:"items" gorm:"foreignKey:BillID;constraint:OnDelete:CASCADE;"`
-	CreatedAt         time.Time          `json:"created_at"`
-	UpdatedAt         time.Time          `json:"updated_at"`
-	DeletedAt         gorm.DeletedAt     `json:"deleted_at,omitempty" gorm:"index"`
+	SourceHTMLURL string             `json:"source_html_url" gorm:"type:text"`
+	Items         []PurchaseBillItem `json:"items" gorm:"foreignKey:BillID;constraint:OnDelete:CASCADE;"`
+	CreatedAt     time.Time          `json:"created_at"`
+	UpdatedAt     time.Time          `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt     `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type PurchaseBillItem struct {
@@ -691,8 +691,8 @@ type PurchaseBillItem struct {
 	// restore the product_id created on a previous (possibly unacknowledged)
 	// save instead of creating a duplicate product.
 	ClientItemRef *string   `json:"client_item_ref,omitempty" gorm:"type:varchar(36);index:idx_purchase_item_client_ref"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type Account struct {
@@ -1018,12 +1018,12 @@ type CashTransaction struct {
 }
 
 type CashBankSummary struct {
-	TotalBalance        float64       `json:"total_balance"`
-	CashInHand          float64       `json:"cash_in_hand"`
-	InitialInvestment   float64       `json:"initial_investment"`
-	BankAccounts        []BankAccount `json:"bank_accounts"`
-	UnlinkedCount       int64         `json:"unlinked_count"`
-	UnlinkedAmount      float64       `json:"unlinked_amount"`
+	TotalBalance      float64       `json:"total_balance"`
+	CashInHand        float64       `json:"cash_in_hand"`
+	InitialInvestment float64       `json:"initial_investment"`
+	BankAccounts      []BankAccount `json:"bank_accounts"`
+	UnlinkedCount     int64         `json:"unlinked_count"`
+	UnlinkedAmount    float64       `json:"unlinked_amount"`
 }
 
 type PaymentMethodAccountMap struct {
@@ -1569,30 +1569,30 @@ type SMSRecipient struct {
 }
 
 type EmailMarketing struct {
-	ID                 uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID             uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
-	CampaignName       string         `json:"campaign_name" gorm:"not null"`
-	Subject            string         `json:"subject" gorm:"not null"`
-	Body               string         `json:"body" gorm:"not null"`
-	TargetAudience     string         `json:"target_audience" gorm:"not null"` // all_customers, specific_customers, all_vendors, specific_vendors
-	ScheduledDate      *time.Time     `json:"scheduled_date,omitempty"`
-	SentDate           *time.Time     `json:"sent_date,omitempty"`
-	Status             string         `json:"status" gorm:"default:'draft'"` // draft, scheduled, sent, failed, completed
-	TotalRecipients    int            `json:"total_recipients" gorm:"default:0"`
-	SentCount          int            `json:"sent_count" gorm:"default:0"`
-	FailedCount        int            `json:"failed_count" gorm:"default:0"`
-	OpenedCount        int            `json:"opened_count" gorm:"default:0"`
-	ClickedCount       int            `json:"clicked_count" gorm:"default:0"`
-	IsRecurring        bool           `json:"is_recurring" gorm:"default:false"`
-	RecurrenceFrequency string        `json:"recurrence_frequency" gorm:"default:''"` // daily, weekly, monthly
-	RecurrenceInterval int            `json:"recurrence_interval" gorm:"default:0"`
-	RecurrenceEndDate  *time.Time     `json:"recurrence_end_date,omitempty"`
-	LastSentAt         *time.Time     `json:"last_sent_at,omitempty"`
-	Notes              string           `json:"notes"`
-	Recipients         []EmailRecipient `json:"recipients,omitempty" gorm:"foreignKey:CampaignID"`
-	CreatedAt          time.Time        `json:"created_at"`
-	UpdatedAt          time.Time        `json:"updated_at"`
-	DeletedAt          gorm.DeletedAt   `json:"deleted_at,omitempty" gorm:"index"`
+	ID                  uuid.UUID        `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID              uuid.UUID        `json:"user_id" gorm:"type:uuid;not null;index"`
+	CampaignName        string           `json:"campaign_name" gorm:"not null"`
+	Subject             string           `json:"subject" gorm:"not null"`
+	Body                string           `json:"body" gorm:"not null"`
+	TargetAudience      string           `json:"target_audience" gorm:"not null"` // all_customers, specific_customers, all_vendors, specific_vendors
+	ScheduledDate       *time.Time       `json:"scheduled_date,omitempty"`
+	SentDate            *time.Time       `json:"sent_date,omitempty"`
+	Status              string           `json:"status" gorm:"default:'draft'"` // draft, scheduled, sent, failed, completed
+	TotalRecipients     int              `json:"total_recipients" gorm:"default:0"`
+	SentCount           int              `json:"sent_count" gorm:"default:0"`
+	FailedCount         int              `json:"failed_count" gorm:"default:0"`
+	OpenedCount         int              `json:"opened_count" gorm:"default:0"`
+	ClickedCount        int              `json:"clicked_count" gorm:"default:0"`
+	IsRecurring         bool             `json:"is_recurring" gorm:"default:false"`
+	RecurrenceFrequency string           `json:"recurrence_frequency" gorm:"default:''"` // daily, weekly, monthly
+	RecurrenceInterval  int              `json:"recurrence_interval" gorm:"default:0"`
+	RecurrenceEndDate   *time.Time       `json:"recurrence_end_date,omitempty"`
+	LastSentAt          *time.Time       `json:"last_sent_at,omitempty"`
+	Notes               string           `json:"notes"`
+	Recipients          []EmailRecipient `json:"recipients,omitempty" gorm:"foreignKey:CampaignID"`
+	CreatedAt           time.Time        `json:"created_at"`
+	UpdatedAt           time.Time        `json:"updated_at"`
+	DeletedAt           gorm.DeletedAt   `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type EmailRecipient struct {
@@ -1612,25 +1612,25 @@ type EmailRecipient struct {
 }
 
 type WhatsAppMarketing struct {
-	ID              uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
-	CampaignName    string         `json:"campaign_name" gorm:"not null"`
-	Message         string         `json:"message" gorm:"not null"`
-	MediaURL        string         `json:"media_url"`                       // For image/video messages
-	TargetAudience  string         `json:"target_audience" gorm:"not null"` // all_customers, specific_customers, all_vendors, specific_vendors
-	ScheduledDate   *time.Time     `json:"scheduled_date,omitempty"`
-	SentDate        *time.Time     `json:"sent_date,omitempty"`
-	Status          string         `json:"status" gorm:"default:'draft'"` // draft, scheduled, sent, failed
-	TotalRecipients int            `json:"total_recipients" gorm:"default:0"`
-	SentCount       int            `json:"sent_count" gorm:"default:0"`
-	FailedCount     int            `json:"failed_count" gorm:"default:0"`
-	DeliveredCount  int            `json:"delivered_count" gorm:"default:0"`
-	ReadCount       int            `json:"read_count" gorm:"default:0"`
-	Notes           string               `json:"notes"`
-	Recipients      []WhatsAppRecipient  `json:"recipients,omitempty" gorm:"foreignKey:CampaignID"`
-	CreatedAt       time.Time            `json:"created_at"`
-	UpdatedAt       time.Time            `json:"updated_at"`
-	DeletedAt       gorm.DeletedAt       `json:"deleted_at,omitempty" gorm:"index"`
+	ID              uuid.UUID           `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID          uuid.UUID           `json:"user_id" gorm:"type:uuid;not null;index"`
+	CampaignName    string              `json:"campaign_name" gorm:"not null"`
+	Message         string              `json:"message" gorm:"not null"`
+	MediaURL        string              `json:"media_url"`                       // For image/video messages
+	TargetAudience  string              `json:"target_audience" gorm:"not null"` // all_customers, specific_customers, all_vendors, specific_vendors
+	ScheduledDate   *time.Time          `json:"scheduled_date,omitempty"`
+	SentDate        *time.Time          `json:"sent_date,omitempty"`
+	Status          string              `json:"status" gorm:"default:'draft'"` // draft, scheduled, sent, failed
+	TotalRecipients int                 `json:"total_recipients" gorm:"default:0"`
+	SentCount       int                 `json:"sent_count" gorm:"default:0"`
+	FailedCount     int                 `json:"failed_count" gorm:"default:0"`
+	DeliveredCount  int                 `json:"delivered_count" gorm:"default:0"`
+	ReadCount       int                 `json:"read_count" gorm:"default:0"`
+	Notes           string              `json:"notes"`
+	Recipients      []WhatsAppRecipient `json:"recipients,omitempty" gorm:"foreignKey:CampaignID"`
+	CreatedAt       time.Time           `json:"created_at"`
+	UpdatedAt       time.Time           `json:"updated_at"`
+	DeletedAt       gorm.DeletedAt      `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type WhatsAppRecipient struct {
@@ -2259,4 +2259,28 @@ type DailyReportEmailSettings struct {
 	CreatedAt       time.Time      `json:"created_at"`
 	UpdatedAt       time.Time      `json:"updated_at"`
 	DeletedAt       gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// MigrationJob tracks an asynchronous data-migration import (CSV or myBillBook
+// ZIP). The frontend enqueues a job, then polls GET /migration/jobs/:id for
+// per-row progress until the status reaches "completed" or "failed".
+type MigrationJob struct {
+	ID            uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID        uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index"`
+	Kind          string     `json:"kind" gorm:"not null;index"`           // parties, sales, stock-summary, mybillbook, ...
+	FileName      string     `json:"file_name"`                            // original uploaded file name
+	Options       string     `json:"options" gorm:"type:text"`             // JSON map of form options
+	Status        string     `json:"status" gorm:"default:'queued';index"` // queued, running, completed, failed
+	Step          string     `json:"step"`                                 // current step label (e.g. "parties")
+	CurrentRow    int        `json:"current_row" gorm:"default:0"`         // 1-based row currently being processed
+	TotalRows     int        `json:"total_rows" gorm:"default:0"`          // total rows to process (0 if unknown)
+	Imported      int        `json:"imported" gorm:"default:0"`            // rows successfully imported so far
+	Result        string     `json:"result" gorm:"type:text"`              // JSON result payload (counts, step summary)
+	ErrorCount    int        `json:"error_count" gorm:"default:0"`         // number of per-row errors
+	Errors        string     `json:"errors" gorm:"type:text"`              // JSON array of per-row error strings (truncated)
+	FailureReason string     `json:"failure_reason"`                       // set when status = failed
+	StartedAt     *time.Time `json:"started_at,omitempty"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }

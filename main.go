@@ -27,6 +27,10 @@ func main() {
 	controllers.EnsureStoresMigrated()
 	_ = services.GetDefaultStorageService()
 
+	// Register all migration importers with the async job framework so the
+	// /api/v1/migration/jobs endpoints can dispatch by kind.
+	controllers.RegisterMigrationRunners()
+
 	// Start the background scheduler that auto-sends email campaigns when
 	// their scheduled date/time arrives.
 	controllers.StartEmailCampaignScheduler()

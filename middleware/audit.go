@@ -1,9 +1,9 @@
 package middleware
 
 import (
-	"truerp/controllers"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"truerp/controllers"
 )
 
 // AuditMiddleware logs user actions automatically

@@ -1,13 +1,13 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"crypto/rand"
 	"encoding/base32"
 	"net/http"
 	"net/url"
 	"strings"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -353,7 +353,7 @@ func SetupTwoFactor(c *gin.Context) {
 	secret := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(secretBytes)
 
 	if err := utils.DB.Model(&user).Updates(map[string]interface{}{
-		"totp_secret":          secret,
+		"totp_secret":        secret,
 		"two_factor_enabled": false,
 	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save secret"})
@@ -513,8 +513,8 @@ func ResetUserPassword(c *gin.Context) {
 	)
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":             "Temporary password generated. Share it securely with the user.",
-		"temporary_password":  tempPassword,
-		"user":                storeUserResponse(target),
+		"message":            "Temporary password generated. Share it securely with the user.",
+		"temporary_password": tempPassword,
+		"user":               storeUserResponse(target),
 	})
 }

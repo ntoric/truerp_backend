@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -46,13 +46,13 @@ func CreateSMSCampaign(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		CampaignName   string    `json:"campaign_name" binding:"required"`
-		Message        string    `json:"message" binding:"required"`
-		TargetAudience string    `json:"target_audience" binding:"required"`
-		ScheduledDate  *time.Time `json:"scheduled_date"`
+		CampaignName   string      `json:"campaign_name" binding:"required"`
+		Message        string      `json:"message" binding:"required"`
+		TargetAudience string      `json:"target_audience" binding:"required"`
+		ScheduledDate  *time.Time  `json:"scheduled_date"`
 		PartyIDs       []uuid.UUID `json:"party_ids"`
-		PhoneNumbers   []string  `json:"phone_numbers"`
-		Notes          string    `json:"notes"`
+		PhoneNumbers   []string    `json:"phone_numbers"`
+		Notes          string      `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -274,7 +274,7 @@ func SendSMSCampaign(c *gin.Context) {
 	for _, recipient := range recipients {
 		// Send SMS based on provider
 		var err error
-		
+
 		switch devSettings.SMSProvider {
 		case "twilio":
 			err = sendViaTwilio(devSettings, recipient.PhoneNumber, campaign.Message)
@@ -386,15 +386,15 @@ func GetSMSStats(c *gin.Context) {
 	utils.DB.Model(&models.SMSMarketing{}).Where("user_id = ?", userID).Count(&totalCampaigns)
 	utils.DB.Model(&models.SMSMarketing{}).Where("user_id = ? AND status = ?", userID, "sent").Count(&sentCampaigns)
 	utils.DB.Model(&models.SMSMarketing{}).Where("user_id = ? AND status = ?", userID, "scheduled").Count(&scheduledCampaigns)
-	
+
 	utils.DB.Model(&models.SMSMarketing{}).Where("user_id = ?", userID).Select("COALESCE(SUM(sent_count), 0)").Scan(&totalSent)
 	utils.DB.Model(&models.SMSMarketing{}).Where("user_id = ?", userID).Select("COALESCE(SUM(failed_count), 0)").Scan(&totalFailed)
 
 	c.JSON(http.StatusOK, gin.H{
-		"total_campaigns":      totalCampaigns,
-		"sent_campaigns":       sentCampaigns,
-		"scheduled_campaigns":  scheduledCampaigns,
-		"total_sent":           totalSent,
-		"total_failed":         totalFailed,
+		"total_campaigns":     totalCampaigns,
+		"sent_campaigns":      sentCampaigns,
+		"scheduled_campaigns": scheduledCampaigns,
+		"total_sent":          totalSent,
+		"total_failed":        totalFailed,
 	})
 }

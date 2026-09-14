@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -49,10 +49,10 @@ func CreatePOSDraft(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		Title    string  `json:"title" binding:"required"`
-		CartData string  `json:"cart_data" binding:"required"`
-		PartyID  *string `json:"party_id"`
-		Notes    string  `json:"notes"`
+		Title     string  `json:"title" binding:"required"`
+		CartData  string  `json:"cart_data" binding:"required"`
+		PartyID   *string `json:"party_id"`
+		Notes     string  `json:"notes"`
 		SessionID *string `json:"session_id"`
 	}
 
@@ -181,13 +181,13 @@ func ConvertDraftToInvoice(c *gin.Context) {
 
 	// Create invoice from draft data
 	invoice := models.Invoice{
-		ID:         uuid.New(),
-		UserID:     userID,
-		PartyID:    *draft.PartyID,
-		Date:       time.Now(),
-		Status:     "paid",
+		ID:          uuid.New(),
+		UserID:      userID,
+		PartyID:     *draft.PartyID,
+		Date:        time.Now(),
+		Status:      "paid",
 		PaymentMode: input.PaymentMode,
-		Notes:      draft.Notes,
+		Notes:       draft.Notes,
 	}
 
 	// Generate invoice number

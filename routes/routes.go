@@ -357,30 +357,30 @@ func SetupRoutes(r *gin.Engine) {
 		gst.GET("/ewaybill/history", controllers.GetEWayBillHistory)
 		gst.GET("/hsn-rates", controllers.GetHSNRates)
 		gst.GET("/hsn-search", controllers.SearchHSNCodes)
-		
+
 		// GST Compliance Routes
 		gst.POST("/validate-gstin", controllers.ValidateGSTIN)
 		gst.GET("/state-codes", controllers.GetStateCodes)
-		
+
 		// Tax Period Management
 		gst.POST("/tax-periods", controllers.CreateTaxPeriod)
 		gst.GET("/tax-periods", controllers.GetTaxPeriods)
 		gst.GET("/tax-periods/:id", controllers.GetTaxPeriod)
 		gst.PUT("/tax-periods/:id", controllers.UpdateTaxPeriod)
-		
+
 		// Input Tax Credit (ITC)
 		gst.POST("/itc", controllers.CreateITC)
 		gst.GET("/itc", controllers.GetITC)
 		gst.PUT("/itc/:id/utilize", controllers.UtilizeITC)
-		
+
 		// GST Filing
 		gst.POST("/filing", controllers.RecordGSTFiling)
 		gst.GET("/filing", controllers.GetGSTFilingStatus)
-		
+
 		// GST Portal Exports
 		gst.GET("/export/gstr1", controllers.GenerateGSTR1Export)
 		gst.GET("/export/gstr3b", controllers.GenerateGSTR3BExport)
-		
+
 		// Tax Calculation
 		gst.POST("/calculate", controllers.CalculateTax)
 		gst.POST("/convert-price", controllers.ConvertPrice)
@@ -443,14 +443,14 @@ func SetupRoutes(r *gin.Engine) {
 		accounting.PUT("/journal/:id", controllers.UpdateJournalEntry)
 		accounting.POST("/journal/:id/post", controllers.PostJournalEntry)
 		accounting.DELETE("/journal/:id", controllers.DeleteJournalEntry)
-		
+
 		// Financial Reports
 		accounting.GET("/trial-balance", controllers.GetTrialBalance)
 		accounting.GET("/profit-loss", controllers.GetProfitLoss)
 		accounting.GET("/balance-sheet", controllers.GetBalanceSheet)
 		accounting.GET("/general-ledger/:id", controllers.GetGeneralLedger)
 		accounting.GET("/ledgers", controllers.GetLedgers)
-		
+
 		// Bank Reconciliation
 		accounting.POST("/bank-reconciliation", controllers.CreateBankReconciliation)
 		accounting.GET("/bank-reconciliation", controllers.GetBankReconciliations)
@@ -468,17 +468,17 @@ func SetupRoutes(r *gin.Engine) {
 		notifications.PUT("/read-all", controllers.MarkAllAsRead)
 		notifications.POST("/:id/send", controllers.SendNotification)
 		notifications.DELETE("/:id", controllers.DeleteNotification)
-		
+
 		// Notification Templates
 		notifications.GET("/templates", controllers.GetNotificationTemplates)
 		notifications.POST("/templates", controllers.CreateNotificationTemplate)
 		notifications.PUT("/templates/:id", controllers.UpdateNotificationTemplate)
 		notifications.DELETE("/templates/:id", controllers.DeleteNotificationTemplate)
-		
+
 		// Notification Preferences
 		notifications.GET("/preferences", controllers.GetNotificationPreferences)
 		notifications.PUT("/preferences/:type", controllers.UpdateNotificationPreference)
-		
+
 		// Automation Endpoints
 		notifications.POST("/send-invoice-due-reminders", controllers.SendInvoiceDueReminders)
 		notifications.POST("/send-payment-reminders", controllers.SendPaymentReminders)
@@ -492,24 +492,24 @@ func SetupRoutes(r *gin.Engine) {
 		// Audit Logs
 		compliance.GET("/audit-logs", controllers.GetComplianceAuditLogs)
 		compliance.GET("/audit-logs/stats", controllers.GetAuditLogStats)
-		
+
 		// Role & Permission Management
 		compliance.GET("/roles", controllers.GetRoles)
 		compliance.POST("/roles", controllers.CreateRole)
 		compliance.PUT("/roles/:id", controllers.UpdateRole)
 		compliance.DELETE("/roles/:id", controllers.DeleteRole)
 		compliance.GET("/permissions", controllers.GetPermissions)
-		
+
 		// IP Restrictions
 		compliance.GET("/ip-restrictions", controllers.GetIPRestrictions)
 		compliance.POST("/ip-restrictions", controllers.CreateIPRestriction)
 		compliance.DELETE("/ip-restrictions/:id", controllers.DeleteIPRestriction)
-		
+
 		// Backup & Restore
 		compliance.POST("/backups", controllers.CreateBackup)
 		compliance.GET("/backups", controllers.GetBackups)
 		compliance.POST("/backups/:id/restore", controllers.RestoreBackup)
-		
+
 		// GDPR Compliance
 		compliance.POST("/gdpr-requests", controllers.CreateGDPRRequest)
 		compliance.GET("/gdpr-requests", controllers.GetGDPRRequests)
@@ -703,7 +703,7 @@ func SetupRoutes(r *gin.Engine) {
 		settings.POST("/invoice-custom-fields", controllers.CreateInvoiceCustomFieldDefinition)
 		settings.PUT("/invoice-custom-fields/:id", controllers.UpdateInvoiceCustomFieldDefinition)
 		settings.DELETE("/invoice-custom-fields/:id", controllers.DeleteInvoiceCustomFieldDefinition)
-		
+
 		// Print Settings
 		settings.GET("/print", controllers.GetPrintSettings)
 		settings.PUT("/print", controllers.UpdatePrintSettings)
@@ -711,19 +711,19 @@ func SetupRoutes(r *gin.Engine) {
 		// Weighing scale settings
 		settings.GET("/weighing-scale", controllers.GetWeighingScaleSettings)
 		settings.PUT("/weighing-scale", controllers.UpdateWeighingScaleSettings)
-		
+
 		// Reminders
 		settings.GET("/reminders", controllers.GetReminders)
 		settings.POST("/reminders", controllers.CreateReminder)
 		settings.PUT("/reminders/:id", controllers.UpdateReminder)
 		settings.DELETE("/reminders/:id", controllers.DeleteReminder)
-		
+
 		// CA Report Sharing
 		settings.GET("/ca-sharing", controllers.GetCAReportSharing)
 		settings.POST("/ca-sharing", controllers.CreateCAReportSharing)
 		settings.PUT("/ca-sharing/:id", controllers.UpdateCAReportSharing)
 		settings.DELETE("/ca-sharing/:id", controllers.DeleteCAReportSharing)
-		
+
 		// Account Settings
 		settings.POST("/change-password", controllers.ChangePassword)
 		settings.POST("/users/:id/reset-password", controllers.ResetUserPassword)
@@ -949,5 +949,14 @@ func SetupRoutes(r *gin.Engine) {
 		migration.POST("/stock-summary/import/csv", controllers.ImportStockSummaryCSV)
 		migration.POST("/purchase-payments/import/csv", controllers.ImportPurchasePaymentStatusCSV)
 		migration.POST("/purchase-items/import/csv", controllers.ImportPurchaseItemsCSV)
+		migration.POST("/sales-items/import/csv", controllers.ImportSalesItemsCSV)
+		migration.POST("/sales/import/csv", controllers.ImportSalesCSV)
+
+		// Asynchronous migration jobs — enqueue, poll, list. These accept
+		// any of the per-entity CSV importers above (and the myBillBook ZIP)
+		// via the "kind" form field and report per-row progress.
+		migration.POST("/jobs", controllers.EnqueueMigrationJobHandler)
+		migration.GET("/jobs/:id", controllers.GetMigrationJobHandler)
+		migration.GET("/jobs", controllers.ListMigrationJobsHandler)
 	}
 }

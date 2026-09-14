@@ -54,9 +54,9 @@ func GetOrCreateDailyReportEmailSettings(userID uuid.UUID) (models.DailyReportEm
 		return settings, nil
 	}
 	settings = models.DailyReportEmailSettings{
-		ID:     uuid.New(),
-		UserID: userID,
-		Period: "daily",
+		ID:       uuid.New(),
+		UserID:   userID,
+		Period:   "daily",
 		SendTime: "09:00",
 	}
 	if createErr := utils.DB.Create(&settings).Error; createErr != nil {
@@ -332,11 +332,11 @@ func SendDailyReportEmailNowHandler(c *gin.Context) {
 	utils.DB.Where("user_id = ?", userID).First(&settings)
 
 	c.JSON(http.StatusOK, gin.H{
-		"sent_count":   sentCount,
-		"total":        len(recipients),
-		"settings":     settings,
-		"warning":      sendErr != nil,
-		"warning_msg":  sendErr,
+		"sent_count":  sentCount,
+		"total":       len(recipients),
+		"settings":    settings,
+		"warning":     sendErr != nil,
+		"warning_msg": sendErr,
 	})
 }
 
@@ -407,13 +407,13 @@ func GetServerTimeHandler(c *gin.Context) {
 		"timezone_name":    time.Local.String(),
 
 		// Configured timezone clock — this is what the scheduler uses.
-		"configured_time":      configuredNow.Format("2006-01-02 15:04:05"),
-		"configured_date":      configuredNow.Format("2006-01-02"),
-		"configured_time_hhmm": configuredNow.Format("15:04"),
-		"configured_timezone":  cZone,
-		"configured_timezone_name": configuredName,
+		"configured_time":             configuredNow.Format("2006-01-02 15:04:05"),
+		"configured_date":             configuredNow.Format("2006-01-02"),
+		"configured_time_hhmm":        configuredNow.Format("15:04"),
+		"configured_timezone":         cZone,
+		"configured_timezone_name":    configuredName,
 		"configured_utc_offset_hours": float64(cOffset) / 3600.0,
-		"has_configured_timezone":    configured,
+		"has_configured_timezone":     configured,
 
 		// Common IANA timezone identifiers the frontend can offer in a dropdown.
 		"common_timezones": CommonTimezones,

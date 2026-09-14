@@ -1,22 +1,22 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
 type AgingBucket struct {
-	Current   float64 `json:"current"`
-	Days1_30  float64 `json:"days_1_30"`
-	Days31_60 float64 `json:"days_31_60"`
-	Days61_90 float64 `json:"days_61_90"`
+	Current    float64 `json:"current"`
+	Days1_30   float64 `json:"days_1_30"`
+	Days31_60  float64 `json:"days_31_60"`
+	Days61_90  float64 `json:"days_61_90"`
 	Days90Plus float64 `json:"days_90_plus"`
 }
 
@@ -24,10 +24,10 @@ func GenerateCustomerStatement(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		PartyID   uuid.UUID `json:"party_id" binding:"required"`
-		FromDate  time.Time `json:"from_date" binding:"required"`
-		ToDate    time.Time `json:"to_date" binding:"required"`
-		Notes     string    `json:"notes"`
+		PartyID  uuid.UUID `json:"party_id" binding:"required"`
+		FromDate time.Time `json:"from_date" binding:"required"`
+		ToDate   time.Time `json:"to_date" binding:"required"`
+		Notes    string    `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -214,10 +214,10 @@ func GetAgingReport(c *gin.Context) {
 
 	now := time.Now()
 	type AgingSummary struct {
-		PartyID       uuid.UUID  `json:"party_id"`
-		PartyName     string     `json:"party_name"`
-		TotalOutstanding float64 `json:"total_outstanding"`
-		Aging         AgingBucket `json:"aging"`
+		PartyID          uuid.UUID   `json:"party_id"`
+		PartyName        string      `json:"party_name"`
+		TotalOutstanding float64     `json:"total_outstanding"`
+		Aging            AgingBucket `json:"aging"`
 	}
 
 	var summaries []AgingSummary

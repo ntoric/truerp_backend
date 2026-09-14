@@ -1,10 +1,10 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -45,14 +45,14 @@ func CreateWhatsAppCampaign(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		CampaignName   string       `json:"campaign_name" binding:"required"`
-		Message        string       `json:"message" binding:"required"`
-		MediaURL       string       `json:"media_url"`
-		TargetAudience string       `json:"target_audience" binding:"required"`
-		ScheduledDate  *time.Time   `json:"scheduled_date"`
-		PartyIDs       []uuid.UUID  `json:"party_ids"`
-		PhoneNumbers   []string     `json:"phone_numbers"`
-		Notes          string       `json:"notes"`
+		CampaignName   string      `json:"campaign_name" binding:"required"`
+		Message        string      `json:"message" binding:"required"`
+		MediaURL       string      `json:"media_url"`
+		TargetAudience string      `json:"target_audience" binding:"required"`
+		ScheduledDate  *time.Time  `json:"scheduled_date"`
+		PartyIDs       []uuid.UUID `json:"party_ids"`
+		PhoneNumbers   []string    `json:"phone_numbers"`
+		Notes          string      `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -333,19 +333,19 @@ func GetWhatsAppStats(c *gin.Context) {
 	utils.DB.Model(&models.WhatsAppMarketing{}).Where("user_id = ?", userID).Count(&totalCampaigns)
 	utils.DB.Model(&models.WhatsAppMarketing{}).Where("user_id = ? AND status = ?", userID, "sent").Count(&sentCampaigns)
 	utils.DB.Model(&models.WhatsAppMarketing{}).Where("user_id = ? AND status = ?", userID, "scheduled").Count(&scheduledCampaigns)
-	
+
 	utils.DB.Model(&models.WhatsAppMarketing{}).Where("user_id = ?", userID).Select("COALESCE(SUM(sent_count), 0)").Scan(&totalSent)
 	utils.DB.Model(&models.WhatsAppMarketing{}).Where("user_id = ?", userID).Select("COALESCE(SUM(failed_count), 0)").Scan(&totalFailed)
 	utils.DB.Model(&models.WhatsAppMarketing{}).Where("user_id = ?", userID).Select("COALESCE(SUM(delivered_count), 0)").Scan(&totalDelivered)
 	utils.DB.Model(&models.WhatsAppMarketing{}).Where("user_id = ?", userID).Select("COALESCE(SUM(read_count), 0)").Scan(&totalRead)
 
 	c.JSON(http.StatusOK, gin.H{
-		"total_campaigns":      totalCampaigns,
-		"sent_campaigns":       sentCampaigns,
-		"scheduled_campaigns":  scheduledCampaigns,
-		"total_sent":           totalSent,
-		"total_failed":         totalFailed,
-		"total_delivered":      totalDelivered,
-		"total_read":           totalRead,
+		"total_campaigns":     totalCampaigns,
+		"sent_campaigns":      sentCampaigns,
+		"scheduled_campaigns": scheduledCampaigns,
+		"total_sent":          totalSent,
+		"total_failed":        totalFailed,
+		"total_delivered":     totalDelivered,
+		"total_read":          totalRead,
 	})
 }

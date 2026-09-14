@@ -1,9 +1,9 @@
 package controllers
 
 import (
+	"net/http"
 	"truerp/models"
 	"truerp/utils"
-	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -27,9 +27,9 @@ func CreateProductImage(c *gin.Context) {
 	productID := c.Param("id")
 
 	var input struct {
-		ImageURL string `json:"image_url" binding:"required"`
-		AltText  string `json:"alt_text"`
-		IsPrimary bool  `json:"is_primary"`
+		ImageURL  string `json:"image_url" binding:"required"`
+		AltText   string `json:"alt_text"`
+		IsPrimary bool   `json:"is_primary"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {

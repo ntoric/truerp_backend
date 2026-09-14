@@ -3,11 +3,13 @@ package controllers
 import (
 	"encoding/csv"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"strings"
 	"time"
 	"truerp/models"
+	"truerp/services"
 	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
@@ -61,20 +63,11 @@ func ImportInvoicesCSV(c *gin.Context) {
 		return
 	}
 	defer src.Close()
-
-	reader := csv.NewReader(src)
-	records, err := reader.ReadAll()
+	content, err := io.ReadAll(src)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read CSV"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read file"})
 		return
 	}
-
-	if len(records) < 2 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "CSV file is empty or has no data"})
-		return
-	}
-
-	headers := records[0]
 
 	// Optional defaults applied when the CSV cell is blank.
 	def := invoiceImportDefaults{
@@ -83,11 +76,38 @@ func ImportInvoicesCSV(c *gin.Context) {
 		taxRate: parseFloat(c.PostForm("default_tax_rate")),
 	}
 
+	result, errs, perr := importInvoicesRows(userID, userName, content, def, c.ClientIP(), c.GetHeader("User-Agent"), nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"imported": result["imported"], "errors": errs})
+}
+
+func importInvoicesRows(userID uuid.UUID, userName string, content []byte, def invoiceImportDefaults, clientIP, userAgent string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
+	reader := csv.NewReader(strings.NewReader(string(content)))
+	reader.FieldsPerRecord = -1
+	reader.LazyQuotes = true
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read CSV: %w", err)
+	}
+
+	if len(records) < 2 {
+		return nil, nil, fmt.Errorf("CSV file is empty or has no data")
+	}
+
+	headers := records[0]
+	dataRows := records[1:]
+
 	groups := make(map[string][]invoiceImportLine)
 	groupOrder := []string{}
 	var errors []string
 
-	for i, record := range records[1:] {
+	for i, record := range dataRows {
+		if progress != nil {
+			progress(i+1, len(dataRows), 0)
+		}
 		rowNum := i + 2
 		if len(record) == 0 || strings.TrimSpace(strings.Join(record, "")) == "" {
 			continue
@@ -117,17 +137,14 @@ func ImportInvoicesCSV(c *gin.Context) {
 			continue
 		}
 
-		if err := createImportedInvoice(userID, userName, lines, c.ClientIP(), c.GetHeader("User-Agent")); err != nil {
+		if err := createImportedInvoice(userID, userName, lines, clientIP, userAgent); err != nil {
 			errors = append(errors, fmt.Sprintf("Invoice %s: %v", displayInvoiceImportKey(groupKey, lines[0]), err))
 			continue
 		}
 		importedCount++
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"imported": importedCount,
-		"errors":   errors,
-	})
+	return map[string]interface{}{"imported": importedCount}, errors, nil
 }
 
 func parseInvoiceImportRow(rowNum int, record, headers []string, def invoiceImportDefaults) (invoiceImportLine, error) {
@@ -357,12 +374,16 @@ func parseImportDate(value string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("date is required")
 	}
 
+	// DD/MM/YYYY is tried first because the migration import files use that
+	// format. MM/DD/YYYY is kept as a fallback for unambiguous inputs, but any
+	// date that can be read as day-first (e.g. 13/05/2024 or 05/06/2024) is
+	// resolved as DD/MM/YYYY.
 	formats := []string{
+		"02/01/2006",
 		"2006-01-02",
 		"02 Jan 2006",
 		"2 Jan 2006",
 		"01/02/2006",
-		"02/01/2006",
 		"2006/01/02",
 		time.RFC3339,
 	}

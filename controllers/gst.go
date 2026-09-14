@@ -1,8 +1,6 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
@@ -12,20 +10,22 @@ import (
 	"os"
 	"strings"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
 type GSTSummary struct {
-	Period        string  `json:"period"`
-	TotalSales    float64 `json:"total_sales"`
+	Period         string  `json:"period"`
+	TotalSales     float64 `json:"total_sales"`
 	TotalPurchases float64 `json:"total_purchases"`
-	CGST          float64 `json:"cgst"`
-	SGST          float64 `json:"sgst"`
-	IGST          float64 `json:"igst"`
-	TotalTax      float64 `json:"total_tax"`
-	Liability     float64 `json:"liability"`
+	CGST           float64 `json:"cgst"`
+	SGST           float64 `json:"sgst"`
+	IGST           float64 `json:"igst"`
+	TotalTax       float64 `json:"total_tax"`
+	Liability      float64 `json:"liability"`
 }
 
 func GetGSTSummary(c *gin.Context) {
@@ -67,11 +67,11 @@ func GetGSTSummary(c *gin.Context) {
 		Scan(&salesResult)
 
 	var purchaseResult struct {
-		CGST         float64
-		SGST         float64
-		IGST         float64
+		CGST           float64
+		SGST           float64
+		IGST           float64
 		TotalPurchases float64
-		TaxableValue float64
+		TaxableValue   float64
 	}
 	utils.DB.Model(&models.PurchaseReceipt{}).
 		Where("user_id = ? AND receipt_date >= ? AND receipt_date <= ? AND status = 'submitted'", userID, startDate, endDate).
@@ -114,13 +114,13 @@ func GetGSTSummary(c *gin.Context) {
 		"summary": summary,
 		"details": gin.H{
 			"sales": gin.H{
-				"total_sales":     salesResult.TotalSales,
-				"taxable_value":   salesResult.TaxableValue,
-				"exempted":        salesResult.Exempted,
-				"nil_rated":       salesResult.NilRated,
-				"cgst":            salesResult.CGST,
-				"sgst":            salesResult.SGST,
-				"igst":            salesResult.IGST,
+				"total_sales":   salesResult.TotalSales,
+				"taxable_value": salesResult.TaxableValue,
+				"exempted":      salesResult.Exempted,
+				"nil_rated":     salesResult.NilRated,
+				"cgst":          salesResult.CGST,
+				"sgst":          salesResult.SGST,
+				"igst":          salesResult.IGST,
 			},
 			"purchases": gin.H{
 				"total_purchases": purchaseResult.TotalPurchases,
@@ -160,33 +160,33 @@ func GetGSTR1(c *gin.Context) {
 		Preload("Party").Preload("Items").Find(&invoices)
 
 	type GSTR1Record struct {
-		InvoiceNumber  string  `json:"invoice_number"`
-		InvoiceDate    string  `json:"invoice_date"`
-		PartyName      string  `json:"party_name"`
-		GSTIN          string  `json:"party_gstin"`
-		PlaceOfSupply  string  `json:"place_of_supply"`
-		InvoiceValue   float64 `json:"invoice_value"`
-		TaxableValue   float64 `json:"taxable_value"`
-		CGST           float64 `json:"cgst"`
-		SGST           float64 `json:"sgst"`
-		IGST           float64 `json:"igst"`
-		InvoiceType    string  `json:"invoice_type"`
+		InvoiceNumber string  `json:"invoice_number"`
+		InvoiceDate   string  `json:"invoice_date"`
+		PartyName     string  `json:"party_name"`
+		GSTIN         string  `json:"party_gstin"`
+		PlaceOfSupply string  `json:"place_of_supply"`
+		InvoiceValue  float64 `json:"invoice_value"`
+		TaxableValue  float64 `json:"taxable_value"`
+		CGST          float64 `json:"cgst"`
+		SGST          float64 `json:"sgst"`
+		IGST          float64 `json:"igst"`
+		InvoiceType   string  `json:"invoice_type"`
 	}
 
 	var records []GSTR1Record
 	for _, inv := range invoices {
 		records = append(records, GSTR1Record{
-			InvoiceNumber:  inv.InvoiceNumber,
-			InvoiceDate:    inv.Date.Format("02-01-2006"),
-			PartyName:      inv.Party.Name,
-			GSTIN:          inv.Party.GSTIN,
-			PlaceOfSupply:  inv.Party.State,
-			InvoiceValue:   inv.TotalAmount,
-			TaxableValue:   inv.SubTotal - inv.DiscountTotal,
-			CGST:           inv.CGSTTotal,
-			SGST:           inv.SGSTTotal,
-			IGST:           inv.IGSTTotal,
-			InvoiceType:    inv.InvoiceType,
+			InvoiceNumber: inv.InvoiceNumber,
+			InvoiceDate:   inv.Date.Format("02-01-2006"),
+			PartyName:     inv.Party.Name,
+			GSTIN:         inv.Party.GSTIN,
+			PlaceOfSupply: inv.Party.State,
+			InvoiceValue:  inv.TotalAmount,
+			TaxableValue:  inv.SubTotal - inv.DiscountTotal,
+			CGST:          inv.CGSTTotal,
+			SGST:          inv.SGSTTotal,
+			IGST:          inv.IGSTTotal,
+			InvoiceType:   inv.InvoiceType,
 		})
 	}
 
@@ -214,15 +214,15 @@ func GetGSTR2(c *gin.Context) {
 		Preload("Party").Preload("Items").Find(&receipts)
 
 	type GSTR2Record struct {
-		BillNumber    string  `json:"bill_number"`
-		ReceiptDate   string  `json:"receipt_date"`
-		PartyName     string  `json:"party_name"`
-		GSTIN         string  `json:"party_gstin"`
-		InvoiceValue  float64 `json:"invoice_value"`
-		TaxableValue  float64 `json:"taxable_value"`
-		CGST          float64 `json:"cgst"`
-		SGST          float64 `json:"sgst"`
-		IGST          float64 `json:"igst"`
+		BillNumber   string  `json:"bill_number"`
+		ReceiptDate  string  `json:"receipt_date"`
+		PartyName    string  `json:"party_name"`
+		GSTIN        string  `json:"party_gstin"`
+		InvoiceValue float64 `json:"invoice_value"`
+		TaxableValue float64 `json:"taxable_value"`
+		CGST         float64 `json:"cgst"`
+		SGST         float64 `json:"sgst"`
+		IGST         float64 `json:"igst"`
 	}
 
 	var records []GSTR2Record
@@ -260,19 +260,19 @@ func GetGSTR3B(c *gin.Context) {
 	}
 
 	type GSTR3B struct {
-		Period           string  `json:"period"`
+		Period            string  `json:"period"`
 		TotalTaxLiability float64 `json:"total_tax_liability"`
-		IGSTLiability    float64 `json:"igst_liability"`
-		CGSTLiability    float64 `json:"cgst_liability"`
-		SGSTLiability    float64 `json:"sgst_liability"`
-		TotalITC         float64 `json:"total_itc"`
-		TaxPayable       float64 `json:"tax_payable"`
+		IGSTLiability     float64 `json:"igst_liability"`
+		CGSTLiability     float64 `json:"cgst_liability"`
+		SGSTLiability     float64 `json:"sgst_liability"`
+		TotalITC          float64 `json:"total_itc"`
+		TaxPayable        float64 `json:"tax_payable"`
 	}
 
 	var gstr3bResult struct {
-		CGST  float64
-		SGST  float64
-		IGST  float64
+		CGST float64
+		SGST float64
+		IGST float64
 	}
 	utils.DB.Model(&models.Invoice{}).
 		Where("user_id = ? AND date >= ? AND date <= ? AND status != 'cancelled'", userID, startDate, endDate).
@@ -296,12 +296,12 @@ type EInvoiceRequest struct {
 }
 
 type EInvoiceResponse struct {
-	IRN           string    `json:"irn"`
-	InvoiceID     uuid.UUID `json:"invoice_id"`
-	Status        string    `json:"status"`
-	QRCode        string    `json:"qr_code"`
-	EWBNumber     string    `json:"ewb_number,omitempty"`
-	GeneratedAt   time.Time `json:"generated_at"`
+	IRN         string    `json:"irn"`
+	InvoiceID   uuid.UUID `json:"invoice_id"`
+	Status      string    `json:"status"`
+	QRCode      string    `json:"qr_code"`
+	EWBNumber   string    `json:"ewb_number,omitempty"`
+	GeneratedAt time.Time `json:"generated_at"`
 }
 
 func GenerateEInvoice(c *gin.Context) {
@@ -575,7 +575,7 @@ func SearchHSNCodes(c *gin.Context) {
 		searchHSNWithAI(c, search)
 		return
 	}
-	
+
 	// Read HSN codes from CSV file
 	file, err := os.Open("HSN_DATASET.csv")
 	if err != nil {
@@ -606,8 +606,8 @@ func SearchHSNCodes(c *gin.Context) {
 			hsnCodes = append(hsnCodes, HSNCode{
 				Code:        records[i][0],
 				Description: records[i][1],
-				CGSTRate:    9, // Default rate
-				SGSTRate:    9, // Default rate
+				CGSTRate:    9,  // Default rate
+				SGSTRate:    9,  // Default rate
 				IGSTRate:    18, // Default rate
 			})
 		}
@@ -634,7 +634,7 @@ func SearchHSNCodes(c *gin.Context) {
 			}
 		}
 	}
-	
+
 	c.JSON(http.StatusOK, results)
 }
 
@@ -666,12 +666,12 @@ func searchHSNWithAI(c *gin.Context, search string) {
 	}
 
 	fmt.Printf("[DEBUG] searchHSNWithAI - EnableAIHSNSearch: %v, GeminiAPIKey configured: %v\n", business.EnableAIHSNSearch, business.GeminiAPIKey != "")
-	
+
 	if !business.EnableAIHSNSearch {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "AI HSN search is not enabled"})
 		return
 	}
-	
+
 	if business.GeminiAPIKey == "" {
 		fmt.Printf("[DEBUG] searchHSNWithAI - Gemini API key not configured\n")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Gemini API key not configured"})
@@ -703,7 +703,7 @@ If you cannot find a matching HSN code or there's an error, return this exact fo
 }
 
 Return ONLY the JSON, nothing else.`, search)
-	
+
 	requestBody := map[string]interface{}{
 		"contents": []map[string]interface{}{
 			{
@@ -715,19 +715,19 @@ Return ONLY the JSON, nothing else.`, search)
 			},
 		},
 	}
-	
+
 	jsonBody, err := json.Marshal(requestBody)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
 		return
 	}
-	
+
 	req, err := http.NewRequest("POST", "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key="+apiKey, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
 		return
 	}
-	
+
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{}
@@ -740,7 +740,7 @@ Return ONLY the JSON, nothing else.`, search)
 	defer resp.Body.Close()
 
 	fmt.Printf("[DEBUG] searchHSNWithAI - Gemini API response status: %d\n", resp.StatusCode)
-	
+
 	if resp.StatusCode != http.StatusOK {
 		// Read error body for more details
 		bodyBytes, _ := io.ReadAll(resp.Body)
@@ -748,7 +748,7 @@ Return ONLY the JSON, nothing else.`, search)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Gemini API error: %s", string(bodyBytes))})
 		return
 	}
-	
+
 	var geminiResponse struct {
 		Candidates []struct {
 			Content struct {
@@ -758,19 +758,19 @@ Return ONLY the JSON, nothing else.`, search)
 			} `json:"content"`
 		} `json:"candidates"`
 	}
-	
+
 	if err := json.NewDecoder(resp.Body).Decode(&geminiResponse); err != nil {
 		fmt.Printf("[DEBUG] searchHSNWithAI - Failed to parse Gemini response: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse Gemini response"})
 		return
 	}
-	
+
 	if len(geminiResponse.Candidates) == 0 || len(geminiResponse.Candidates[0].Content.Parts) == 0 {
 		fmt.Printf("[DEBUG] searchHSNWithAI - No response from Gemini (candidates: %d)\n", len(geminiResponse.Candidates))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "No response from Gemini"})
 		return
 	}
-	
+
 	// Extract text from response
 	text := strings.TrimSpace(geminiResponse.Candidates[0].Content.Parts[0].Text)
 	fmt.Printf("[DEBUG] searchHSNWithAI - Raw Gemini response text: %s\n", text)
@@ -778,7 +778,7 @@ Return ONLY the JSON, nothing else.`, search)
 	// Try to extract JSON from the text (in case AI added markdown)
 	text = extractJSON(text)
 	fmt.Printf("[DEBUG] searchHSNWithAI - Extracted JSON: %s\n", text)
-	
+
 	// Parse the JSON response from Gemini
 	var aiResponse struct {
 		Status      string  `json:"status"`
@@ -789,20 +789,20 @@ Return ONLY the JSON, nothing else.`, search)
 		IGSTRate    float64 `json:"igst_rate,omitempty"`
 		Error       string  `json:"error,omitempty"`
 	}
-	
+
 	if err := json.Unmarshal([]byte(text), &aiResponse); err != nil {
 		fmt.Printf("[DEBUG] searchHSNWithAI - Failed to parse Gemini result as JSON: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse Gemini result as JSON"})
 		return
 	}
-	
+
 	// Check if AI returned an error
 	if aiResponse.Status == "error" {
 		fmt.Printf("[DEBUG] searchHSNWithAI - AI returned error: %s\n", aiResponse.Error)
 		c.JSON(http.StatusNotFound, gin.H{"error": aiResponse.Error})
 		return
 	}
-	
+
 	// Validate required fields for success response
 	if aiResponse.Code == "" {
 		fmt.Printf("[DEBUG] searchHSNWithAI - Invalid response: missing HSN code\n")
@@ -811,7 +811,7 @@ Return ONLY the JSON, nothing else.`, search)
 	}
 
 	fmt.Printf("[DEBUG] searchHSNWithAI - Successfully found HSN code: %s - %s\n", aiResponse.Code, aiResponse.Description)
-	
+
 	result := struct {
 		Code        string  `json:"code"`
 		Description string  `json:"description"`
@@ -825,7 +825,7 @@ Return ONLY the JSON, nothing else.`, search)
 		SGSTRate:    aiResponse.SGSTRate,
 		IGSTRate:    aiResponse.IGSTRate,
 	}
-	
+
 	c.JSON(http.StatusOK, []interface{}{result})
 }
 
@@ -834,11 +834,11 @@ func extractJSON(text string) string {
 	// Try to find JSON object boundaries
 	startIdx := strings.Index(text, "{")
 	endIdx := strings.LastIndex(text, "}")
-	
+
 	if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
 		return text[startIdx : endIdx+1]
 	}
-	
+
 	return text
 }
 
@@ -863,10 +863,10 @@ func ValidateGSTIN(c *gin.Context) {
 	}
 
 	isValid := utils.ValidateGSTIN(input.GSTIN)
-	
+
 	response := gin.H{
-		"gstin":    input.GSTIN,
-		"valid":    isValid,
+		"gstin": input.GSTIN,
+		"valid": isValid,
 	}
 
 	if isValid {
@@ -965,12 +965,12 @@ func UpdateTaxPeriod(c *gin.Context) {
 	id := c.Param("id")
 
 	var input struct {
-		Status      string     `json:"status"`
-		GSTR1Status string     `json:"gstr1_status"`
-		GSTR3BStatus string    `json:"gstr3b_status"`
-		GSTR1FiledAt *time.Time `json:"gstr1_filed_at"`
+		Status        string     `json:"status"`
+		GSTR1Status   string     `json:"gstr1_status"`
+		GSTR3BStatus  string     `json:"gstr3b_status"`
+		GSTR1FiledAt  *time.Time `json:"gstr1_filed_at"`
 		GSTR3BFiledAt *time.Time `json:"gstr3b_filed_at"`
-		Notes       string     `json:"notes"`
+		Notes         string     `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -1018,13 +1018,13 @@ func CreateITC(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		TaxPeriod    string    `json:"tax_period" binding:"required"`
-		SourceID     uuid.UUID `json:"source_id" binding:"required"`
-		SourceType   string    `json:"source_type" binding:"required"` // purchase_receipt, purchase_bill
+		TaxPeriod     string    `json:"tax_period" binding:"required"`
+		SourceID      uuid.UUID `json:"source_id" binding:"required"`
+		SourceType    string    `json:"source_type" binding:"required"` // purchase_receipt, purchase_bill
 		CGSTAvailable float64   `json:"cgst_available"`
 		SGSTAvailable float64   `json:"sgst_available"`
 		IGSTAvailable float64   `json:"igst_available"`
-		Notes        string    `json:"notes"`
+		Notes         string    `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -1061,7 +1061,7 @@ func GetITC(c *gin.Context) {
 
 	var itcEntries []models.InputTaxCredit
 	query := utils.DB.Where("user_id = ?", userID)
-	
+
 	if taxPeriod != "" {
 		query = query.Where("tax_period = ?", taxPeriod)
 	}
@@ -1134,22 +1134,22 @@ func GenerateGSTR1Export(c *gin.Context) {
 
 	// Fetch invoices for the period
 	var invoices []models.Invoice
-	utils.DB.Where("user_id = ? AND date >= ? AND date <= ? AND status != 'cancelled'", 
+	utils.DB.Where("user_id = ? AND date >= ? AND date <= ? AND status != 'cancelled'",
 		userID, startDate, endDate).
 		Preload("Party").Preload("Items").Find(&invoices)
 
 	// Prepare GSTR-1 data structure
 	gstr1Data := gin.H{
-		"gstin":    business.GSTIN,
-		"period":   period,
-		"fp":       period, // Filing period
-		"b2b":      []gin.H{},
-		"b2cl":     []gin.H{},
-		"b2cs":     []gin.H{},
-		"exp":      []gin.H{},
-		"at":       []gin.H{},
-		"txpd":     []gin.H{},
-		"hsn":      []gin.H{},
+		"gstin":     business.GSTIN,
+		"period":    period,
+		"fp":        period, // Filing period
+		"b2b":       []gin.H{},
+		"b2cl":      []gin.H{},
+		"b2cs":      []gin.H{},
+		"exp":       []gin.H{},
+		"at":        []gin.H{},
+		"txpd":      []gin.H{},
+		"hsn":       []gin.H{},
 		"doc_issue": gin.H{},
 	}
 
@@ -1157,15 +1157,15 @@ func GenerateGSTR1Export(c *gin.Context) {
 		if inv.Party.GSTIN != "" {
 			// B2B invoices
 			b2bRecord := gin.H{
-				"ctin":       inv.Party.GSTIN,
+				"ctin": inv.Party.GSTIN,
 				"inv": []gin.H{{
-					"inum":   inv.InvoiceNumber,
-					"idt":    inv.Date.Format("02-01-2006"),
-					"val":    inv.TotalAmount,
-					"pos":    inv.PlaceOfSupply,
-					"rchrg":  map[bool]string{true: "Y", false: "N"}[inv.ReverseCharge],
+					"inum":    inv.InvoiceNumber,
+					"idt":     inv.Date.Format("02-01-2006"),
+					"val":     inv.TotalAmount,
+					"pos":     inv.PlaceOfSupply,
+					"rchrg":   map[bool]string{true: "Y", false: "N"}[inv.ReverseCharge],
 					"inv_typ": "R", // Regular
-					"itms":   []gin.H{},
+					"itms":    []gin.H{},
 				}},
 			}
 
@@ -1187,7 +1187,7 @@ func GenerateGSTR1Export(c *gin.Context) {
 			if inv.TotalAmount >= 250000 {
 				// B2C Large
 				b2clRecord := gin.H{
-					"pos":  inv.PlaceOfSupply,
+					"pos": inv.PlaceOfSupply,
 					"inv": []gin.H{{
 						"inum": inv.InvoiceNumber,
 						"idt":  inv.Date.Format("02-01-2006"),
@@ -1251,14 +1251,14 @@ func GenerateGSTR3BExport(c *gin.Context) {
 
 	// Calculate outward supplies (sales)
 	var salesResult struct {
-		Taxable   float64
-		NilRated  float64
-		Exempted  float64
-		NonGST    float64
-		CGST      float64
-		SGST      float64
-		IGST      float64
-		CESS      float64
+		Taxable  float64
+		NilRated float64
+		Exempted float64
+		NonGST   float64
+		CGST     float64
+		SGST     float64
+		IGST     float64
+		CESS     float64
 	}
 
 	utils.DB.Model(&models.Invoice{}).
@@ -1275,10 +1275,10 @@ func GenerateGSTR3BExport(c *gin.Context) {
 
 	// Calculate ITC from purchases
 	var itcResult struct {
-		CGST      float64
-		SGST      float64
-		IGST      float64
-		CESS      float64
+		CGST float64
+		SGST float64
+		IGST float64
+		CESS float64
 	}
 
 	utils.DB.Model(&models.InputTaxCredit{}).
@@ -1297,7 +1297,7 @@ func GenerateGSTR3BExport(c *gin.Context) {
 	_ = cgstPayable + sgstPayable + igstPayable // totalTaxPayable (unused for now)
 
 	gstr3bData := gin.H{
-		"gstin": business.GSTIN,
+		"gstin":  business.GSTIN,
 		"ret_pd": period,
 		"sup_details": gin.H{
 			"osup_det": gin.H{
@@ -1328,17 +1328,17 @@ func GenerateGSTR3BExport(c *gin.Context) {
 		},
 		"inpt_tx": gin.H{
 			"ia": gin.H{
-				"camt": cgstPayable,
-				"samt": sgstPayable,
-				"iamt": igstPayable,
+				"camt":  cgstPayable,
+				"samt":  sgstPayable,
+				"iamt":  igstPayable,
 				"csamt": 0,
 			},
 		},
 		"tx_pd": gin.H{
 			"tx": gin.H{
-				"camt": cgstPayable,
-				"samt": sgstPayable,
-				"iamt": igstPayable,
+				"camt":  cgstPayable,
+				"samt":  sgstPayable,
+				"iamt":  igstPayable,
 				"csamt": 0,
 			},
 		},
@@ -1352,16 +1352,16 @@ func RecordGSTFiling(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		TaxPeriod       string    `json:"tax_period" binding:"required"`
-		ReturnType      string    `json:"return_type" binding:"required"` // GSTR1, GSTR3B
-		Status          string    `json:"status" binding:"required"`
-		ARN             string    `json:"arn"`
-		ReferenceNumber string    `json:"reference_number"`
+		TaxPeriod         string  `json:"tax_period" binding:"required"`
+		ReturnType        string  `json:"return_type" binding:"required"` // GSTR1, GSTR3B
+		Status            string  `json:"status" binding:"required"`
+		ARN               string  `json:"arn"`
+		ReferenceNumber   string  `json:"reference_number"`
 		TotalTaxLiability float64 `json:"total_tax_liability"`
-		TaxPaid         float64   `json:"tax_paid"`
-		Interest        float64   `json:"interest"`
-		Penalty         float64   `json:"penalty"`
-		Notes           string    `json:"notes"`
+		TaxPaid           float64 `json:"tax_paid"`
+		Interest          float64 `json:"interest"`
+		Penalty           float64 `json:"penalty"`
+		Notes             string  `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -1370,19 +1370,19 @@ func RecordGSTFiling(c *gin.Context) {
 	}
 
 	filing := models.GSTFilingStatus{
-		ID:              uuid.New(),
-		UserID:          userID,
-		TaxPeriod:       input.TaxPeriod,
-		ReturnType:      input.ReturnType,
-		Status:          input.Status,
-		ARN:             input.ARN,
-		ReferenceNumber: input.ReferenceNumber,
+		ID:                uuid.New(),
+		UserID:            userID,
+		TaxPeriod:         input.TaxPeriod,
+		ReturnType:        input.ReturnType,
+		Status:            input.Status,
+		ARN:               input.ARN,
+		ReferenceNumber:   input.ReferenceNumber,
 		TotalTaxLiability: input.TotalTaxLiability,
-		TaxPaid:         input.TaxPaid,
-		Interest:        input.Interest,
-		Penalty:         input.Penalty,
-		TotalAmountPaid: input.TaxPaid + input.Interest + input.Penalty,
-		Notes:           input.Notes,
+		TaxPaid:           input.TaxPaid,
+		Interest:          input.Interest,
+		Penalty:           input.Penalty,
+		TotalAmountPaid:   input.TaxPaid + input.Interest + input.Penalty,
+		Notes:             input.Notes,
 	}
 
 	if input.Status == "filed" || input.Status == "late_filed" {
@@ -1400,14 +1400,14 @@ func RecordGSTFiling(c *gin.Context) {
 		utils.DB.Model(&models.TaxPeriod{}).
 			Where("user_id = ? AND period = ?", userID, input.TaxPeriod).
 			Updates(map[string]interface{}{
-				"gstr1_status": input.Status,
+				"gstr1_status":   input.Status,
 				"gstr1_filed_at": filing.FilingDate,
 			})
 	} else if input.ReturnType == "GSTR3B" {
 		utils.DB.Model(&models.TaxPeriod{}).
 			Where("user_id = ? AND period = ?", userID, input.TaxPeriod).
 			Updates(map[string]interface{}{
-				"gstr3b_status": input.Status,
+				"gstr3b_status":   input.Status,
 				"gstr3b_filed_at": filing.FilingDate,
 			})
 	}
@@ -1422,7 +1422,7 @@ func GetGSTFilingStatus(c *gin.Context) {
 
 	var filings []models.GSTFilingStatus
 	query := utils.DB.Where("user_id = ?", userID)
-	
+
 	if taxPeriod != "" {
 		query = query.Where("tax_period = ?", taxPeriod)
 	}
@@ -1493,10 +1493,10 @@ func CalculateTax(c *gin.Context) {
 // ConvertPrice converts price between tax-inclusive and tax-exclusive
 func ConvertPrice(c *gin.Context) {
 	var input struct {
-		Price       float64 `json:"price" binding:"required"`
-		TaxRate     float64 `json:"tax_rate" binding:"required"`
-		FromType    string  `json:"from_type" binding:"required"` // inclusive, exclusive
-		ToType      string  `json:"to_type" binding:"required"`   // inclusive, exclusive
+		Price    float64 `json:"price" binding:"required"`
+		TaxRate  float64 `json:"tax_rate" binding:"required"`
+		FromType string  `json:"from_type" binding:"required"` // inclusive, exclusive
+		ToType   string  `json:"to_type" binding:"required"`   // inclusive, exclusive
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {

@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -64,16 +64,16 @@ func CreateExpense(c *gin.Context) {
 
 	var input struct {
 		Category           string               `json:"category"`
-		Description         string               `json:"description"`
-		OriginalInvoiceNum  string               `json:"original_invoice_num"`
-		Date                time.Time            `json:"date" binding:"required"`
-		Vendor              string               `json:"vendor"`
-		PaymentMode         string               `json:"payment_mode"`
-		BankAccountID       *uuid.UUID           `json:"bank_account_id"`
-		Notes               string               `json:"notes"`
-		WithGST             bool                 `json:"with_gst"`
-		TaxRate             float64              `json:"tax_rate"`
-		Items               []models.ExpenseItem `json:"items"`
+		Description        string               `json:"description"`
+		OriginalInvoiceNum string               `json:"original_invoice_num"`
+		Date               time.Time            `json:"date" binding:"required"`
+		Vendor             string               `json:"vendor"`
+		PaymentMode        string               `json:"payment_mode"`
+		BankAccountID      *uuid.UUID           `json:"bank_account_id"`
+		Notes              string               `json:"notes"`
+		WithGST            bool                 `json:"with_gst"`
+		TaxRate            float64              `json:"tax_rate"`
+		Items              []models.ExpenseItem `json:"items"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {

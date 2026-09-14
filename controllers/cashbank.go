@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -42,13 +42,13 @@ func CreateBankAccount(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		AccountName     string  `json:"account_name" binding:"required"`
-		AccountNumber   string  `json:"account_number" binding:"required"`
-		BankName        string  `json:"bank_name" binding:"required"`
-		IFSCCode        string  `json:"ifsc_code"`
-		AccountType     string  `json:"account_type"`
+		AccountName    string  `json:"account_name" binding:"required"`
+		AccountNumber  string  `json:"account_number" binding:"required"`
+		BankName       string  `json:"bank_name" binding:"required"`
+		IFSCCode       string  `json:"ifsc_code"`
+		AccountType    string  `json:"account_type"`
 		OpeningBalance float64 `json:"opening_balance"`
-		Notes           string  `json:"notes"`
+		Notes          string  `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -57,17 +57,17 @@ func CreateBankAccount(c *gin.Context) {
 	}
 
 	account := models.BankAccount{
-		ID:              uuid.New(),
-		UserID:          userID,
-		AccountName:     input.AccountName,
-		AccountNumber:   input.AccountNumber,
-		BankName:        input.BankName,
-		IFSCCode:        input.IFSCCode,
-		AccountType:     input.AccountType,
+		ID:             uuid.New(),
+		UserID:         userID,
+		AccountName:    input.AccountName,
+		AccountNumber:  input.AccountNumber,
+		BankName:       input.BankName,
+		IFSCCode:       input.IFSCCode,
+		AccountType:    input.AccountType,
 		OpeningBalance: input.OpeningBalance,
-		Balance:         input.OpeningBalance,
-		IsActive:        true,
-		Notes:           input.Notes,
+		Balance:        input.OpeningBalance,
+		IsActive:       true,
+		Notes:          input.Notes,
 	}
 
 	if err := utils.DB.Create(&account).Error; err != nil {
@@ -90,13 +90,13 @@ func UpdateBankAccount(c *gin.Context) {
 	id := c.Param("id")
 
 	var input struct {
-		AccountName     string  `json:"account_name"`
-		AccountNumber   string  `json:"account_number"`
-		BankName        string  `json:"bank_name"`
-		IFSCCode        string  `json:"ifsc_code"`
-		AccountType     string  `json:"account_type"`
-		IsActive        bool    `json:"is_active"`
-		Notes           string  `json:"notes"`
+		AccountName   string `json:"account_name"`
+		AccountNumber string `json:"account_number"`
+		BankName      string `json:"bank_name"`
+		IFSCCode      string `json:"ifsc_code"`
+		AccountType   string `json:"account_type"`
+		IsActive      bool   `json:"is_active"`
+		Notes         string `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {

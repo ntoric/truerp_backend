@@ -1,10 +1,10 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -123,10 +123,10 @@ func UpdateCategory(c *gin.Context) {
 	statusChanged := category.IsActive != input.IsActive
 
 	updates := map[string]interface{}{
-		"name":         input.Name,
-		"description":  input.Description,
-		"parent_id":    input.ParentID,
-		"is_active":    input.IsActive,
+		"name":        input.Name,
+		"description": input.Description,
+		"parent_id":   input.ParentID,
+		"is_active":   input.IsActive,
 	}
 
 	if err := utils.DB.Model(&category).Updates(updates).Error; err != nil {

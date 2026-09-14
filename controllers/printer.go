@@ -19,7 +19,7 @@ import (
 type ThermalPrintRequest struct {
 	DocumentType string    `json:"document_type" binding:"required"` // invoice, expense
 	DocumentID   uuid.UUID `json:"document_id" binding:"required"`
-	PrintSize    string    `json:"print_size" binding:"required"`    // 1inch, 1.5inch, 2inch, 3inch
+	PrintSize    string    `json:"print_size" binding:"required"` // 1inch, 1.5inch, 2inch, 3inch
 }
 
 // normalizeThermalPrintSize accepts receipt widths: 1 / 1.5 / 2 / 3 inch.

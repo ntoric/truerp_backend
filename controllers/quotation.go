@@ -1,14 +1,14 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
 	"strings"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -69,20 +69,20 @@ func CreateQuotation(c *gin.Context) {
 	}
 
 	var input struct {
-		QuotationNumber   string    `json:"quotation_number" binding:"required"`
-		PartyID          uuid.UUID `json:"party_id" binding:"required"`
-		Date             time.Time `json:"date" binding:"required"`
-		ValidUntil       *time.Time `json:"valid_until"`
-		PaymentTerms     int       `json:"payment_terms"`
-		Notes            string    `json:"notes"`
-		Terms            string    `json:"terms"`
-		IsInterState     bool      `json:"is_inter_state"`
-		PlaceOfSupply    string    `json:"place_of_supply"`
-		ReverseCharge    bool      `json:"reverse_charge"`
-		Signature       string    `json:"signature"`
-		QuotationDiscount float64  `json:"quotation_discount"`
-		AdditionalCharges float64 `json:"additional_charges"`
-		Items            []struct {
+		QuotationNumber   string     `json:"quotation_number" binding:"required"`
+		PartyID           uuid.UUID  `json:"party_id" binding:"required"`
+		Date              time.Time  `json:"date" binding:"required"`
+		ValidUntil        *time.Time `json:"valid_until"`
+		PaymentTerms      int        `json:"payment_terms"`
+		Notes             string     `json:"notes"`
+		Terms             string     `json:"terms"`
+		IsInterState      bool       `json:"is_inter_state"`
+		PlaceOfSupply     string     `json:"place_of_supply"`
+		ReverseCharge     bool       `json:"reverse_charge"`
+		Signature         string     `json:"signature"`
+		QuotationDiscount float64    `json:"quotation_discount"`
+		AdditionalCharges float64    `json:"additional_charges"`
+		Items             []struct {
 			Description string  `json:"description"`
 			Quantity    float64 `json:"quantity"`
 			Unit        string  `json:"unit"`
@@ -243,18 +243,18 @@ func UpdateQuotation(c *gin.Context) {
 	}
 
 	var input struct {
-		Date             *time.Time `json:"date"`
-		ValidUntil       *time.Time `json:"valid_until"`
-		PaymentTerms     int        `json:"payment_terms"`
-		Notes            string     `json:"notes"`
-		Terms            string     `json:"terms"`
-		IsInterState     bool       `json:"is_inter_state"`
-		PlaceOfSupply    string     `json:"place_of_supply"`
-		ReverseCharge    bool       `json:"reverse_charge"`
-		Signature       string     `json:"signature"`
-		QuotationDiscount float64   `json:"quotation_discount"`
-		AdditionalCharges float64   `json:"additional_charges"`
-		Items            []struct {
+		Date              *time.Time `json:"date"`
+		ValidUntil        *time.Time `json:"valid_until"`
+		PaymentTerms      int        `json:"payment_terms"`
+		Notes             string     `json:"notes"`
+		Terms             string     `json:"terms"`
+		IsInterState      bool       `json:"is_inter_state"`
+		PlaceOfSupply     string     `json:"place_of_supply"`
+		ReverseCharge     bool       `json:"reverse_charge"`
+		Signature         string     `json:"signature"`
+		QuotationDiscount float64    `json:"quotation_discount"`
+		AdditionalCharges float64    `json:"additional_charges"`
+		Items             []struct {
 			ID          *uuid.UUID `json:"id"`
 			Description string     `json:"description"`
 			Quantity    float64    `json:"quantity"`
@@ -378,7 +378,7 @@ func UpdateQuotation(c *gin.Context) {
 		c.ClientIP(),
 		c.GetHeader("User-Agent"),
 		map[string]interface{}{
-			"version": quotation.Version,
+			"version":       quotation.Version,
 			"change_reason": input.ChangeReason,
 		},
 		"success",
@@ -941,7 +941,7 @@ func GenerateQuotationPDF(c *gin.Context) {
 			return rows
 		}(),
 		quotation.SubTotal,
-		quotation.DiscountTotal + quotation.QuotationDiscount,
+		quotation.DiscountTotal+quotation.QuotationDiscount,
 		quotation.TaxTotal,
 		quotation.AdditionalCharges,
 		quotation.RoundOff,

@@ -38,9 +38,9 @@ func NewS3Storage(bucket, region, baseURL string) (*S3Storage, error) {
 // NewS3StorageWithEndpoint creates a new S3Storage instance with custom endpoint (for S3-compatible services like Cloudflare R2)
 func NewS3StorageWithEndpoint(bucket, accountID, accessKeyID, secretAccessKey, baseURL string) (*S3Storage, error) {
 	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String("auto"),
+		Region:      aws.String("auto"),
 		Credentials: credentials.NewStaticCredentials(accessKeyID, secretAccessKey, ""),
-		Endpoint: aws.String("https://" + accountID + ".r2.cloudflarestorage.com"),
+		Endpoint:    aws.String("https://" + accountID + ".r2.cloudflarestorage.com"),
 	})
 	if err != nil {
 		return nil, err

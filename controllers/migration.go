@@ -214,9 +214,9 @@ func mbEnsureExpenseCategory(tx *gorm.DB, userID uuid.UUID, name string) (string
 		return "", err
 	}
 	cat = models.ExpenseCategory{
-		ID:      uuid.New(),
-		UserID:  userID,
-		Name:    name,
+		ID:       uuid.New(),
+		UserID:   userID,
+		Name:     name,
 		IsActive: true,
 	}
 	if err := tx.Create(&cat).Error; err != nil {
@@ -257,7 +257,7 @@ func ImportPartiesCSV(c *gin.Context) {
 
 	defaultPartyType := strings.TrimSpace(c.PostForm("default_party_type"))
 
-	imported, errs, err := importPartiesRows(userID, file, partyTypeHints, defaultPartyType)
+	imported, errs, err := importPartiesRows(userID, file, partyTypeHints, defaultPartyType, nil)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -265,7 +265,7 @@ func ImportPartiesCSV(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"imported": imported, "errors": errs})
 }
 
-func importPartiesRows(userID uuid.UUID, content []byte, vendorHints map[string]string, defaultPartyType string) (int, []string, error) {
+func importPartiesRows(userID uuid.UUID, content []byte, vendorHints map[string]string, defaultPartyType string, progress services.ProgressFunc) (int, []string, error) {
 	header, rows, err := mbReadCSV(content, "Name")
 	if err != nil {
 		// Fall back to a plain header-first parse for non-myBillBook files.
@@ -302,6 +302,13 @@ func importPartiesRows(userID uuid.UUID, content []byte, vendorHints map[string]
 
 		balance := mbParseAmount(mbFirstCSVValue(row, header, "Bal.", "Balance", "Opening Balance", "OpeningBalance"))
 
+		// A negative balance means the business owes the party money (to
+		// pay), so the party is a vendor regardless of the default/hinted
+		// type. A positive or zero balance keeps the determined type.
+		if balance < 0 {
+			partyType = "vendor"
+		}
+
 		party := models.Party{
 			ID:             uuid.New(),
 			UserID:         userID,
@@ -321,14 +328,23 @@ func importPartiesRows(userID uuid.UUID, content []byte, vendorHints map[string]
 		// Skip duplicates by name.
 		var existing models.Party
 		if err := utils.DB.Where("user_id = ? AND name = ?", userID, name).First(&existing).Error; err == nil {
+			if progress != nil {
+				progress(i+1, len(rows), imported)
+			}
 			continue
 		}
 
 		if err := utils.DB.Create(&party).Error; err != nil {
 			errs = append(errs, fmt.Sprintf("Row %d (%s): %v", rowNum, name, err))
+			if progress != nil {
+				progress(i+1, len(rows), imported)
+			}
 			continue
 		}
 		imported++
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
 	}
 	return imported, errs, nil
 }
@@ -402,7 +418,7 @@ func ImportPurchaseBillsCSV(c *gin.Context) {
 
 	snapshotHTML := c.PostForm("snapshot_html") == "true"
 	defaultVendor := strings.TrimSpace(c.PostForm("default_vendor"))
-	imported, errs, err := importPurchaseBillsRows(userID, content, snapshotHTML, defaultVendor)
+	imported, errs, err := importPurchaseBillsRows(userID, content, snapshotHTML, defaultVendor, nil)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -410,7 +426,7 @@ func ImportPurchaseBillsCSV(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"imported": imported, "errors": errs})
 }
 
-func importPurchaseBillsRows(userID uuid.UUID, content []byte, snapshotHTML bool, defaultVendor string) (int, []string, error) {
+func importPurchaseBillsRows(userID uuid.UUID, content []byte, snapshotHTML bool, defaultVendor string, progress services.ProgressFunc) (int, []string, error) {
 	header, rows, err := mbReadCSV(content, "Purchase No")
 	if err != nil {
 		return 0, nil, err
@@ -423,6 +439,9 @@ func importPurchaseBillsRows(userID uuid.UUID, content []byte, snapshotHTML bool
 	defaultWH := resolveDefaultWarehouseID(userID)
 
 	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
 		rowNum := i + 1
 		if len(row) == 0 {
 			continue
@@ -494,17 +513,17 @@ func importPurchaseBillsRows(userID uuid.UUID, content []byte, snapshotHTML bool
 		}
 
 		bill := models.PurchaseBill{
-			ID:          uuid.New(),
-			UserID:      userID,
-			PartyID:     partyID,
-			BillNumber:  billNumber,
-			BillDate:    billDate,
-			Status:      "unpaid",
-			SubTotal:    total,
-			TotalAmount: total,
-			BalanceDue:  total,
-			Notes:       notes,
-			SourceURL:   sourceURL,
+			ID:            uuid.New(),
+			UserID:        userID,
+			PartyID:       partyID,
+			BillNumber:    billNumber,
+			BillDate:      billDate,
+			Status:        "unpaid",
+			SubTotal:      total,
+			TotalAmount:   total,
+			BalanceDue:    total,
+			Notes:         notes,
+			SourceURL:     sourceURL,
 			SourceHTMLURL: sourceHTMLURL,
 		}
 		if defaultWH != uuid.Nil {
@@ -536,6 +555,237 @@ func importPurchaseBillsRows(userID uuid.UUID, content []byte, snapshotHTML bool
 			errs = append(errs, fmt.Sprintf("Row %d (%s): %v", rowNum, billNumber, err))
 			continue
 		}
+		imported++
+	}
+	return imported, errs, nil
+}
+
+// -----------------------------------------------------------------------------
+// 3. Sales invoices CSV importer  —  POST /api/v1/migration/sales/import/csv
+//
+// Expected header (myBillBook "Sale Summary Report"):
+//   Invoice No, Invoice Date, Contact Name, Amount, Remaining Amount,
+//   Invoice Status, Due Date, Invoice Link, Payment Type, Party Category,
+//   Created by
+//
+// Because the export has no line items, each invoice is created with a single
+// summary line (Description = "Migrated from myBillBook", qty 1, unit price =
+// total). The myBillBook Invoice Link is stored in Notes so the source document
+// can be re-opened later. Remaining Amount drives AmountPaid
+// (= TotalAmount - Remaining Amount).
+// -----------------------------------------------------------------------------
+
+func ImportSalesCSV(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	content, _, err := openUploadedCSV(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	imported, errs, err := importSalesRows(userID, content, nil)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"imported": imported, "errors": errs})
+}
+
+// mapSaleInvoiceStatus normalizes a myBillBook sale status to a TruERP
+// invoice status (draft, sent, paid, partial, overdue, cancelled).
+func mapSaleInvoiceStatus(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return "sent"
+	case "paid", "receive":
+		return "paid"
+	case "partial", "partially paid":
+		return "partial"
+	case "overdue":
+		return "overdue"
+	case "draft":
+		return "draft"
+	case "cancelled", "canceled":
+		return "cancelled"
+	case "unpaid", "sent", "open":
+		return "sent"
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+}
+
+func importSalesRows(userID uuid.UUID, content []byte, progress services.ProgressFunc) (int, []string, error) {
+	header, rows, err := mbReadCSV(content, "Invoice No")
+	if err != nil {
+		// Fall back to a plain header-first parse for non-myBillBook files.
+		header, rows, err = mbReadCSVPlain(content)
+		if err != nil {
+			return 0, nil, err
+		}
+	}
+
+	imported := 0
+	var errs []string
+	seenLinks := map[string]bool{}
+
+	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
+		rowNum := i + 1
+		if len(row) == 0 {
+			continue
+		}
+		invoiceNo := strings.TrimSpace(mbFirstCSVValue(row, header, "Invoice No", "Invoice No.", "Invoice Number", "InvoiceNumber"))
+		if invoiceNo == "" {
+			errs = append(errs, fmt.Sprintf("Row %d: Invoice No is required", rowNum))
+			continue
+		}
+
+		partyName := strings.TrimSpace(mbFirstCSVValue(row, header, "Contact Name", "Party Name", "Customer", "Customer Name"))
+		if partyName == "" {
+			errs = append(errs, fmt.Sprintf("Row %d (%s): Contact Name is required", rowNum, invoiceNo))
+			continue
+		}
+		partyCategory := strings.TrimSpace(mbFirstCSVValue(row, header, "Party Category", "Category"))
+		partyID, perr := mbFindOrCreatePartyByName(utils.DB, userID, partyName, "customer")
+		if perr != nil {
+			errs = append(errs, fmt.Sprintf("Row %d (%s): %v", rowNum, invoiceNo, perr))
+			continue
+		}
+		// Sales imports treat the contact as a customer: if the party was
+		// previously typed as a vendor (e.g. from an earlier purchase import),
+		// reclassify it as a customer so it shows up under receivables.
+		var party models.Party
+		if err := utils.DB.Where("id = ?", partyID).First(&party).Error; err == nil && party.PartyType != "customer" {
+			utils.DB.Model(&party).Update("party_type", "customer")
+		}
+		// Backfill the party category if one was provided and the party
+		// doesn't yet have one.
+		if partyCategory != "" {
+			if party.ID != uuid.Nil && party.Category == "" {
+				utils.DB.Model(&party).Update("category", partyCategory)
+			} else {
+				// Re-fetch in case the party existed but wasn't loaded above.
+				var p models.Party
+				if err := utils.DB.Where("id = ?", partyID).First(&p).Error; err == nil && p.Category == "" {
+					utils.DB.Model(&p).Update("category", partyCategory)
+				}
+			}
+		}
+
+		dateStr := mbFirstCSVValue(row, header, "Invoice Date", "Date")
+		invoiceDate, derr := mbParseDate(dateStr)
+		if derr != nil {
+			errs = append(errs, fmt.Sprintf("Row %d (%s): invalid date %q", rowNum, invoiceNo, dateStr))
+			continue
+		}
+		if invoiceDate.IsZero() {
+			invoiceDate = time.Now()
+		}
+
+		var dueDate *time.Time
+		if dueStr := mbFirstCSVValue(row, header, "Due Date", "DueDate"); dueStr != "" {
+			if d, e := mbParseDate(dueStr); e == nil && !d.IsZero() {
+				dueDate = &d
+			}
+		}
+
+		total := mbParseAmount(mbFirstCSVValue(row, header, "Amount", "Total Amount", "Invoice Amount"))
+		remaining := mbParseAmount(mbFirstCSVValue(row, header, "Remaining Amount", "RemainingAmount", "Balance"))
+		amountPaid := total - remaining
+		if amountPaid < 0 {
+			amountPaid = 0
+		}
+
+		status := mapSaleInvoiceStatus(mbFirstCSVValue(row, header, "Invoice Status", "Status"))
+		if !allowedInvoiceStatuses[status] {
+			status = "sent"
+		}
+
+		paymentMode := mbMapPaymentMode(mbFirstCSVValue(row, header, "Payment Type", "PaymentType", "Payment Mode", "PaymentMode"))
+		invoiceLink := strings.TrimSpace(mbFirstCSVValue(row, header, "Invoice Link", "InvoiceLink", "Invoice link"))
+		createdBy := strings.TrimSpace(mbFirstCSVValue(row, header, "Created by", "CreatedBy", "Created By"))
+
+		// Deduplicate by invoice link (myBillBook exports can contain
+		// duplicate rows sharing the same link).
+		if invoiceLink != "" {
+			if seenLinks[invoiceLink] {
+				continue
+			}
+			seenLinks[invoiceLink] = true
+		}
+
+		// Skip if an invoice with the same number already exists for this user.
+		var existing models.Invoice
+		if err := utils.DB.Where("user_id = ? AND invoice_number = ?", userID, invoiceNo).First(&existing).Error; err == nil {
+			continue
+		}
+
+		// Build notes from the optional Invoice Link and Created by columns.
+		var notesParts []string
+		if invoiceLink != "" {
+			notesParts = append(notesParts, "Invoice link: "+invoiceLink)
+		}
+		if createdBy != "" {
+			notesParts = append(notesParts, "Created by: "+createdBy)
+		}
+		notes := strings.Join(notesParts, " | ")
+
+		invoice := models.Invoice{
+			ID:            uuid.New(),
+			UserID:        userID,
+			InvoiceNumber: invoiceNo,
+			InvoiceType:   "tax_invoice",
+			PartyID:       partyID,
+			Date:          invoiceDate,
+			DueDate:       dueDate,
+			Status:        status,
+			PaymentMode:   paymentMode,
+			AmountPaid:    amountPaid,
+			SubTotal:      total,
+			TotalAmount:   total,
+			Notes:         notes,
+		}
+
+		// Single summary line — line items are not present in the export.
+		invoice.Items = []models.InvoiceItem{
+			{
+				ID:          uuid.New(),
+				Description: "Migrated from myBillBook (summary)",
+				Quantity:    1,
+				Unit:        "PCS",
+				UnitPrice:   total,
+				Total:       total,
+			},
+		}
+
+		// Reconcile the status against the paid/total amounts.
+		normalizeInvoicePaymentStatus(&invoice)
+
+		tx := utils.DB.Begin()
+		if err := tx.Create(&invoice).Error; err != nil {
+			tx.Rollback()
+			errs = append(errs, fmt.Sprintf("Row %d (%s): %v", rowNum, invoiceNo, err))
+			continue
+		}
+		if err := tx.Commit().Error; err != nil {
+			errs = append(errs, fmt.Sprintf("Row %d (%s): %v", rowNum, invoiceNo, err))
+			continue
+		}
+
+		// Post accounting entries and a linked payment-in for the paid portion.
+		if err := postInvoiceAccounting(utils.DB, userID, &invoice); err != nil {
+			log.Printf("migration: sale invoice accounting error for %s: %v", invoiceNo, err)
+		}
+		if invoice.AmountPaid > 0 {
+			payNotes := fmt.Sprintf("Auto-created from sale import %s", invoiceNo)
+			if err := createLinkedSalePaymentIn(utils.DB, userID, &invoice, invoice.AmountPaid, invoice.Date, payNotes); err != nil {
+				log.Printf("migration: sale payment-in error for %s: %v", invoiceNo, err)
+			}
+		}
+
 		imported++
 	}
 	return imported, errs, nil
@@ -605,7 +855,7 @@ func ImportPaymentsCSV(c *gin.Context) {
 		return
 	}
 
-	res, err := importPaymentsRows(userID, content)
+	res, err := importPaymentsRows(userID, content, nil)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -613,7 +863,7 @@ func ImportPaymentsCSV(c *gin.Context) {
 	c.JSON(http.StatusOK, res)
 }
 
-func importPaymentsRows(userID uuid.UUID, content []byte) (gin.H, error) {
+func importPaymentsRows(userID uuid.UUID, content []byte, progress services.ProgressFunc) (gin.H, error) {
 	header, rows, err := mbReadCSV(content, "Date")
 	if err != nil {
 		return nil, err
@@ -623,6 +873,9 @@ func importPaymentsRows(userID uuid.UUID, content []byte) (gin.H, error) {
 	var errs []string
 
 	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), payIn+payOut)
+		}
 		rowNum := i + 1
 		if len(row) == 0 {
 			continue
@@ -868,9 +1121,9 @@ func markPurchaseBillPaid(db *gorm.DB, userID, billID uuid.UUID, amount float64)
 		status = "partial"
 	}
 	db.Model(&bill).Updates(map[string]interface{}{
-		"paid_amount":  newPaid,
-		"balance_due":  bill.TotalAmount - newPaid,
-		"status":       status,
+		"paid_amount": newPaid,
+		"balance_due": bill.TotalAmount - newPaid,
+		"status":      status,
 	})
 }
 
@@ -898,7 +1151,7 @@ func ImportExpensesCSV(c *gin.Context) {
 		return
 	}
 
-	imported, errs, err := importExpensesRows(userID, content)
+	imported, errs, err := importExpensesRows(userID, content, nil)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -906,7 +1159,7 @@ func ImportExpensesCSV(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"imported": imported, "errors": errs})
 }
 
-func importExpensesRows(userID uuid.UUID, content []byte) (int, []string, error) {
+func importExpensesRows(userID uuid.UUID, content []byte, progress services.ProgressFunc) (int, []string, error) {
 	header, rows, err := mbReadCSV(content, "Date")
 	if err != nil {
 		return 0, nil, err
@@ -918,6 +1171,9 @@ func importExpensesRows(userID uuid.UUID, content []byte) (int, []string, error)
 	utils.DB.Model(&models.Expense{}).Where("user_id = ?", userID).Count(&count)
 
 	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
 		rowNum := i + 1
 		if len(row) == 0 {
 			continue
@@ -1038,10 +1294,25 @@ func MigrateMyBillBookZIP(c *gin.Context) {
 		return
 	}
 
+	options := map[string]string{
+		"snapshot_html": c.PostForm("snapshot_html"),
+	}
+	result, _, perr := importMyBillBookZIPRows(userID, body, options, nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// importMyBillBookZIPRows runs the phased myBillBook import from an in-memory
+// ZIP body. It reports per-row progress across all CSV files combined so the
+// job progress bar advances smoothly. Returns the steps summary (JSON-ready
+// map), the per-row errors, and a fatal error.
+func importMyBillBookZIPRows(userID uuid.UUID, body []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 	zipReader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "uploaded file is not a valid ZIP"})
-		return
+		return nil, nil, fmt.Errorf("uploaded file is not a valid ZIP")
 	}
 
 	// Collect CSVs by role.
@@ -1066,7 +1337,42 @@ func MigrateMyBillBookZIP(c *gin.Context) {
 		files[strings.ToLower(filepath.Base(name))] = content
 	}
 
-	snapshotHTML := c.PostForm("snapshot_html") == "true"
+	snapshotHTML := options["snapshot_html"] == "true"
+
+	// Pre-count rows across the files we will actually import so we can
+	// report combined per-row progress.
+	rowCount := func(content []byte, headerKey string) int {
+		_, rows, err := mbReadCSV(content, headerKey)
+		if err != nil {
+			return 0
+		}
+		return len(rows)
+	}
+	totalRows := 0
+	if c, ok := findFile(files, "all_party_balance"); ok {
+		totalRows += rowCount(c, "Name")
+	}
+	if c, ok := findFile(files, "purchase_summary"); ok {
+		totalRows += rowCount(c, "Purchase No")
+	}
+	if c, ok := findFile(files, "cash_and_bank_statement"); ok {
+		totalRows += rowCount(c, "Date")
+	}
+	if c, ok := findFile(files, "expense_transactions"); ok {
+		totalRows += rowCount(c, "Date")
+	}
+
+	// offset tracks how many rows have been completed across previous files.
+	offset := 0
+	makeProgress := func() services.ProgressFunc {
+		if progress == nil {
+			return nil
+		}
+		base := offset
+		return func(current, total, imported int) {
+			progress(base+current, totalRows, imported)
+		}
+	}
 
 	result := gin.H{"steps": []gin.H{}}
 	addStep := func(name string, count int, errs []string) {
@@ -1091,38 +1397,45 @@ func MigrateMyBillBookZIP(c *gin.Context) {
 	}
 
 	if content, ok := findFile(files, "all_party_balance"); ok {
-		n, errs, _ := importPartiesRows(userID, content, vendorHints, "")
+		n, errs, _ := importPartiesRows(userID, content, vendorHints, "", makeProgress())
 		addStep("parties", n, errs)
+		offset += rowCount(content, "Name")
 	} else {
 		addStep("parties", 0, []string{"all_party_balance_*.csv not found in ZIP"})
 	}
 
 	// 2. Purchase bills (with optional HTML snapshot of source links).
 	if content, ok := findFile(files, "purchase_summary"); ok {
-		n, errs, _ := importPurchaseBillsRows(userID, content, snapshotHTML, "")
+		n, errs, _ := importPurchaseBillsRows(userID, content, snapshotHTML, "", makeProgress())
 		addStep("purchase_bills", n, errs)
+		offset += rowCount(content, "Purchase No")
 	} else {
 		addStep("purchase_bills", 0, []string{"purchase_summary_report_*.csv not found in ZIP"})
 	}
 
 	// 3. Payments (payment-in / payment-out).
 	if content, ok := findFile(files, "cash_and_bank_statement"); ok {
-		res, _ := importPaymentsRows(userID, content)
+		res, _ := importPaymentsRows(userID, content, makeProgress())
 		errs, _ := res["errors"].([]string)
 		addStep("payments", int(res["imported"].(float64)), errs)
+		offset += rowCount(content, "Date")
 	} else {
 		addStep("payments", 0, []string{"cash_and_bank_statement_*.csv not found in ZIP"})
 	}
 
 	// 4. Expenses.
 	if content, ok := findFile(files, "expense_transactions"); ok {
-		n, errs, _ := importExpensesRows(userID, content)
+		n, errs, _ := importExpensesRows(userID, content, makeProgress())
 		addStep("expenses", n, errs)
+		offset += rowCount(content, "Date")
 	} else {
 		addStep("expenses", 0, []string{"expense_transactions_*.csv not found in ZIP"})
 	}
 
-	c.JSON(http.StatusOK, result)
+	if progress != nil {
+		progress(totalRows, totalRows, 0)
+	}
+	return result, nil, nil
 }
 
 // findFile returns the first CSV content whose filename contains the given

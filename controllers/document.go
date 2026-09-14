@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"strings"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -210,7 +210,7 @@ func BulkExportPDFs(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		DocumentType string     `json:"document_type" binding:"required,oneof=invoice quotation"` // invoice, quotation
+		DocumentType string      `json:"document_type" binding:"required,oneof=invoice quotation"` // invoice, quotation
 		IDs          []uuid.UUID `json:"ids" binding:"required,min=1"`
 	}
 

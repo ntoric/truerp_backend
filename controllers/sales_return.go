@@ -1,12 +1,12 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -170,10 +170,10 @@ func UpdateSalesReturn(c *gin.Context) {
 	}
 
 	var input struct {
-		Date       time.Time  `json:"date"`
-		Reason     string     `json:"reason"`
-		RefundMode string     `json:"refund_mode"`
-		Notes      string     `json:"notes"`
+		Date       time.Time `json:"date"`
+		Reason     string    `json:"reason"`
+		RefundMode string    `json:"refund_mode"`
+		Notes      string    `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {

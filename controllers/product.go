@@ -1,15 +1,17 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"encoding/csv"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+	"truerp/models"
+	"truerp/services"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -874,24 +876,42 @@ func ImportProductsCSV(c *gin.Context) {
 		return
 	}
 	defer src.Close()
+	content, err := io.ReadAll(src)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read file"})
+		return
+	}
 
-	reader := csv.NewReader(src)
+	result, errs, perr := importProductsRows(userID, content, nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"imported": result["imported"], "errors": errs})
+}
+
+func importProductsRows(userID uuid.UUID, content []byte, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
+	reader := csv.NewReader(strings.NewReader(string(content)))
+	reader.FieldsPerRecord = -1
+	reader.LazyQuotes = true
 	records, err := reader.ReadAll()
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read CSV"})
-		return
+		return nil, nil, fmt.Errorf("failed to read CSV: %w", err)
 	}
 
 	if len(records) < 2 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "CSV file is empty or has no data"})
-		return
+		return nil, nil, fmt.Errorf("CSV file is empty or has no data")
 	}
 
 	headers := records[0]
+	dataRows := records[1:]
 	var importedCount int
 	var errors []string
 
-	for i, record := range records[1:] {
+	for i, record := range dataRows {
+		if progress != nil {
+			progress(i+1, len(dataRows), importedCount)
+		}
 		if len(record) != len(headers) {
 			errors = append(errors, fmt.Sprintf("Row %d: Column count mismatch", i+2))
 			continue
@@ -948,10 +968,7 @@ func ImportProductsCSV(c *gin.Context) {
 		importedCount++
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"imported": importedCount,
-		"errors":   errors,
-	})
+	return map[string]interface{}{"imported": importedCount}, errors, nil
 }
 
 func ImportProductsExcel(c *gin.Context) {

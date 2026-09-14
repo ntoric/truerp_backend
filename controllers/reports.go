@@ -111,21 +111,21 @@ func GetReportWidgets(c *gin.Context) {
 	w.MonthNetProfit = income - expense
 
 	c.JSON(http.StatusOK, gin.H{
-		"period":       period,
-		"period_start": periodStart.Format("2006-01-02"),
-		"total_sales":           w.TotalSales,
-		"month_revenue":         w.MonthRevenue,
-		"outstanding_amount":    w.OutstandingAmount,
-		"outstanding_count":     w.OutstandingCount,
-		"inventory_value":       w.InventoryValue,
-		"low_stock_count":       w.LowStockCount,
-		"month_tax":             w.MonthTax,
-		"payments_in_month":     w.PaymentsInMonth,
-		"payments_out_month":    w.PaymentsOutMonth,
+		"period":                 period,
+		"period_start":           periodStart.Format("2006-01-02"),
+		"total_sales":            w.TotalSales,
+		"month_revenue":          w.MonthRevenue,
+		"outstanding_amount":     w.OutstandingAmount,
+		"outstanding_count":      w.OutstandingCount,
+		"inventory_value":        w.InventoryValue,
+		"low_stock_count":        w.LowStockCount,
+		"month_tax":              w.MonthTax,
+		"payments_in_month":      w.PaymentsInMonth,
+		"payments_out_month":     w.PaymentsOutMonth,
 		"purchase_expense_month": w.PurchaseExpenseMonth,
-		"accounts_payable":      w.AccountsPayable,
+		"accounts_payable":       w.AccountsPayable,
 		"accounts_payable_count": w.AccountsPayableCount,
-		"month_net_profit":      w.MonthNetProfit,
+		"month_net_profit":       w.MonthNetProfit,
 	})
 }
 

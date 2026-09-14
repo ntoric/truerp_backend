@@ -189,10 +189,10 @@ func GetTopParties(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	type TopParty struct {
-		PartyID     uuid.UUID `json:"party_id"`
-		Name        string    `json:"name"`
-		TotalSales  float64   `json:"total_sales"`
-		InvoiceCount int64   `json:"invoice_count"`
+		PartyID      uuid.UUID `json:"party_id"`
+		Name         string    `json:"name"`
+		TotalSales   float64   `json:"total_sales"`
+		InvoiceCount int64     `json:"invoice_count"`
 	}
 
 	var results []TopParty

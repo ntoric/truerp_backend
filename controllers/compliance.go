@@ -1,13 +1,13 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -122,8 +122,8 @@ func CreateRole(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		Name        string     `json:"name" binding:"required"`
-		Description string     `json:"description"`
+		Name        string      `json:"name" binding:"required"`
+		Description string      `json:"description"`
 		Permissions []uuid.UUID `json:"permissions"`
 	}
 
@@ -163,9 +163,9 @@ func UpdateRole(c *gin.Context) {
 	id := c.Param("id")
 
 	var input struct {
-		Name        string     `json:"name"`
-		Description string     `json:"description"`
-		IsActive    bool       `json:"is_active"`
+		Name        string      `json:"name"`
+		Description string      `json:"description"`
+		IsActive    bool        `json:"is_active"`
 		Permissions []uuid.UUID `json:"permissions"`
 	}
 
@@ -376,7 +376,7 @@ func RestoreBackup(c *gin.Context) {
 	// This is a placeholder for the actual restore logic
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Backup restore initiated",
+		"message":   "Backup restore initiated",
 		"backup_id": backup.ID,
 	})
 }
@@ -452,9 +452,9 @@ func ProcessGDPRRequest(c *gin.Context) {
 		filePath := fmt.Sprintf("%s/%s", exportDir, fileName)
 
 		exportData := map[string]interface{}{
-			"user_id":    userID,
+			"user_id":     userID,
 			"exported_at": time.Now(),
-			"data":       "User data would be exported here",
+			"data":        "User data would be exported here",
 		}
 
 		jsonData, _ := json.MarshalIndent(exportData, "", "  ")

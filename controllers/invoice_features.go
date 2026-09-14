@@ -1,15 +1,15 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/services"
-	"truerp/utils"
 	"encoding/json"
 	"fmt"
 	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
+	"truerp/models"
+	"truerp/services"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -398,8 +398,8 @@ func UpdateInvoiceStatus(c *gin.Context) {
 	}
 
 	var input struct {
-		Status string  `json:"status" binding:"required"`
-		Note   string  `json:"note"`
+		Status     string   `json:"status" binding:"required"`
+		Note       string   `json:"note"`
 		AmountPaid *float64 `json:"amount_paid"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {

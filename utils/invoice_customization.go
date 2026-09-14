@@ -1,8 +1,8 @@
 package utils
 
 import (
-	"truerp/models"
 	"encoding/json"
+	"truerp/models"
 )
 
 func DefaultInvoiceTemplateCustomization() models.InvoiceTemplateCustomization {

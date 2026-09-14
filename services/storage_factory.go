@@ -9,8 +9,8 @@ import (
 type StorageType string
 
 const (
-	StorageTypeLocal   StorageType = "local"
-	StorageTypeS3      StorageType = "s3"
+	StorageTypeLocal        StorageType = "local"
+	StorageTypeS3           StorageType = "s3"
 	StorageTypeCloudflareR2 StorageType = "cloudflare_r2"
 )
 
@@ -23,11 +23,11 @@ type StorageConfig struct {
 	S3Region     string
 	S3BaseURL    string
 	// Cloudflare R2 configuration (S3-compatible)
-	R2AccountID      string
-	R2AccessKeyID    string
+	R2AccountID       string
+	R2AccessKeyID     string
 	R2SecretAccessKey string
-	R2Bucket         string
-	R2BaseURL        string
+	R2Bucket          string
+	R2BaseURL         string
 }
 
 // GetStorageConfig returns storage configuration from environment variables
@@ -38,17 +38,17 @@ func GetStorageConfig() StorageConfig {
 	}
 
 	return StorageConfig{
-		Type:             storageType,
-		LocalPath:        os.Getenv("LOCAL_STORAGE_PATH"),
-		LocalBaseURL:     os.Getenv("LOCAL_STORAGE_BASE_URL"),
-		S3Bucket:         os.Getenv("S3_BUCKET"),
-		S3Region:         os.Getenv("S3_REGION"),
-		S3BaseURL:        os.Getenv("S3_BASE_URL"),
-		R2AccountID:      os.Getenv("R2_ACCOUNT_ID"),
-		R2AccessKeyID:    os.Getenv("R2_ACCESS_KEY_ID"),
+		Type:              storageType,
+		LocalPath:         os.Getenv("LOCAL_STORAGE_PATH"),
+		LocalBaseURL:      os.Getenv("LOCAL_STORAGE_BASE_URL"),
+		S3Bucket:          os.Getenv("S3_BUCKET"),
+		S3Region:          os.Getenv("S3_REGION"),
+		S3BaseURL:         os.Getenv("S3_BASE_URL"),
+		R2AccountID:       os.Getenv("R2_ACCOUNT_ID"),
+		R2AccessKeyID:     os.Getenv("R2_ACCESS_KEY_ID"),
 		R2SecretAccessKey: os.Getenv("R2_SECRET_ACCESS_KEY"),
-		R2Bucket:         os.Getenv("R2_BUCKET"),
-		R2BaseURL:        os.Getenv("R2_BASE_URL"),
+		R2Bucket:          os.Getenv("R2_BUCKET"),
+		R2BaseURL:         os.Getenv("R2_BASE_URL"),
 	}
 }
 

@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -66,14 +66,14 @@ func CreateStaffAdvancePayment(c *gin.Context) {
 	}
 
 	var input struct {
-		StaffID               uuid.UUID  `json:"staff_id" binding:"required"`
-		Amount                float64    `json:"amount" binding:"required"`
-		Reason                string     `json:"reason"`
-		AdvanceDate           time.Time  `json:"advance_date" binding:"required"`
-		ExpectedRecoveryDate  *time.Time `json:"expected_recovery_date"`
-		PaymentMode           string     `json:"payment_mode"`
-		Reference             string     `json:"reference"`
-		Notes                 string     `json:"notes"`
+		StaffID              uuid.UUID  `json:"staff_id" binding:"required"`
+		Amount               float64    `json:"amount" binding:"required"`
+		Reason               string     `json:"reason"`
+		AdvanceDate          time.Time  `json:"advance_date" binding:"required"`
+		ExpectedRecoveryDate *time.Time `json:"expected_recovery_date"`
+		PaymentMode          string     `json:"payment_mode"`
+		Reference            string     `json:"reference"`
+		Notes                string     `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -148,17 +148,17 @@ func UpdateStaffAdvancePayment(c *gin.Context) {
 	id := c.Param("id")
 
 	var input struct {
-		Amount                float64    `json:"amount"`
-		Reason                string     `json:"reason"`
-		AdvanceDate           time.Time  `json:"advance_date"`
-		ExpectedRecoveryDate  *time.Time `json:"expected_recovery_date"`
-		IsRecovered           bool       `json:"is_recovered"`
-		RecoveredAmount       float64    `json:"recovered_amount"`
-		PendingAmount         float64    `json:"pending_amount"`
-		PaymentMode           string     `json:"payment_mode"`
-		Reference             string     `json:"reference"`
-		Status                string     `json:"status"`
-		Notes                 string     `json:"notes"`
+		Amount               float64    `json:"amount"`
+		Reason               string     `json:"reason"`
+		AdvanceDate          time.Time  `json:"advance_date"`
+		ExpectedRecoveryDate *time.Time `json:"expected_recovery_date"`
+		IsRecovered          bool       `json:"is_recovered"`
+		RecoveredAmount      float64    `json:"recovered_amount"`
+		PendingAmount        float64    `json:"pending_amount"`
+		PaymentMode          string     `json:"payment_mode"`
+		Reference            string     `json:"reference"`
+		Status               string     `json:"status"`
+		Notes                string     `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -173,17 +173,17 @@ func UpdateStaffAdvancePayment(c *gin.Context) {
 	}
 
 	updates := map[string]interface{}{
-		"amount":                input.Amount,
-		"reason":                input.Reason,
-		"advance_date":          input.AdvanceDate,
+		"amount":                 input.Amount,
+		"reason":                 input.Reason,
+		"advance_date":           input.AdvanceDate,
 		"expected_recovery_date": input.ExpectedRecoveryDate,
-		"is_recovered":          input.IsRecovered,
-		"recovered_amount":      input.RecoveredAmount,
-		"pending_amount":        input.PendingAmount,
-		"payment_mode":          input.PaymentMode,
-		"reference":             input.Reference,
-		"status":                input.Status,
-		"notes":                 input.Notes,
+		"is_recovered":           input.IsRecovered,
+		"recovered_amount":       input.RecoveredAmount,
+		"pending_amount":         input.PendingAmount,
+		"payment_mode":           input.PaymentMode,
+		"reference":              input.Reference,
+		"status":                 input.Status,
+		"notes":                  input.Notes,
 	}
 
 	// Auto-update status based on recovery
@@ -213,8 +213,8 @@ func UpdateStaffAdvancePayment(c *gin.Context) {
 		c.ClientIP(),
 		c.GetHeader("User-Agent"),
 		map[string]interface{}{
-			"amount":   input.Amount,
-			"status":   input.Status,
+			"amount":           input.Amount,
+			"status":           input.Status,
 			"recovered_amount": input.RecoveredAmount,
 		},
 		"success",
@@ -311,8 +311,8 @@ func RecoverStaffAdvance(c *gin.Context) {
 
 	updates := map[string]interface{}{
 		"recovered_amount": newRecoveredAmount,
-		"pending_amount":  newPendingAmount,
-		"status":          newStatus,
+		"pending_amount":   newPendingAmount,
+		"status":           newStatus,
 	}
 
 	if newPendingAmount == 0 {
@@ -336,7 +336,7 @@ func RecoverStaffAdvance(c *gin.Context) {
 		c.ClientIP(),
 		c.GetHeader("User-Agent"),
 		map[string]interface{}{
-			"recovery_amount": input.RecoveryAmount,
+			"recovery_amount":   input.RecoveryAmount,
 			"remaining_pending": newPendingAmount,
 		},
 		"success",
@@ -344,10 +344,10 @@ func RecoverStaffAdvance(c *gin.Context) {
 	)
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Advance payment recovered successfully",
+		"message":          "Advance payment recovered successfully",
 		"recovered_amount": newRecoveredAmount,
-		"pending_amount": newPendingAmount,
-		"status": newStatus,
+		"pending_amount":   newPendingAmount,
+		"status":           newStatus,
 	})
 }
 
@@ -356,12 +356,12 @@ func GetStaffAdvanceStats(c *gin.Context) {
 	staffID := c.Query("staff_id")
 
 	var stats struct {
-		TotalAdvances    float64 `json:"total_advances"`
-		TotalRecovered   float64 `json:"total_recovered"`
-		TotalPending     float64 `json:"total_pending"`
-		PendingAdvances  int64   `json:"pending_advances"`
-		RecoveredAdvances int64  `json:"recovered_advances"`
-		ThisMonth        float64 `json:"this_month"`
+		TotalAdvances     float64 `json:"total_advances"`
+		TotalRecovered    float64 `json:"total_recovered"`
+		TotalPending      float64 `json:"total_pending"`
+		PendingAdvances   int64   `json:"pending_advances"`
+		RecoveredAdvances int64   `json:"recovered_advances"`
+		ThisMonth         float64 `json:"this_month"`
 	}
 
 	query := utils.DB.Model(&models.StaffAdvancePayment{}).Where("user_id = ?", userID)
@@ -371,11 +371,11 @@ func GetStaffAdvanceStats(c *gin.Context) {
 
 	// Total advances
 	query.Select("COALESCE(SUM(amount), 0)").Scan(&stats.TotalAdvances)
-	
+
 	// Total recovered and pending
 	query.Select("COALESCE(SUM(recovered_amount), 0)").Scan(&stats.TotalRecovered)
 	query.Select("COALESCE(SUM(pending_amount), 0)").Scan(&stats.TotalPending)
-	
+
 	// Pending and recovered counts
 	query.Where("status = ?", "pending").Or("status = ?", "partial").Count(&stats.PendingAdvances)
 	query.Where("status = ?", "recovered").Count(&stats.RecoveredAdvances)

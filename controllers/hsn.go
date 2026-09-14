@@ -81,10 +81,10 @@ func (e *HSNEmbedder) loadModel() error {
 	for _, name := range modelNames {
 		fmt.Printf("[HSN] Loading model %s ...\n", name)
 		m, err := tasks.Load[textencoding.Interface](&tasks.Config{
-			ModelsDir:         modelsDir,
-			ModelName:         name,
-			DownloadPolicy:    tasks.DownloadMissing,
-			ConversionPolicy:  tasks.ConvertMissing,
+			ModelsDir:           modelsDir,
+			ModelName:           name,
+			DownloadPolicy:      tasks.DownloadMissing,
+			ConversionPolicy:    tasks.ConvertMissing,
 			ConversionPrecision: tasks.F32,
 		})
 		if err == nil {
@@ -269,8 +269,8 @@ func (e *HSNEmbedder) Search(query string, topK int) []HSNResult {
 	}
 
 	type scored struct {
-		idx  int
-		sim  float64
+		idx int
+		sim float64
 	}
 	scores := make([]scored, 0, len(e.entries))
 

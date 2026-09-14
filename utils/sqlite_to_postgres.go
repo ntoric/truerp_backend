@@ -15,7 +15,7 @@ import (
 
 // SQLiteToPostgresOptions configures a one-time SQLite → PostgreSQL data copy.
 type SQLiteToPostgresOptions struct {
-	SQLitePath string
+	SQLitePath  string
 	PostgresURL string
 	BatchSize   int
 	Truncate    bool
@@ -24,26 +24,26 @@ type SQLiteToPostgresOptions struct {
 
 // TableCount holds row counts for validation.
 type TableCount struct {
-	Table      string
-	SQLiteRows int64
+	Table        string
+	SQLiteRows   int64
 	PostgresRows int64
 }
 
 // FinancialTotals holds aggregate checks for post-migration validation.
 type FinancialTotals struct {
-	InvoiceTotal   sql.NullFloat64
-	PaymentTotal   sql.NullFloat64
-	ExpenseTotal   sql.NullFloat64
-	PartyCount     sql.NullInt64
-	UserCount      sql.NullInt64
+	InvoiceTotal sql.NullFloat64
+	PaymentTotal sql.NullFloat64
+	ExpenseTotal sql.NullFloat64
+	PartyCount   sql.NullInt64
+	UserCount    sql.NullInt64
 }
 
 // CopyReport summarizes a migration run.
 type CopyReport struct {
-	Tables      []TableCount
-	Skipped     []string
-	Errors      []string
-	RowsCopied  int64
+	Tables     []TableCount
+	Skipped    []string
+	Errors     []string
+	RowsCopied int64
 }
 
 // Preferred table copy order (FK-safe when replication role is not available).

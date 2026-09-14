@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"encoding/json"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -241,20 +241,20 @@ func CreateAuditLog(userID uuid.UUID, userName, action, entityType string, entit
 	}
 
 	auditLog := models.AuditLog{
-		ID:          uuid.New(),
-		UserID:      userID,
-		UserName:    userName,
-		Action:      action,
-		EntityType:  entityType,
-		EntityID:    entityID,
-		EntityName:  entityName,
-		Description: description,
-		IPAddress:   ipAddress,
-		UserAgent:   userAgent,
-		Changes:     changesJSON,
-		Status:      status,
+		ID:           uuid.New(),
+		UserID:       userID,
+		UserName:     userName,
+		Action:       action,
+		EntityType:   entityType,
+		EntityID:     entityID,
+		EntityName:   entityName,
+		Description:  description,
+		IPAddress:    ipAddress,
+		UserAgent:    userAgent,
+		Changes:      changesJSON,
+		Status:       status,
 		ErrorMessage: errorMessage,
-		CreatedAt:   time.Now(),
+		CreatedAt:    time.Now(),
 	}
 
 	return utils.DB.Create(&auditLog).Error
@@ -364,12 +364,12 @@ func ArchiveAuditLogs(c *gin.Context) {
 
 	// For now, we'll just return the count
 	c.JSON(http.StatusOK, gin.H{
-		"message":      "Audit logs archived successfully",
-		"count":        len(auditLogs),
-		"from_date":    input.FromDate,
-		"to_date":      input.ToDate,
-		"archive_id":   uuid.New().String(),
-		"note":         "In production, this would export to file/cloud storage",
+		"message":    "Audit logs archived successfully",
+		"count":      len(auditLogs),
+		"from_date":  input.FromDate,
+		"to_date":    input.ToDate,
+		"archive_id": uuid.New().String(),
+		"note":       "In production, this would export to file/cloud storage",
 	})
 }
 

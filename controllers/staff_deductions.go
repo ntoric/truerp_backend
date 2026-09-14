@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"fmt"
 	"net/http"
 	"time"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -70,15 +70,15 @@ func CreateStaffDeduction(c *gin.Context) {
 	}
 
 	var input struct {
-		StaffID            uuid.UUID  `json:"staff_id" binding:"required"`
-		DeductionType      string     `json:"deduction_type" binding:"required"`
-		Amount             float64    `json:"amount" binding:"required"`
-		Description        string     `json:"description"`
-		DeductionDate      time.Time  `json:"deduction_date" binding:"required"`
-		IsRecurring        bool       `json:"is_recurring"`
-		RecurringPeriod    string     `json:"recurring_period"`
-		TotalInstallments  int        `json:"total_installments"`
-		Notes              string     `json:"notes"`
+		StaffID           uuid.UUID `json:"staff_id" binding:"required"`
+		DeductionType     string    `json:"deduction_type" binding:"required"`
+		Amount            float64   `json:"amount" binding:"required"`
+		Description       string    `json:"description"`
+		DeductionDate     time.Time `json:"deduction_date" binding:"required"`
+		IsRecurring       bool      `json:"is_recurring"`
+		RecurringPeriod   string    `json:"recurring_period"`
+		TotalInstallments int       `json:"total_installments"`
+		Notes             string    `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -152,16 +152,16 @@ func UpdateStaffDeduction(c *gin.Context) {
 	id := c.Param("id")
 
 	var input struct {
-		DeductionType      string     `json:"deduction_type"`
-		Amount             float64    `json:"amount"`
-		Description        string     `json:"description"`
-		DeductionDate      time.Time  `json:"deduction_date"`
-		IsRecurring        bool       `json:"is_recurring"`
-		RecurringPeriod    string     `json:"recurring_period"`
-		TotalInstallments  int        `json:"total_installments"`
-		InstallmentsPaid   int        `json:"installments_paid"`
-		Status             string     `json:"status"`
-		Notes              string     `json:"notes"`
+		DeductionType     string    `json:"deduction_type"`
+		Amount            float64   `json:"amount"`
+		Description       string    `json:"description"`
+		DeductionDate     time.Time `json:"deduction_date"`
+		IsRecurring       bool      `json:"is_recurring"`
+		RecurringPeriod   string    `json:"recurring_period"`
+		TotalInstallments int       `json:"total_installments"`
+		InstallmentsPaid  int       `json:"installments_paid"`
+		Status            string    `json:"status"`
+		Notes             string    `json:"notes"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -176,16 +176,16 @@ func UpdateStaffDeduction(c *gin.Context) {
 	}
 
 	updates := map[string]interface{}{
-		"deduction_type":      input.DeductionType,
-		"amount":              input.Amount,
-		"description":         input.Description,
-		"deduction_date":      input.DeductionDate,
-		"is_recurring":        input.IsRecurring,
-		"recurring_period":    input.RecurringPeriod,
-		"total_installments":  input.TotalInstallments,
-		"installments_paid":   input.InstallmentsPaid,
-		"status":              input.Status,
-		"notes":               input.Notes,
+		"deduction_type":     input.DeductionType,
+		"amount":             input.Amount,
+		"description":        input.Description,
+		"deduction_date":     input.DeductionDate,
+		"is_recurring":       input.IsRecurring,
+		"recurring_period":   input.RecurringPeriod,
+		"total_installments": input.TotalInstallments,
+		"installments_paid":  input.InstallmentsPaid,
+		"status":             input.Status,
+		"notes":              input.Notes,
 	}
 
 	// Auto-update status if all installments paid
@@ -267,10 +267,10 @@ func GetStaffDeductionStats(c *gin.Context) {
 	staffID := c.Query("staff_id")
 
 	var stats struct {
-		TotalDeductions float64 `json:"total_deductions"`
-		ActiveDeductions int64  `json:"active_deductions"`
-		CompletedDeductions int64 `json:"completed_deductions"`
-		ThisMonth       float64 `json:"this_month"`
+		TotalDeductions     float64 `json:"total_deductions"`
+		ActiveDeductions    int64   `json:"active_deductions"`
+		CompletedDeductions int64   `json:"completed_deductions"`
+		ThisMonth           float64 `json:"this_month"`
 	}
 
 	query := utils.DB.Model(&models.StaffDeduction{}).Where("user_id = ?", userID)
@@ -280,7 +280,7 @@ func GetStaffDeductionStats(c *gin.Context) {
 
 	// Total deductions
 	query.Select("COALESCE(SUM(amount), 0)").Scan(&stats.TotalDeductions)
-	
+
 	// Active and completed counts
 	query.Where("status = ?", "active").Count(&stats.ActiveDeductions)
 	query.Where("status = ?", "completed").Count(&stats.CompletedDeductions)

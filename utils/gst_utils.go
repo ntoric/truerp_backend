@@ -134,7 +134,7 @@ func calculateCheckDigit(gstinWithoutCheckDigit string) string {
 		} else if char >= 'A' && char <= 'Z' {
 			value = int(char - 'A' + 10)
 		}
-		
+
 		// Apply weight based on position
 		if i%2 == 0 {
 			sum += value
@@ -142,14 +142,14 @@ func calculateCheckDigit(gstinWithoutCheckDigit string) string {
 			sum += value * 2
 		}
 	}
-	
+
 	// Calculate check digit
 	remainder := sum % 36
 	checkDigit := strconv.Itoa(remainder)
 	if remainder >= 10 {
 		checkDigit = string(rune('A' + remainder - 10))
 	}
-	
+
 	return checkDigit
 }
 
@@ -176,12 +176,12 @@ func DeterminePlaceOfSupply(buyerStateCode, sellerStateCode string) string {
 	if _, valid := StateCodes[buyerStateCode]; valid {
 		return buyerStateCode
 	}
-	
+
 	// Fallback to seller's state
 	if _, valid := StateCodes[sellerStateCode]; valid {
 		return sellerStateCode
 	}
-	
+
 	// Default to seller's state code
 	return sellerStateCode
 }
@@ -204,27 +204,27 @@ func GetTaxType(buyerStateCode, sellerStateCode string) string {
 // Returns (CGST, SGST, IGST, TotalTax)
 func CalculateGST(taxableValue, taxRate float64, taxType string) (float64, float64, float64, float64) {
 	totalTax := taxableValue * (taxRate / 100)
-	
+
 	if taxType == "IGST" {
 		return 0, 0, totalTax, totalTax
 	}
-	
+
 	// Split equally between CGST and SGST for intra-state
 	cgst := totalTax / 2
 	sgst := totalTax / 2
-	
+
 	return cgst, sgst, 0, totalTax
 }
 
 // FormatGSTIN formats GSTIN in standard format (e.g., 27ABCDE1234F1Z5)
 func FormatGSTIN(gstin string) string {
 	gstin = strings.ToUpper(strings.TrimSpace(gstin))
-	
+
 	// Add spaces for readability (optional)
 	if len(gstin) == 15 {
 		return gstin[0:2] + gstin[2:12] + gstin[12:13] + gstin[13:14] + gstin[14:15]
 	}
-	
+
 	return gstin
 }
 

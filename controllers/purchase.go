@@ -254,10 +254,10 @@ func CreatePurchaseReceipt(c *gin.Context) {
 		ReceiptDate     time.Time  `json:"receipt_date" binding:"required"`
 		Notes           string     `json:"notes"`
 		Items           []struct {
-			Description string     `json:"description" binding:"required"`
-			Quantity    float64    `json:"quantity" binding:"required,gt=0"`
-			UnitPrice   float64    `json:"unit_price" binding:"required"`
-			TaxRate     float64    `json:"tax_rate"`
+			Description string               `json:"description" binding:"required"`
+			Quantity    float64              `json:"quantity" binding:"required,gt=0"`
+			UnitPrice   float64              `json:"unit_price" binding:"required"`
+			TaxRate     float64              `json:"tax_rate"`
 			BatchNo     string               `json:"batch_no"`
 			MfgDate     *models.FlexibleTime `json:"mfg_date"`
 			ExpDate     *models.FlexibleTime `json:"exp_date"`
@@ -492,8 +492,8 @@ func CreatePurchaseBill(c *gin.Context) {
 		Status:            status,
 		TaxExempt:         input.TaxExempt,
 		ClientBillID:      input.ClientBillID,
-		TotalAmount: input.TotalAmount,
-		PaidAmount:  input.PaidAmount,
+		TotalAmount:       input.TotalAmount,
+		PaidAmount:        input.PaidAmount,
 		BalanceDue: func() float64 {
 			due := input.TotalAmount - input.PaidAmount
 			if due < 0 {
@@ -714,10 +714,10 @@ func GetPurchaseBillInvoiceFile(c *gin.Context) {
 	// 1. Check the local invoice directory.
 	if filePath, ok := findPurchaseInvoiceFile(&bill); ok {
 		c.JSON(http.StatusOK, gin.H{
-			"found":      true,
-			"source":     "local",
-			"file_url":   fmt.Sprintf("/purchase/bills/%s/invoice-file/serve", id),
-			"file_name":  filepath.Base(filePath),
+			"found":     true,
+			"source":    "local",
+			"file_url":  fmt.Sprintf("/purchase/bills/%s/invoice-file/serve", id),
+			"file_name": filepath.Base(filePath),
 		})
 		return
 	}
@@ -734,8 +734,8 @@ func GetPurchaseBillInvoiceFile(c *gin.Context) {
 
 	// 3. No invoice available.
 	c.JSON(http.StatusOK, gin.H{
-		"found":  false,
-		"error":  "No invoice file found. Place a PDF named \"" + sanitizeInvoiceName(bill.Party.Name) + "_Purchase_" + strings.TrimPrefix(bill.BillNumber, "P-") + ".pdf\" in the invoice directory.",
+		"found": false,
+		"error": "No invoice file found. Place a PDF named \"" + sanitizeInvoiceName(bill.Party.Name) + "_Purchase_" + strings.TrimPrefix(bill.BillNumber, "P-") + ".pdf\" in the invoice directory.",
 	})
 }
 

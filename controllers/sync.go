@@ -1,10 +1,10 @@
 package controllers
 
 import (
-	"truerp/models"
-	"truerp/utils"
 	"encoding/json"
 	"net/http"
+	"truerp/models"
+	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -78,7 +78,7 @@ func SyncOfflineData(c *gin.Context) {
 
 	for _, op := range input.Operations {
 		result := gin.H{
-			"operation":  op.Operation,
+			"operation":   op.Operation,
 			"entity_type": op.EntityType,
 			"success":     false,
 		}
