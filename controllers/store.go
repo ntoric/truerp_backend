@@ -1,8 +1,10 @@
 package controllers
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"truerp/models"
 	"truerp/utils"
@@ -534,6 +536,11 @@ func ResetStore(c *gin.Context) {
 		return nil
 	})
 	if err != nil {
+		var depErr *resetDependencyError
+		if errors.As(err, &depErr) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": depErr.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset store data", "details": err.Error()})
 		return
 	}
@@ -596,10 +603,129 @@ func wipeStoreScopeModels(tx *gorm.DB, ownerID uuid.UUID, models ...interface{})
 	return nil
 }
 
+// resetDependencyError marks a reset that cannot proceed because rows outside the
+// selected scopes still reference the data being wiped. It maps to a 400 response.
+type resetDependencyError struct{ msg string }
+
+func (e *resetDependencyError) Error() string { return e.msg }
+
+// tableRef describes rows that hold a NO ACTION foreign key to a parent being wiped.
+type tableRef struct {
+	model interface{}
+	fk    string
+	label string // human-readable name of the referencing records
+	scope string // reset scope that removes them, "" if none
+}
+
+// ensureNoReferences returns a resetDependencyError listing every record that still
+// references the parents about to be deleted, plus the scopes that would clear them.
+func ensureNoReferences(tx *gorm.DB, parentIDs []uuid.UUID, refs []tableRef) error {
+	if len(parentIDs) == 0 {
+		return nil
+	}
+	var blockers []string
+	needed := map[string]bool{}
+	for _, ref := range refs {
+		var n int64
+		if err := tx.Unscoped().Model(ref.model).Where(ref.fk+" IN ?", parentIDs).Count(&n).Error; err != nil {
+			return err
+		}
+		if n > 0 {
+			blockers = append(blockers, fmt.Sprintf("%s (%d)", ref.label, n))
+			if ref.scope != "" {
+				needed[ref.scope] = true
+			}
+		}
+	}
+	if len(blockers) == 0 {
+		return nil
+	}
+	msg := "Cannot reset the selected categories — data is still referenced by: " + strings.Join(blockers, ", ")
+	if len(needed) > 0 {
+		scopes := make([]string, 0, len(needed))
+		for scope := range needed {
+			scopes = append(scopes, scope)
+		}
+		sort.Strings(scopes)
+		msg += ". Also select: " + strings.Join(scopes, ", ")
+	}
+	return &resetDependencyError{msg: msg}
+}
+
+// wipeStoreScopePartyRefs deletes rows that only exist as attachments to a party
+// (statements, marketing recipients, portal access, loyalty history, tickets).
+// Keyed by party_id so it also catches rows whose user_id does not match.
+func wipeStoreScopePartyRefs(tx *gorm.DB, ownerID uuid.UUID) error {
+	partyIDs, err := pluckIDsByUser(tx, &models.Party{}, ownerID)
+	if err != nil {
+		return err
+	}
+	if len(partyIDs) == 0 {
+		return nil
+	}
+
+	var statementIDs []uuid.UUID
+	if err := tx.Unscoped().Model(&models.CustomerStatement{}).
+		Where("party_id IN ?", partyIDs).Pluck("id", &statementIDs).Error; err != nil {
+		return err
+	}
+	if err := hardDeleteByFK(tx, &models.StatementTransaction{}, "statement_id", statementIDs); err != nil {
+		return err
+	}
+	if err := tx.Unscoped().Where("party_id IN ?", partyIDs).Delete(&models.CustomerStatement{}).Error; err != nil {
+		return err
+	}
+
+	for _, model := range []interface{}{
+		&models.LoyaltyTransaction{},
+		&models.CustomerPortalAccess{},
+		&models.SupportTicket{},
+		&models.EmailRecipient{},
+		&models.SMSRecipient{},
+		&models.WhatsAppRecipient{},
+	} {
+		if err := hardDeleteByFK(tx, model, "party_id", partyIDs); err != nil {
+			return err
+		}
+	}
+	if tx.Migrator().HasTable("telegram_recipients") {
+		if err := tx.Exec(`DELETE FROM telegram_recipients WHERE party_id IN ?`, partyIDs).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// wipeLegacyTables removes per-user rows from tables that exist only in databases
+// migrated from older versions (no current GORM model).
+func wipeLegacyTables(tx *gorm.DB, ownerID uuid.UUID) error {
+	if tx.Migrator().HasTable("telegram_recipients") && tx.Migrator().HasTable("telegram_marketings") {
+		if err := tx.Exec(
+			`DELETE FROM telegram_recipients WHERE campaign_id IN (SELECT id FROM telegram_marketings WHERE user_id = ?)`,
+			ownerID,
+		).Error; err != nil {
+			return err
+		}
+	}
+	for _, table := range []string{"telegram_marketings", "daily_report_telegram_settings"} {
+		if tx.Migrator().HasTable(table) {
+			if err := tx.Exec(fmt.Sprintf(`DELETE FROM %s WHERE user_id = ?`, table), ownerID).Error; err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // wipeStoreOperationalData permanently deletes selected tenant operational rows for ownerID.
 // Preserves: Store, Users, Business, Roles, UserRoles, DeveloperSettings.
+// Scope blocks run in dependency order so children are removed before the rows they reference.
 func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetScopes) error {
 	if scopes.has("sales") {
+		invoiceIDs, err := pluckIDsByUser(tx, &models.Invoice{}, ownerID)
+		if err != nil {
+			return err
+		}
 		if err := wipeStoreScopeChildRows(tx, ownerID, &models.Invoice{}, &models.InvoiceItem{}, "invoice_id"); err != nil {
 			return err
 		}
@@ -618,14 +744,34 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 		if err := wipeStoreScopeChildRows(tx, ownerID, &models.CustomerStatement{}, &models.StatementTransaction{}, "statement_id"); err != nil {
 			return err
 		}
+		if err := wipeStoreScopeChildRows(tx, ownerID, &models.Quotation{}, &models.QuotationItem{}, "quotation_id"); err != nil {
+			return err
+		}
+		if err := wipeStoreScopeChildRows(tx, ownerID, &models.Quotation{}, &models.QuotationVersion{}, "quotation_id"); err != nil {
+			return err
+		}
+		// Documents referencing invoices/parties must go before invoices.
 		if err := wipeStoreScopeModels(tx, ownerID,
 			&models.InvoiceStatusHistory{},
 			&models.Payment{},
-			&models.Invoice{},
 			&models.CreditNote{},
 			&models.SalesReturn{},
 			&models.DeliveryChallan{},
 			&models.CustomerStatement{},
+			&models.Quotation{},
+		); err != nil {
+			return err
+		}
+		if err := ensureNoReferences(tx, invoiceIDs, []tableRef{
+			{&models.Payment{}, "invoice_id", "payments", "Sales"},
+			{&models.CreditNote{}, "invoice_id", "credit notes", "Sales"},
+			{&models.SalesReturn{}, "invoice_id", "sales returns", "Sales"},
+			{&models.DeliveryChallan{}, "invoice_id", "delivery challans", "Sales"},
+		}); err != nil {
+			return err
+		}
+		if err := wipeStoreScopeModels(tx, ownerID,
+			&models.Invoice{},
 			&models.SavedInvoiceTemplate{},
 			&models.InvoiceSettings{},
 			&models.InvoiceCustomFieldDefinition{},
@@ -635,6 +781,10 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 	}
 
 	if scopes.has("purchases") {
+		billIDs, err := pluckIDsByUser(tx, &models.PurchaseBill{}, ownerID)
+		if err != nil {
+			return err
+		}
 		if err := wipeStoreScopeChildRows(tx, ownerID, &models.PurchaseOrder{}, &models.PurchaseOrderItem{}, "order_id"); err != nil {
 			return err
 		}
@@ -654,6 +804,17 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 			&models.PaymentOut{},
 			&models.DebitNote{},
 			&models.PurchaseReturn{},
+		); err != nil {
+			return err
+		}
+		if err := ensureNoReferences(tx, billIDs, []tableRef{
+			{&models.PaymentOut{}, "purchase_bill_id", "payment outs", "Purchases"},
+			{&models.DebitNote{}, "purchase_bill_id", "debit notes", "Purchases"},
+			{&models.PurchaseReturn{}, "purchase_bill_id", "purchase returns", "Purchases"},
+		}); err != nil {
+			return err
+		}
+		if err := wipeStoreScopeModels(tx, ownerID,
 			&models.PurchaseBill{},
 			&models.PurchaseReceipt{},
 			&models.PurchaseOrder{},
@@ -680,14 +841,83 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 		}
 	}
 
-	if scopes.has("products") {
-		if err := wipeStoreScopeChildRows(tx, ownerID, &models.StockTransfer{}, &models.StockTransferItem{}, "transfer_id"); err != nil {
+	if scopes.has("staff") {
+		staffIDs, err := pluckIDsByUser(tx, &models.Staff{}, ownerID)
+		if err != nil {
 			return err
 		}
 		if err := wipeStoreScopeModels(tx, ownerID,
-			&models.StockTransfer{},
+			&models.StaffAdvancePayment{},
+			&models.StaffDeduction{},
+			&models.Payroll{},
+			&models.Attendance{},
+		); err != nil {
+			return err
+		}
+		if err := ensureNoReferences(tx, staffIDs, []tableRef{
+			{&models.Attendance{}, "staff_id", "attendance records", "Staff & payroll"},
+			{&models.Payroll{}, "staff_id", "payroll records", "Staff & payroll"},
+			{&models.StaffDeduction{}, "staff_id", "staff deductions", "Staff & payroll"},
+			{&models.StaffAdvancePayment{}, "staff_id", "staff advance payments", "Staff & payroll"},
+		}); err != nil {
+			return err
+		}
+		if err := wipeStoreScopeModels(tx, ownerID, &models.Staff{}); err != nil {
+			return err
+		}
+	}
+
+	if scopes.has("products") {
+		productIDs, err := pluckIDsByUser(tx, &models.Product{}, ownerID)
+		if err != nil {
+			return err
+		}
+		if err := wipeStoreScopeChildRows(tx, ownerID, &models.StockTransfer{}, &models.StockTransferItem{}, "transfer_id"); err != nil {
+			return err
+		}
+		if err := wipeStoreScopeModels(tx, ownerID, &models.StockTransfer{}); err != nil {
+			return err
+		}
+		// Product attachments are keyed by product_id so rows whose user_id does not
+		// match the owner (cross-store stock records) are still removed.
+		for _, model := range []interface{}{
 			&models.StockEntry{},
 			&models.InventoryStock{},
+			&models.ProductImage{},
+			&models.ProductVariant{},
+			&models.SerialNumber{},
+		} {
+			if err := hardDeleteByUser(tx, model, ownerID); err != nil {
+				return err
+			}
+			if err := hardDeleteByFK(tx, model, "product_id", productIDs); err != nil {
+				return err
+			}
+		}
+		// Detach the product link on line items instead of failing — documents keep
+		// their description/qty/price even after the catalog entry is gone.
+		if len(productIDs) > 0 {
+			for _, model := range []interface{}{
+				&models.InvoiceItem{},
+				&models.SalesReturnItem{},
+				&models.QuotationItem{},
+			} {
+				if err := tx.Unscoped().Model(model).
+					Where("product_id IN ?", productIDs).
+					Update("product_id", nil).Error; err != nil {
+					return err
+				}
+			}
+		}
+		if err := ensureNoReferences(tx, productIDs, []tableRef{
+			{&models.StockTransferItem{}, "product_id", "stock transfer items", "Products & inventory"},
+			{&models.InvoiceItem{}, "product_id", "invoice items", "Sales"},
+			{&models.SalesReturnItem{}, "product_id", "sales return items", "Sales"},
+			{&models.QuotationItem{}, "product_id", "quotation items", "Sales"},
+		}); err != nil {
+			return err
+		}
+		if err := wipeStoreScopeModels(tx, ownerID,
 			&models.Product{},
 			&models.Warehouse{},
 			&models.Category{},
@@ -696,55 +926,24 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 		}
 	}
 
-	if scopes.has("parties") {
-		if err := wipeStoreScopeModels(tx, ownerID, &models.Party{}); err != nil {
-			return err
-		}
-	}
-
-	if scopes.has("accounting") {
-		if err := wipeStoreScopeChildRows(tx, ownerID, &models.JournalEntry{}, &models.JournalEntryLine{}, "entry_id"); err != nil {
-			return err
-		}
-		if err := wipeStoreScopeModels(tx, ownerID,
-			&models.CashTransaction{},
-			&models.PaymentMethodAccountMap{},
-			&models.BankReconciliation{},
-			&models.Ledger{},
-			&models.JournalEntry{},
-			&models.BankAccount{},
-			&models.Account{},
-		); err != nil {
-			return err
-		}
-	}
-
-	if scopes.has("staff") {
-		if err := wipeStoreScopeModels(tx, ownerID,
-			&models.StaffAdvancePayment{},
-			&models.StaffDeduction{},
-			&models.Payroll{},
-			&models.Attendance{},
-			&models.Staff{},
-		); err != nil {
-			return err
-		}
-	}
-
-	if scopes.has("gst") {
-		if err := wipeStoreScopeModels(tx, ownerID,
-			&models.TaxPeriod{},
-			&models.InputTaxCredit{},
-			&models.GSTFilingStatus{},
-			&models.GSTR1Data{},
-			&models.GSTR3BData{},
-		); err != nil {
-			return err
-		}
-	}
-
 	if scopes.has("settings") {
+		// Campaign recipients carry a NO ACTION FK to their campaign — delete them first.
+		if err := wipeStoreScopeChildRows(tx, ownerID, &models.EmailMarketing{}, &models.EmailRecipient{}, "campaign_id"); err != nil {
+			return err
+		}
+		if err := wipeStoreScopeChildRows(tx, ownerID, &models.SMSMarketing{}, &models.SMSRecipient{}, "campaign_id"); err != nil {
+			return err
+		}
+		if err := wipeStoreScopeChildRows(tx, ownerID, &models.WhatsAppMarketing{}, &models.WhatsAppRecipient{}, "campaign_id"); err != nil {
+			return err
+		}
+		if err := wipeLegacyTables(tx, ownerID); err != nil {
+			return err
+		}
 		if err := wipeStoreScopeModels(tx, ownerID,
+			&models.EmailMarketing{},
+			&models.SMSMarketing{},
+			&models.WhatsAppMarketing{},
 			&models.LoyaltyTransaction{},
 			&models.LoyaltySettings{},
 			&models.PrintSettings{},
@@ -761,7 +960,134 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 			&models.CustomerPortalAccess{},
 			&models.CustomerPortalSettings{},
 			&models.SupportTicket{},
+			&models.DataBackup{},
+			&models.GDPRRequest{},
+			&models.DailyReportEmailSettings{},
+			&models.IPRestriction{},
+			&models.MigrationJob{},
 		); err != nil {
+			return err
+		}
+	}
+
+	if scopes.has("accounting") {
+		// Detach bank-account links on records owned by other scopes so the wipe
+		// succeeds even when Expenses/Staff are not selected.
+		if err := tx.Unscoped().Model(&models.Expense{}).
+			Where("user_id = ? AND bank_account_id IS NOT NULL", ownerID).
+			Update("bank_account_id", nil).Error; err != nil {
+			return err
+		}
+		if err := tx.Unscoped().Model(&models.Payroll{}).
+			Where("user_id = ? AND bank_account_id IS NOT NULL", ownerID).
+			Update("bank_account_id", nil).Error; err != nil {
+			return err
+		}
+		if err := tx.Unscoped().Model(&models.ProfitDistribution{}).
+			Where("user_id = ? AND account_id IS NOT NULL", ownerID).
+			Update("account_id", nil).Error; err != nil {
+			return err
+		}
+		bankAccountIDs, err := pluckIDsByUser(tx, &models.BankAccount{}, ownerID)
+		if err != nil {
+			return err
+		}
+		accountIDs, err := pluckIDsByUser(tx, &models.Account{}, ownerID)
+		if err != nil {
+			return err
+		}
+		if err := wipeStoreScopeChildRows(tx, ownerID, &models.JournalEntry{}, &models.JournalEntryLine{}, "entry_id"); err != nil {
+			return err
+		}
+		if err := wipeStoreScopeModels(tx, ownerID,
+			&models.ProfitDistribution{},
+			&models.Partner{},
+			&models.CashTransaction{},
+			&models.PaymentMethodAccountMap{},
+			&models.BankReconciliation{},
+			&models.Ledger{},
+			&models.JournalEntry{},
+		); err != nil {
+			return err
+		}
+		if err := ensureNoReferences(tx, bankAccountIDs, []tableRef{
+			{&models.CashTransaction{}, "account_id", "cash transactions", "Accounting"},
+			{&models.Expense{}, "bank_account_id", "expenses", "Expenses"},
+			{&models.Payroll{}, "bank_account_id", "payroll records", "Staff & payroll"},
+		}); err != nil {
+			return err
+		}
+		if err := wipeStoreScopeModels(tx, ownerID, &models.BankAccount{}); err != nil {
+			return err
+		}
+		if err := ensureNoReferences(tx, accountIDs, []tableRef{
+			{&models.JournalEntryLine{}, "account_id", "journal entry lines", "Accounting"},
+			{&models.Ledger{}, "account_id", "ledger entries", "Accounting"},
+		}); err != nil {
+			return err
+		}
+		if err := wipeStoreScopeModels(tx, ownerID, &models.Account{}); err != nil {
+			return err
+		}
+	}
+
+	if scopes.has("gst") {
+		if err := wipeStoreScopeModels(tx, ownerID,
+			&models.TaxPeriod{},
+			&models.InputTaxCredit{},
+			&models.GSTFilingStatus{},
+			&models.GSTR1Data{},
+			&models.GSTR3BData{},
+			&models.TaxExemption{},
+			&models.TaxRule{},
+			&models.TaxRate{},
+		); err != nil {
+			return err
+		}
+	}
+
+	if scopes.has("parties") {
+		partyIDs, err := pluckIDsByUser(tx, &models.Party{}, ownerID)
+		if err != nil {
+			return err
+		}
+		if err := wipeStoreScopePartyRefs(tx, ownerID); err != nil {
+			return err
+		}
+		if err := ensureNoReferences(tx, partyIDs, []tableRef{
+			{&models.Invoice{}, "party_id", "invoices", "Sales"},
+			{&models.Payment{}, "party_id", "payments", "Sales"},
+			{&models.CreditNote{}, "party_id", "credit notes", "Sales"},
+			{&models.SalesReturn{}, "party_id", "sales returns", "Sales"},
+			{&models.DeliveryChallan{}, "party_id", "delivery challans", "Sales"},
+			{&models.Quotation{}, "party_id", "quotations", "Sales"},
+			{&models.CustomerStatement{}, "party_id", "customer statements", "Sales"},
+			{&models.PurchaseOrder{}, "party_id", "purchase orders", "Purchases"},
+			{&models.PurchaseReceipt{}, "party_id", "purchase receipts", "Purchases"},
+			{&models.PurchaseBill{}, "party_id", "purchase bills", "Purchases"},
+			{&models.PurchaseReturn{}, "party_id", "purchase returns", "Purchases"},
+			{&models.DebitNote{}, "party_id", "debit notes", "Purchases"},
+			{&models.PaymentOut{}, "party_id", "payment outs", "Purchases"},
+			{&models.LoyaltyTransaction{}, "party_id", "loyalty transactions", "Settings & notifications"},
+			{&models.CustomerPortalAccess{}, "party_id", "customer portal access", "Settings & notifications"},
+			{&models.SupportTicket{}, "party_id", "support tickets", "Settings & notifications"},
+			{&models.EmailRecipient{}, "party_id", "email campaign recipients", "Settings & notifications"},
+			{&models.SMSRecipient{}, "party_id", "SMS campaign recipients", "Settings & notifications"},
+			{&models.WhatsAppRecipient{}, "party_id", "WhatsApp campaign recipients", "Settings & notifications"},
+		}); err != nil {
+			return err
+		}
+		if len(partyIDs) > 0 && tx.Migrator().HasTable("telegram_recipients") {
+			var n int64
+			if err := tx.Table("telegram_recipients").Where("party_id IN ?", partyIDs).Count(&n).Error; err != nil {
+				return err
+			}
+			if n > 0 {
+				return &resetDependencyError{msg: fmt.Sprintf(
+					"Cannot reset the selected categories — data is still referenced by: telegram campaign recipients (%d)", n)}
+			}
+		}
+		if err := wipeStoreScopeModels(tx, ownerID, &models.Party{}); err != nil {
 			return err
 		}
 	}

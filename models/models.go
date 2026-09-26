@@ -2011,22 +2011,26 @@ type Quotation struct {
 }
 
 type QuotationItem struct {
-	ID          uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	QuotationID uuid.UUID `json:"quotation_id" gorm:"type:uuid;not null;index"`
-	Description string    `json:"description"`
-	Quantity    float64   `json:"quantity" gorm:"default:1"`
-	Unit        string    `json:"unit"`
-	UnitPrice   float64   `json:"unit_price" gorm:"default:0"`
-	Discount    float64   `json:"discount" gorm:"default:0"`
-	TaxRate     float64   `json:"tax_rate" gorm:"default:0"`
-	CGST        float64   `json:"cgst" gorm:"default:0"`
-	SGST        float64   `json:"sgst" gorm:"default:0"`
-	IGST        float64   `json:"igst" gorm:"default:0"`
-	Total       float64   `json:"total" gorm:"default:0"`
-	HSNCode     string    `json:"hsn_code"`
-	SACCode     string    `json:"sac_code"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	QuotationID uuid.UUID  `json:"quotation_id" gorm:"type:uuid;not null;index"`
+	ProductID   *uuid.UUID `json:"product_id,omitempty" gorm:"type:uuid;index"`
+	Product     Product    `json:"product,omitempty" gorm:"foreignKey:ProductID"`
+	Description string     `json:"description"`
+	Quantity    float64    `json:"quantity" gorm:"default:1"`
+	Unit        string     `json:"unit"`
+	UnitPrice   float64    `json:"unit_price" gorm:"default:0"`
+	Discount    float64    `json:"discount" gorm:"default:0"`
+	TaxRate     float64    `json:"tax_rate" gorm:"default:0"`
+	CGST        float64    `json:"cgst" gorm:"default:0"`
+	SGST        float64    `json:"sgst" gorm:"default:0"`
+	IGST        float64    `json:"igst" gorm:"default:0"`
+	Total       float64    `json:"total" gorm:"default:0"`
+	HSNCode     string     `json:"hsn_code"`
+	SACCode     string     `json:"sac_code"`
+	BatchNo     string     `json:"batch_no"`
+	ExpDate     *time.Time `json:"exp_date,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 type QuotationVersion struct {
@@ -2283,4 +2287,41 @@ type MigrationJob struct {
 	FinishedAt    *time.Time `json:"finished_at,omitempty"`
 	CreatedAt     time.Time  `json:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+// Partner represents a business partner who receives profit distributions.
+type Partner struct {
+	ID        uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID    uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	Name      string         `json:"name" gorm:"not null"`
+	Phone     string         `json:"phone"`
+	Email     string         `json:"email"`
+	Address   string         `json:"address"`
+	PAN       string         `json:"pan"`
+	Notes     string         `json:"notes"`
+	IsActive  bool           `json:"is_active" gorm:"default:true"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// ProfitDistribution records a payout of profits to a partner. The amount is
+// deducted from the selected bank account (nil AccountID = cash in-hand) and a
+// linked CashTransaction is written for the cash-bank ledger.
+type ProfitDistribution struct {
+	ID                 uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID             uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	PartnerID          uuid.UUID      `json:"partner_id" gorm:"type:uuid;not null;index"`
+	Partner            *Partner       `json:"partner,omitempty" gorm:"foreignKey:PartnerID"`
+	DistributionNumber string         `json:"distribution_number" gorm:"not null;index"`
+	Amount             float64        `json:"amount" gorm:"not null"`
+	Date               time.Time      `json:"date" gorm:"not null"`
+	AccountID          *uuid.UUID     `json:"account_id,omitempty" gorm:"type:uuid;index"` // nil = cash in-hand
+	Account            *BankAccount   `json:"account,omitempty" gorm:"foreignKey:AccountID"`
+	Description        string         `json:"description"`
+	Reference          string         `json:"reference"`
+	Notes              string         `json:"notes"`
+	CreatedAt          time.Time      `json:"created_at"`
+	UpdatedAt          time.Time      `json:"updated_at"`
+	DeletedAt          gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }

@@ -309,11 +309,12 @@ func importPartiesRows(userID uuid.UUID, content []byte, vendorHints map[string]
 			partyType = "vendor"
 		}
 
+		phone := mbFirstCSVValue(row, header, "Mob No.", "Phone", "Mobile", "Mobile No.")
 		party := models.Party{
 			ID:             uuid.New(),
 			UserID:         userID,
 			Name:           name,
-			Phone:          mbFirstCSVValue(row, header, "Mob No.", "Phone", "Mobile", "Mobile No."),
+			Phone:          phone,
 			GSTIN:          mbFirstCSVValue(row, header, "GST", "GSTIN"),
 			Address:        mbFirstCSVValue(row, header, "Address"),
 			State:          mbFirstCSVValue(row, header, "State"),
@@ -325,9 +326,9 @@ func importPartiesRows(userID uuid.UUID, content []byte, vendorHints map[string]
 			IsActive:       true,
 		}
 
-		// Skip duplicates by name.
+		// Skip duplicates only when name, balance, and mobile number match.
 		var existing models.Party
-		if err := utils.DB.Where("user_id = ? AND name = ?", userID, name).First(&existing).Error; err == nil {
+		if err := utils.DB.Where("user_id = ? AND name = ? AND balance = ? AND phone = ?", userID, name, balance, phone).First(&existing).Error; err == nil {
 			if progress != nil {
 				progress(i+1, len(rows), imported)
 			}

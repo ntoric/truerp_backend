@@ -59,6 +59,9 @@ func RegisterMigrationRunners() {
 	register("stock-summary", func(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 		return importStockSummaryRows(userID, content, options, progress)
 	})
+	register("batched-items", func(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
+		return importBatchedItemsRows(userID, content, options, progress)
+	})
 	register("purchase-payments", func(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 		return importPurchasePaymentStatusRows(userID, content, progress)
 	})
@@ -67,6 +70,18 @@ func RegisterMigrationRunners() {
 	})
 	register("sales-items", func(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 		return importSalesItemsRows(userID, content, progress)
+	})
+	register("purchase-returns", func(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
+		return importPurchaseReturnsRows(userID, content, options, progress)
+	})
+	register("sales-returns", func(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
+		return importSalesReturnsRows(userID, content, options, progress)
+	})
+	register("cash-bank-statement", func(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
+		return importCashBankStatementRows(userID, content, options, progress)
+	})
+	register("daybook", func(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
+		return importDaybookRows(userID, content, options, progress)
 	})
 
 	// --- myBillBook importers (migration.go) ---

@@ -628,6 +628,28 @@ func SetupRoutes(r *gin.Engine) {
 		cashBank.DELETE("/transactions/:id", middleware.SuperAdminRequired(), controllers.DeleteCashTransaction)
 	}
 
+	// Partner routes (profit sharing)
+	partners := r.Group("/api/v1/partners")
+	partners.Use(middleware.AuthRequired())
+	{
+		partners.GET("", controllers.GetPartners)
+		partners.POST("", controllers.CreatePartner)
+		partners.GET("/:id", controllers.GetPartner)
+		partners.PUT("/:id", controllers.UpdatePartner)
+		partners.DELETE("/:id", controllers.DeletePartner)
+	}
+
+	// Profit Distribution routes
+	profitDistributions := r.Group("/api/v1/profit-distributions")
+	profitDistributions.Use(middleware.AuthRequired())
+	{
+		profitDistributions.GET("", controllers.GetProfitDistributions)
+		profitDistributions.POST("", controllers.CreateProfitDistribution)
+		profitDistributions.GET("/next-number", controllers.GetNextDistributionNumber)
+		profitDistributions.GET("/:id", controllers.GetProfitDistribution)
+		profitDistributions.DELETE("/:id", controllers.DeleteProfitDistribution)
+	}
+
 	// Staff routes
 	staff := r.Group("/api/v1/staff")
 	staff.Use(middleware.AuthRequired())
@@ -947,10 +969,15 @@ func SetupRoutes(r *gin.Engine) {
 		migration.POST("/users/import/csv", controllers.ImportUsersCSV)
 		migration.POST("/staff/import/csv", controllers.ImportStaffCSV)
 		migration.POST("/stock-summary/import/csv", controllers.ImportStockSummaryCSV)
+		migration.POST("/batched-items/import/csv", controllers.ImportBatchedItemsCSV)
 		migration.POST("/purchase-payments/import/csv", controllers.ImportPurchasePaymentStatusCSV)
 		migration.POST("/purchase-items/import/csv", controllers.ImportPurchaseItemsCSV)
 		migration.POST("/sales-items/import/csv", controllers.ImportSalesItemsCSV)
 		migration.POST("/sales/import/csv", controllers.ImportSalesCSV)
+		migration.POST("/purchase-returns/import/csv", controllers.ImportPurchaseReturnsCSV)
+		migration.POST("/sales-returns/import/csv", controllers.ImportSalesReturnsCSV)
+		migration.POST("/cash-bank-statement/import/csv", controllers.ImportCashBankStatementCSV)
+		migration.POST("/daybook/import/csv", controllers.ImportDaybookCSV)
 
 		// Asynchronous migration jobs — enqueue, poll, list. These accept
 		// any of the per-entity CSV importers above (and the myBillBook ZIP)

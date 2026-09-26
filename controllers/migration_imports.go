@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"truerp/models"
@@ -82,6 +83,19 @@ func csvFirst(record, headers []string, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// csvHeaderHas reports whether the header row contains any of the given
+// column names (case-insensitive, trimmed).
+func csvHeaderHas(headers []string, keys ...string) bool {
+	for _, h := range headers {
+		for _, k := range keys {
+			if strings.EqualFold(strings.TrimSpace(h), k) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // importFile reads the "file" multipart field and returns its full content.
@@ -845,14 +859,16 @@ func importStaffRows(userID uuid.UUID, content []byte, options map[string]string
 //
 //  1. Creates product categories from the "Item Category Name" column (skips
 //     duplicates by name).
-//  2. Creates products from the "Name" column (skips duplicates by name).
+//  2. Creates products from the "Name" column. A row reuses an existing
+//     product only when ALL of these match: name, item code, purchase price,
+//     selling price and category name — otherwise a new product is created.
 //     PLU is auto-assigned ascending from 1; SKU is generated from the name.
-//     Item Code, purchase/sale price, MRP, and unit are populated from the
-//     first row seen for each product.
+//     MRP and unit are populated from the first row seen for each product.
 //  3. Creates/updates InventoryStock rows per batch. Each unique (product,
-//     batch_no) pair becomes one stock row in the default warehouse. Stock
-//     quantity is set from the "Stock Quantity" column (which includes the
-//     unit, e.g. "33.0 PCS").
+//     batch_no) pair becomes one stock row in the default warehouse. Rows
+//     that resolve to the same product and batch are duplicates and update
+//     the existing row. Stock quantity is set from the "Stock Quantity"
+//     column (which includes the unit, e.g. "33.0 PCS").
 //
 // Returns:
 //   {
@@ -979,17 +995,31 @@ func importStockSummaryRows(userID uuid.UUID, content []byte, options map[string
 		batchNo := strings.TrimSpace(csvFirst(row, header, "Batch No.", "Batch No", "Batch"))
 		hasBatch := batchNo != ""
 
-		product, ok := productCache[strings.ToLower(name)]
+		// A product is a duplicate only when name, item code, purchase price,
+		// selling price and category name all match — otherwise it is treated
+		// as a unique product.
+		itemCode := strings.TrimSpace(csvFirst(row, header, "Item Code", "ItemCode"))
+		purchasePrice := parseFloat(csvFirst(row, header, "Purchase Price", "PurchasePrice"))
+		sellingPrice := parseFloat(csvFirst(row, header, "Selling Price", "Sale Price", "SalePrice"))
+		productKey := strings.Join([]string{
+			strings.ToLower(name),
+			itemCode,
+			strconv.FormatFloat(purchasePrice, 'g', -1, 64),
+			strconv.FormatFloat(sellingPrice, 'g', -1, 64),
+			strings.ToLower(categoryName),
+		}, "\x00")
+
+		product, ok := productCache[productKey]
 		if !ok {
 			var existing models.Product
-			if err := utils.DB.Where("user_id = ? AND name = ?", userID, name).First(&existing).Error; err == nil {
+			if err := utils.DB.Where(
+				"user_id = ? AND name = ? AND item_code = ? AND purchase_price = ? AND sale_price = ? AND category = ?",
+				userID, name, itemCode, purchasePrice, sellingPrice, categoryName,
+			).First(&existing).Error; err == nil {
 				product = &existing
-				productCache[strings.ToLower(name)] = product
+				productCache[productKey] = product
 			} else {
 				// Parse values from the first row we see for this product.
-				itemCode := strings.TrimSpace(csvFirst(row, header, "Item Code", "ItemCode"))
-				purchasePrice := parseFloat(csvFirst(row, header, "Purchase Price", "PurchasePrice"))
-				sellingPrice := parseFloat(csvFirst(row, header, "Selling Price", "Sale Price", "SalePrice"))
 				mrp := parseFloat(csvFirst(row, header, "MRP"))
 				if mrp == 0 {
 					mrp = sellingPrice
@@ -1028,7 +1058,7 @@ func importStockSummaryRows(userID uuid.UUID, content []byte, options map[string
 					continue
 				}
 				product = &newProduct
-				productCache[strings.ToLower(name)] = product
+				productCache[productKey] = product
 				productsCreated++
 			}
 		}
@@ -1084,6 +1114,15 @@ func importStockSummaryRows(userID uuid.UUID, content []byte, options map[string
 		).First(&stock).Error
 
 		if queryErr == nil {
+			// Same product + batch + quantity is a true duplicate and simply
+			// refreshes the row. A differing quantity would be a distinct
+			// entry, but the (product, outlet, batch) unique index allows
+			// only one row — flag it and keep the latest quantity.
+			if stock.Quantity != qty {
+				errs = append(errs, fmt.Sprintf(
+					"Row %d (%s): duplicate product+batch %q with different quantity (existing %.2f, new %.2f) — keeping latest",
+					rowNum, name, batchNo, stock.Quantity, qty))
+			}
 			// Update existing stock row.
 			stock.Quantity = qty
 			stock.AvailableQty = qty - stock.ReservedQty
@@ -1202,6 +1241,268 @@ func parseStockUnit(value string) string {
 		return ""
 	}
 	return strings.ToUpper(parts[1])
+}
+
+// -----------------------------------------------------------------------------
+// Item Batched Report  —  POST /api/v1/migration/batched-items/import/csv
+//
+// Parses a myBillBook-style "Item Batched Report" CSV and updates existing
+// batch stock rows. Unlike the stock summary importer this is a correction
+// tool: it never creates products — rows whose item name does not match an
+// existing product are reported as errors.
+//
+// Expected header:
+//   Item Name,Batch Number,Expiry Date,MFG Date,MRP,Purchase Price,Selling Price,Current Stock
+//
+// Per row:
+//  1. The product is resolved by item name (trimmed, exact then
+//     case-insensitive). When several products share the name, the row's
+//     purchase/selling prices disambiguate.
+//  2. The InventoryStock row for (product, default warehouse, batch) is
+//     updated: ExpDate, MfgDate (when present), and Quantity from the
+//     "Current Stock" column (e.g. "1.0 PCS"). A missing stock row is created.
+//
+// Returns:
+//   {
+//     "imported": <int>,        // rows processed
+//     "stock_updated": <int>,   // existing batch stock rows updated
+//     "stock_created": <int>,   // batch stock rows created
+//     "errors": [string, ...]
+//   }
+// -----------------------------------------------------------------------------
+
+func ImportBatchedItemsCSV(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	content, err := importFile(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	result, errs, perr := importBatchedItemsRows(userID, content, nil, nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"imported":      result["imported"],
+		"stock_updated": result["stock_updated"],
+		"stock_created": result["stock_created"],
+		"errors":        errs,
+	})
+}
+
+func importBatchedItemsRows(userID uuid.UUID, content []byte, _ map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
+	content = stripBOM(content)
+	content = normalizeCRLF(content)
+
+	reader := csv.NewReader(strings.NewReader(string(content)))
+	reader.FieldsPerRecord = -1
+	reader.LazyQuotes = true
+	all, err := reader.ReadAll()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse CSV: %w", err)
+	}
+	if len(all) == 0 {
+		return nil, nil, errors.New("CSV file is empty")
+	}
+
+	// The header is normally the first row, but tolerate a report preamble by
+	// scanning for the row whose first cell is "Item Name".
+	headerIdx := -1
+	for i, row := range all {
+		if len(row) > 0 && strings.EqualFold(strings.TrimSpace(row[0]), "Item Name") {
+			headerIdx = i
+			break
+		}
+	}
+	if headerIdx == -1 {
+		return nil, nil, errors.New("could not find header row (expected first column \"Item Name\")")
+	}
+	header := all[headerIdx]
+	var rows [][]string
+	for _, row := range all[headerIdx+1:] {
+		if len(row) == 0 || strings.TrimSpace(strings.Join(row, "")) == "" {
+			continue
+		}
+		rows = append(rows, row)
+	}
+
+	defaultWH := resolveDefaultWarehouseID(userID)
+	if defaultWH == uuid.Nil {
+		return nil, nil, errors.New("no warehouse available")
+	}
+
+	stockUpdated := 0
+	stockCreated := 0
+	imported := 0
+	var errs []string
+
+	// Cache product candidates by lower(name) to avoid repeated lookups.
+	candidateCache := map[string][]models.Product{}
+	// Track (productID, batch) pairs already seen in this file so duplicate
+	// rows can be flagged — the last one wins.
+	seen := map[string]int{}
+
+	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), imported)
+		}
+		rowNum := i + 1
+		name := strings.TrimSpace(csvFirst(row, header, "Item Name", "Product Name", "Name"))
+		if name == "" {
+			errs = append(errs, fmt.Sprintf("Row %d: Item Name is required", rowNum))
+			continue
+		}
+		batchNo := strings.TrimSpace(csvFirst(row, header, "Batch Number", "Batch No.", "Batch No", "Batch"))
+		purchasePrice := parseFloat(csvFirst(row, header, "Purchase Price", "PurchasePrice"))
+		sellingPrice := parseFloat(csvFirst(row, header, "Selling Price", "Sale Price", "SalePrice"))
+
+		// --- 1. Resolve the existing product ---
+		nameKey := strings.ToLower(name)
+		candidates, ok := candidateCache[nameKey]
+		if !ok {
+			utils.DB.Where("user_id = ? AND name = ?", userID, name).Find(&candidates)
+			if len(candidates) == 0 {
+				utils.DB.Where("user_id = ? AND LOWER(name) = LOWER(?)", userID, name).Find(&candidates)
+			}
+			candidateCache[nameKey] = candidates
+		}
+		if len(candidates) == 0 {
+			errs = append(errs, fmt.Sprintf("Row %d (%s): product not found", rowNum, name))
+			continue
+		}
+		product := candidates[0]
+		if len(candidates) > 1 {
+			// Several products share the name (e.g. price variants created by
+			// the stock summary import). Prefer the one whose prices match the
+			// row; fall back to a single-price match, then the first.
+			matched := false
+			for _, p := range candidates {
+				if p.PurchasePrice == purchasePrice && p.SalePrice == sellingPrice {
+					product = p
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				for _, p := range candidates {
+					if p.PurchasePrice == purchasePrice || p.SalePrice == sellingPrice {
+						product = p
+						matched = true
+						break
+					}
+				}
+			}
+			if !matched {
+				errs = append(errs, fmt.Sprintf(
+					"Row %d (%s): multiple products share this name and none match purchase %.2f / sale %.2f — using the first",
+					rowNum, name, purchasePrice, sellingPrice))
+			}
+		}
+
+		dupKey := product.ID.String() + "\x00" + batchNo
+		if prevRow, dup := seen[dupKey]; dup {
+			errs = append(errs, fmt.Sprintf(
+				"Row %d (%s): duplicate product+batch %q (first seen on row %d) — keeping latest",
+				rowNum, name, batchNo, prevRow))
+		}
+		seen[dupKey] = rowNum
+
+		// Enable batching on products that now carry a batch number.
+		if batchNo != "" && !product.EnableBatching {
+			product.EnableBatching = true
+			if err := utils.DB.Model(&product).Update("enable_batching", true).Error; err != nil {
+				errs = append(errs, fmt.Sprintf("Row %d (%s): failed to enable batching: %v", rowNum, name, err))
+			}
+		}
+
+		// Sync the unit parsed from the "Current Stock" suffix (e.g. "1.0 PCS").
+		stockRaw := csvFirst(row, header, "Current Stock", "Stock Quantity", "StockQuantity")
+		if unit := parseStockUnit(stockRaw); unit != "" && !strings.EqualFold(product.Unit, unit) {
+			product.Unit = unit
+			if err := utils.DB.Model(&product).Update("unit", unit).Error; err != nil {
+				errs = append(errs, fmt.Sprintf("Row %d (%s): failed to update unit: %v", rowNum, name, err))
+			}
+		}
+
+		// --- 2. Parse correction values ---
+		var mfgDate, expDate *time.Time
+		if v := csvFirst(row, header, "MFG Date", "Mfg Date", "mfg date", "Manufacturing Date"); v != "" {
+			if t, e := parseImportDate(v); e == nil {
+				mfgDate = &t
+			} else {
+				errs = append(errs, fmt.Sprintf("Row %d (%s): invalid MFG date %q", rowNum, name, v))
+			}
+		}
+		if v := csvFirst(row, header, "Expiry Date", "Exp Date", "exp. date", "ExpDate"); v != "" {
+			if t, e := parseImportDate(v); e == nil {
+				expDate = &t
+			} else {
+				errs = append(errs, fmt.Sprintf("Row %d (%s): invalid expiry date %q", rowNum, name, v))
+			}
+		}
+		// A blank Current Stock cell means "leave quantity unchanged".
+		updateQty := strings.TrimSpace(stockRaw) != ""
+		qty := parseStockQty(stockRaw)
+
+		// --- 3. Upsert the batch stock row ---
+		var stock models.InventoryStock
+		queryErr := utils.DB.Where(
+			"user_id = ? AND product_id = ? AND outlet_id = ? AND batch_no = ?",
+			userID, product.ID, defaultWH, batchNo,
+		).First(&stock).Error
+
+		if queryErr == nil {
+			if updateQty {
+				stock.Quantity = qty
+				stock.AvailableQty = qty - stock.ReservedQty
+			}
+			if purchasePrice > 0 {
+				stock.AverageCost = purchasePrice
+			}
+			if mfgDate != nil {
+				stock.MfgDate = mfgDate
+			}
+			if expDate != nil {
+				stock.ExpDate = expDate
+			}
+			stock.LastUpdated = time.Now()
+			if err := utils.DB.Save(&stock).Error; err != nil {
+				errs = append(errs, fmt.Sprintf("Row %d (%s): failed to update stock: %v", rowNum, name, err))
+				continue
+			}
+			stockUpdated++
+		} else {
+			stock = models.InventoryStock{
+				ID:              uuid.New(),
+				UserID:          userID,
+				ProductID:       product.ID,
+				OutletID:        defaultWH,
+				BatchNo:         batchNo,
+				MfgDate:         mfgDate,
+				ExpDate:         expDate,
+				Quantity:        qty,
+				InitialQuantity: qty,
+				AvailableQty:    qty,
+				AverageCost:     purchasePrice,
+				LastUpdated:     time.Now(),
+			}
+			if err := utils.DB.Create(&stock).Error; err != nil {
+				errs = append(errs, fmt.Sprintf("Row %d (%s): failed to create stock: %v", rowNum, name, err))
+				continue
+			}
+			stockCreated++
+		}
+		imported++
+	}
+
+	return map[string]interface{}{
+		"imported":      imported,
+		"stock_updated": stockUpdated,
+		"stock_created": stockCreated,
+	}, errs, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -1398,6 +1699,20 @@ func importPurchaseItemsRows(userID uuid.UUID, content []byte, progress services
 	header := all[0]
 	rows := all[1:]
 
+	// Fail fast when the file lacks the columns this importer needs. The
+	// common mistake is uploading the myBillBook purchase summary export
+	// (one row per bill) here instead of to "Purchases (bills)", which
+	// otherwise produces one "purchase bill not found" error per row.
+	if !csvHeaderHas(header, "item name", "Product Name", "Name") {
+		if csvHeaderHas(header, "Party Name", "Purchase Amount", "Purchase Date", "Purchase link") {
+			return nil, nil, errors.New(`this file looks like the myBillBook purchase summary export (one row per bill, no line items) — upload it to the "Purchases (bills)" importer instead`)
+		}
+		return nil, nil, errors.New(`missing required "item name" column — expected header: purchase number, item name, quantity, rate, amount`)
+	}
+	if !csvHeaderHas(header, "purchase number", "Purchase No", "Purchase No.", "Bill No", "Bill Number") {
+		return nil, nil, errors.New(`missing required "purchase number" column — expected header: purchase number, item name, quantity, rate, amount`)
+	}
+
 	imported := 0
 	var errs []string
 
@@ -1429,7 +1744,7 @@ func importPurchaseItemsRows(userID uuid.UUID, content []byte, progress services
 		if !ok {
 			var b models.PurchaseBill
 			if err := utils.DB.Where("user_id = ? AND bill_number = ?", userID, billNumber).First(&b).Error; err != nil {
-				errs = append(errs, fmt.Sprintf("Row %d (%s): purchase bill not found", rowNum, purchaseNo))
+				errs = append(errs, fmt.Sprintf("Row %d (%s): purchase bill not found — import \"Purchases (bills)\" first", rowNum, purchaseNo))
 				continue
 			}
 			bill = &b
@@ -1536,6 +1851,20 @@ func importSalesItemsRows(userID uuid.UUID, content []byte, progress services.Pr
 	header := all[0]
 	rows := all[1:]
 
+	// Fail fast when the file lacks the columns this importer needs. The
+	// common mistake is uploading the myBillBook "Sales" summary export
+	// (one row per invoice) here instead of to "Sales (invoices)", which
+	// otherwise produces one "invoice not found" error per row.
+	if !csvHeaderHas(header, "item name", "Product Name", "Name") {
+		if csvHeaderHas(header, "Contact Name", "Invoice Status", "Invoice Link", "Invoice Date") {
+			return nil, nil, errors.New(`this file looks like the myBillBook "Sales" summary export (one row per invoice, no line items) — upload it to the "Sales (invoices)" importer instead`)
+		}
+		return nil, nil, errors.New(`missing required "item name" column — expected header: invoice number, item name, quantity, rate, amount`)
+	}
+	if !csvHeaderHas(header, "invoice number", "Invoice No", "Invoice No.", "Invoice Number", "InvoiceNumber") {
+		return nil, nil, errors.New(`missing required "invoice number" column — expected header: invoice number, item name, quantity, rate, amount`)
+	}
+
 	imported := 0
 	var errs []string
 
@@ -1562,7 +1891,7 @@ func importSalesItemsRows(userID uuid.UUID, content []byte, progress services.Pr
 		if !ok {
 			var inv models.Invoice
 			if err := utils.DB.Where("user_id = ? AND invoice_number = ?", userID, invoiceNo).First(&inv).Error; err != nil {
-				errs = append(errs, fmt.Sprintf("Row %d (%s): invoice not found", rowNum, invoiceNo))
+				errs = append(errs, fmt.Sprintf("Row %d (%s): invoice not found — import \"Sales (invoices)\" first", rowNum, invoiceNo))
 				continue
 			}
 			invoice = &inv

@@ -24,6 +24,7 @@ var defaultPageFeatureKeys = []string{
 	"/debit-notes",
 	"/payment-outs",
 	"/invoices",
+	"/estimates",
 	"/delivery-challans",
 	"/sales-returns",
 	"/credit-notes",
