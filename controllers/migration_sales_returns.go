@@ -192,7 +192,9 @@ func importSalesReturnsRows(userID uuid.UUID, content []byte, _ map[string]strin
 				},
 			},
 		}
-		if err := utils.DB.Create(&ret).Error; err != nil {
+		// Omit InvoiceID so a NULL is written — the zero UUID would violate
+		// the fk_sales_returns_invoice constraint.
+		if err := utils.DB.Omit("InvoiceID", "Invoice").Create(&ret).Error; err != nil {
 			errs = append(errs, fmt.Sprintf("Row %d (%s): %v", rowNum, returnNumber, err))
 			continue
 		}

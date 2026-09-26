@@ -148,9 +148,9 @@ func mbMapPaymentMode(mode string) string {
 		return "upi"
 	case "cash":
 		return "cash"
-	case "bank", "bank transfer", "neft", "rtgs", "imps":
+	case "bank", "bank transfer", "bank trasfer", "netbanking", "net banking", "neft", "rtgs", "imps":
 		return "bank_transfer"
-	case "cheque":
+	case "cheque", "check":
 		return "cheque"
 	case "card":
 		return "card"
@@ -406,6 +406,12 @@ func openUploadedCSV(c *gin.Context) ([]byte, string, error) {
 // summary line (Description = "Migrated from myBillBook", qty 1, unit price =
 // total). The myBillBook Purchase link is stored in SourceURL so the source
 // document can be re-opened or re-downloaded later.
+//
+// Rows whose Purchase No matches an already-imported bill (matched
+// prefix-agnostic, so "1" matches "P-0001") are not re-created; instead the
+// bill's SourceURL is updated from the "Purchase link" column. Rows with no
+// matching bill are returned in "unmatched" unless importUnmatched is set,
+// in which case they are imported as new bills.
 // -----------------------------------------------------------------------------
 
 func ImportPurchaseBillsCSV(c *gin.Context) {
@@ -419,25 +425,86 @@ func ImportPurchaseBillsCSV(c *gin.Context) {
 
 	snapshotHTML := c.PostForm("snapshot_html") == "true"
 	defaultVendor := strings.TrimSpace(c.PostForm("default_vendor"))
-	imported, errs, err := importPurchaseBillsRows(userID, content, snapshotHTML, defaultVendor, nil)
+	importUnmatched := c.PostForm("import_unmatched") == "true"
+	result, errs, err := importPurchaseBillsRows(userID, content, snapshotHTML, defaultVendor, importUnmatched, nil)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"imported": imported, "errors": errs})
+	result["errors"] = errs
+	c.JSON(http.StatusOK, result)
 }
 
-func importPurchaseBillsRows(userID uuid.UUID, content []byte, snapshotHTML bool, defaultVendor string, progress services.ProgressFunc) (int, []string, error) {
+// unmatchedDocRow describes a summary row (purchase bill or sales invoice)
+// whose document number did not match any already-imported record. Returned
+// to the caller so the UI can list the rows and ask for confirmation before
+// creating new records for them.
+type unmatchedDocRow struct {
+	Row       int     `json:"row"`
+	Ref       string  `json:"ref"`
+	PartyName string  `json:"party_name"`
+	Amount    float64 `json:"amount"`
+}
+
+// docNumberKey normalizes a purchase bill / invoice number for matching by
+// stripping any non-numeric prefix ("P-", "PB-", "PINV-", "INV-") and leading
+// zeros, so a myBillBook "Purchase No" of "1" matches the stored "P-0001".
+func docNumberKey(s string) string {
+	s = strings.ToUpper(strings.TrimSpace(s))
+	i := 0
+	for i < len(s) && (s[i] < '0' || s[i] > '9') {
+		i++
+	}
+	key := strings.TrimLeft(s[i:], "0")
+	if key == "" {
+		return s
+	}
+	return key
+}
+
+func importPurchaseBillsRows(userID uuid.UUID, content []byte, snapshotHTML bool, defaultVendor string, importUnmatched bool, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 	header, rows, err := mbReadCSV(content, "Purchase No")
 	if err != nil {
-		return 0, nil, err
+		return nil, nil, err
 	}
 
 	imported := 0
+	updated := 0
 	var errs []string
+	unmatched := []unmatchedDocRow{}
 	seenLinks := map[string]bool{}
 
 	defaultWH := resolveDefaultWarehouseID(userID)
+
+	// Index already-imported bills so the summary's "Purchase No" can be
+	// matched to bill_number with or without the "P-" style prefix.
+	var bills []models.PurchaseBill
+	if err := utils.DB.Select("id", "bill_number", "source_url", "source_html_url").
+		Where("user_id = ?", userID).Find(&bills).Error; err != nil {
+		return nil, nil, fmt.Errorf("failed to load existing purchase bills: %w", err)
+	}
+	exactBills := map[string]*models.PurchaseBill{}
+	normBills := map[string]*models.PurchaseBill{}
+	for i := range bills {
+		b := &bills[i]
+		exactBills[b.BillNumber] = b
+		if key := docNumberKey(b.BillNumber); key != "" {
+			if _, exists := normBills[key]; !exists {
+				normBills[key] = b
+			}
+		}
+	}
+	findExisting := func(purchaseNo string) *models.PurchaseBill {
+		if b, ok := exactBills[purchaseNo]; ok {
+			return b
+		}
+		if key := docNumberKey(purchaseNo); key != "" {
+			if b, ok := normBills[key]; ok {
+				return b
+			}
+		}
+		return nil
+	}
 
 	for i, row := range rows {
 		if progress != nil {
@@ -454,6 +521,60 @@ func importPurchaseBillsRows(userID uuid.UUID, content []byte, snapshotHTML bool
 		}
 
 		partyName := strings.TrimSpace(mbFirstCSVValue(row, header, "Party Name", "Vendor", "Supplier"))
+		total := mbParseAmount(mbFirstCSVValue(row, header, "Purchase Amount", "Total Amount", "Amount"))
+		sourceURL := strings.TrimSpace(mbFirstCSVValue(row, header, "Purchase link", "Purchase Link", "Source URL", "Source Link"))
+
+		// Deduplicate by source link (myBillBook exports can contain a
+		// duplicate row sharing the same cpp link).
+		if sourceURL != "" {
+			if seenLinks[sourceURL] {
+				continue
+			}
+			seenLinks[sourceURL] = true
+		}
+
+		// Match against already-imported bills, ignoring number prefixes
+		// ("1" matches stored "P-0001"). Matched bills get their source
+		// document link refreshed from the "Purchase link" column.
+		if existing := findExisting(purchaseNo); existing != nil {
+			updates := map[string]interface{}{}
+			if sourceURL != "" && existing.SourceURL != sourceURL {
+				updates["source_url"] = sourceURL
+				existing.SourceURL = sourceURL
+			}
+			if snapshotHTML && sourceURL != "" {
+				if snap, serr := snapshotSourceHTML(userID, existing.BillNumber, sourceURL); serr == nil {
+					if snap != existing.SourceHTMLURL {
+						updates["source_html_url"] = snap
+						existing.SourceHTMLURL = snap
+					}
+				} else {
+					log.Printf("migration: snapshot failed for %s: %v", sourceURL, serr)
+				}
+			}
+			if len(updates) > 0 {
+				if err := utils.DB.Model(&models.PurchaseBill{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
+					errs = append(errs, fmt.Sprintf("Row %d (%s): failed to update purchase link: %v", rowNum, purchaseNo, err))
+					continue
+				}
+				updated++
+			}
+			continue
+		}
+
+		// No matching bill in the already-imported data — list the row for
+		// confirmation unless the caller already opted in to creating
+		// unmatched bills (import_unmatched=true).
+		if !importUnmatched {
+			unmatched = append(unmatched, unmatchedDocRow{
+				Row:       rowNum,
+				Ref:       purchaseNo,
+				PartyName: partyName,
+				Amount:    total,
+			})
+			continue
+		}
+
 		if partyName == "" {
 			partyName = defaultVendor
 		}
@@ -473,8 +594,6 @@ func importPurchaseBillsRows(userID uuid.UUID, content []byte, snapshotHTML bool
 			billDate = time.Now()
 		}
 
-		total := mbParseAmount(mbFirstCSVValue(row, header, "Purchase Amount", "Total Amount", "Amount"))
-		sourceURL := strings.TrimSpace(mbFirstCSVValue(row, header, "Purchase link", "Purchase Link", "Source URL", "Source Link"))
 		notes := strings.TrimSpace(mbFirstCSVValue(row, header, "Notes"))
 		origInvNo := strings.TrimSpace(mbFirstCSVValue(row, header, "Original Invoice No", "Original Invoice Number"))
 		if origInvNo != "" {
@@ -484,24 +603,9 @@ func importPurchaseBillsRows(userID uuid.UUID, content []byte, snapshotHTML bool
 			notes += "Original invoice no: " + origInvNo
 		}
 
-		// Deduplicate by source link (myBillBook exports can contain a
-		// duplicate row sharing the same cpp link).
-		if sourceURL != "" {
-			if seenLinks[sourceURL] {
-				continue
-			}
-			seenLinks[sourceURL] = true
-		}
-
 		billNumber := fmt.Sprintf("P-%04s", purchaseNo)
 		if strings.HasPrefix(purchaseNo, "P-") {
 			billNumber = purchaseNo
-		}
-
-		// Skip if a bill with the same number already exists for this user.
-		var existing models.PurchaseBill
-		if err := utils.DB.Where("user_id = ? AND bill_number = ?", userID, billNumber).First(&existing).Error; err == nil {
-			continue
 		}
 
 		sourceHTMLURL := ""
@@ -557,8 +661,19 @@ func importPurchaseBillsRows(userID uuid.UUID, content []byte, snapshotHTML bool
 			continue
 		}
 		imported++
+		// Index the new bill so a repeated row later in the same file is
+		// treated as a match instead of being created twice.
+		newBill := bill
+		exactBills[billNumber] = &newBill
+		if key := docNumberKey(billNumber); key != "" {
+			normBills[key] = &newBill
+		}
 	}
-	return imported, errs, nil
+	return map[string]interface{}{
+		"imported":  imported,
+		"updated":   updated,
+		"unmatched": unmatched,
+	}, errs, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -571,9 +686,15 @@ func importPurchaseBillsRows(userID uuid.UUID, content []byte, snapshotHTML bool
 //
 // Because the export has no line items, each invoice is created with a single
 // summary line (Description = "Migrated from myBillBook", qty 1, unit price =
-// total). The myBillBook Invoice Link is stored in Notes so the source document
-// can be re-opened later. Remaining Amount drives AmountPaid
+// total). The myBillBook Invoice Link is stored in SourceURL so the source
+// document can be re-opened later. Remaining Amount drives AmountPaid
 // (= TotalAmount - Remaining Amount).
+//
+// Rows whose Invoice No matches an already-imported invoice (matched
+// prefix-agnostic, so "1" matches "INV-0001") are not re-created; instead the
+// invoice's SourceURL is updated from the "Invoice Link" column.
+// Rows with no matching invoice are returned in "unmatched" unless
+// importUnmatched is set, in which case they are imported as new invoices.
 // -----------------------------------------------------------------------------
 
 func ImportSalesCSV(c *gin.Context) {
@@ -585,12 +706,14 @@ func ImportSalesCSV(c *gin.Context) {
 		return
 	}
 
-	imported, errs, err := importSalesRows(userID, content, nil)
+	importUnmatched := c.PostForm("import_unmatched") == "true"
+	result, errs, err := importSalesRows(userID, content, importUnmatched, nil)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"imported": imported, "errors": errs})
+	result["errors"] = errs
+	c.JSON(http.StatusOK, result)
 }
 
 // mapSaleInvoiceStatus normalizes a myBillBook sale status to a TruERP
@@ -616,19 +739,66 @@ func mapSaleInvoiceStatus(value string) string {
 	}
 }
 
-func importSalesRows(userID uuid.UUID, content []byte, progress services.ProgressFunc) (int, []string, error) {
+// invoiceNumberIndex loads the user's invoices and indexes them by
+// invoice_number — exact and prefix-normalized — so a summary "Invoice No"
+// can be matched to invoice_number with or without a prefix ("1" ↔ "INV-0001").
+func invoiceNumberIndex(userID uuid.UUID) (exact, norm map[string]*models.Invoice, err error) {
+	var invoices []models.Invoice
+	if err := utils.DB.Select("id", "invoice_number", "source_url").
+		Where("user_id = ?", userID).Find(&invoices).Error; err != nil {
+		return nil, nil, fmt.Errorf("failed to load existing invoices: %w", err)
+	}
+	exact = map[string]*models.Invoice{}
+	norm = map[string]*models.Invoice{}
+	for i := range invoices {
+		inv := &invoices[i]
+		exact[inv.InvoiceNumber] = inv
+		if key := docNumberKey(inv.InvoiceNumber); key != "" {
+			if _, exists := norm[key]; !exists {
+				norm[key] = inv
+			}
+		}
+	}
+	return exact, norm, nil
+}
+
+// findInvoiceInIndex looks up an invoice by number, exact match first, then
+// prefix-normalized.
+func findInvoiceInIndex(exact, norm map[string]*models.Invoice, number string) *models.Invoice {
+	if inv, ok := exact[number]; ok {
+		return inv
+	}
+	if key := docNumberKey(number); key != "" {
+		if inv, ok := norm[key]; ok {
+			return inv
+		}
+	}
+	return nil
+}
+
+func importSalesRows(userID uuid.UUID, content []byte, importUnmatched bool, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 	header, rows, err := mbReadCSV(content, "Invoice No")
 	if err != nil {
 		// Fall back to a plain header-first parse for non-myBillBook files.
 		header, rows, err = mbReadCSVPlain(content)
 		if err != nil {
-			return 0, nil, err
+			return nil, nil, err
 		}
 	}
 
 	imported := 0
+	updated := 0
 	var errs []string
+	unmatched := []unmatchedDocRow{}
 	seenLinks := map[string]bool{}
+
+	exactInvoices, normInvoices, err := invoiceNumberIndex(userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	findExisting := func(invoiceNo string) *models.Invoice {
+		return findInvoiceInIndex(exactInvoices, normInvoices, invoiceNo)
+	}
 
 	for i, row := range rows {
 		if progress != nil {
@@ -650,6 +820,47 @@ func importSalesRows(userID uuid.UUID, content []byte, progress services.Progres
 			continue
 		}
 		partyCategory := strings.TrimSpace(mbFirstCSVValue(row, header, "Party Category", "Category"))
+
+		total := mbParseAmount(mbFirstCSVValue(row, header, "Amount", "Total Amount", "Invoice Amount"))
+		invoiceLink := strings.TrimSpace(mbFirstCSVValue(row, header, "Invoice Link", "InvoiceLink", "Invoice link"))
+
+		// Deduplicate by invoice link (myBillBook exports can contain
+		// duplicate rows sharing the same link).
+		if invoiceLink != "" {
+			if seenLinks[invoiceLink] {
+				continue
+			}
+			seenLinks[invoiceLink] = true
+		}
+
+		// Match against already-imported invoices, ignoring number prefixes
+		// ("1" matches stored "INV-0001"). Matched invoices get their SourceURL
+		// refreshed from the "Invoice Link" column.
+		if existing := findExisting(invoiceNo); existing != nil {
+			if invoiceLink != "" && existing.SourceURL != invoiceLink {
+				if err := utils.DB.Model(&models.Invoice{}).Where("id = ?", existing.ID).Update("source_url", invoiceLink).Error; err != nil {
+					errs = append(errs, fmt.Sprintf("Row %d (%s): failed to update invoice link: %v", rowNum, invoiceNo, err))
+					continue
+				}
+				existing.SourceURL = invoiceLink
+				updated++
+			}
+			continue
+		}
+
+		// No matching invoice in the already-imported data — list the row for
+		// confirmation unless the caller already opted in to creating
+		// unmatched invoices (import_unmatched=true).
+		if !importUnmatched {
+			unmatched = append(unmatched, unmatchedDocRow{
+				Row:       rowNum,
+				Ref:       invoiceNo,
+				PartyName: partyName,
+				Amount:    total,
+			})
+			continue
+		}
+
 		partyID, perr := mbFindOrCreatePartyByName(utils.DB, userID, partyName, "customer")
 		if perr != nil {
 			errs = append(errs, fmt.Sprintf("Row %d (%s): %v", rowNum, invoiceNo, perr))
@@ -693,7 +904,6 @@ func importSalesRows(userID uuid.UUID, content []byte, progress services.Progres
 			}
 		}
 
-		total := mbParseAmount(mbFirstCSVValue(row, header, "Amount", "Total Amount", "Invoice Amount"))
 		remaining := mbParseAmount(mbFirstCSVValue(row, header, "Remaining Amount", "RemainingAmount", "Balance"))
 		amountPaid := total - remaining
 		if amountPaid < 0 {
@@ -706,29 +916,11 @@ func importSalesRows(userID uuid.UUID, content []byte, progress services.Progres
 		}
 
 		paymentMode := mbMapPaymentMode(mbFirstCSVValue(row, header, "Payment Type", "PaymentType", "Payment Mode", "PaymentMode"))
-		invoiceLink := strings.TrimSpace(mbFirstCSVValue(row, header, "Invoice Link", "InvoiceLink", "Invoice link"))
 		createdBy := strings.TrimSpace(mbFirstCSVValue(row, header, "Created by", "CreatedBy", "Created By"))
 
-		// Deduplicate by invoice link (myBillBook exports can contain
-		// duplicate rows sharing the same link).
-		if invoiceLink != "" {
-			if seenLinks[invoiceLink] {
-				continue
-			}
-			seenLinks[invoiceLink] = true
-		}
-
-		// Skip if an invoice with the same number already exists for this user.
-		var existing models.Invoice
-		if err := utils.DB.Where("user_id = ? AND invoice_number = ?", userID, invoiceNo).First(&existing).Error; err == nil {
-			continue
-		}
-
-		// Build notes from the optional Invoice Link and Created by columns.
+		// Build notes from the optional Created by column (the invoice link
+		// lives in SourceURL, not Notes).
 		var notesParts []string
-		if invoiceLink != "" {
-			notesParts = append(notesParts, "Invoice link: "+invoiceLink)
-		}
 		if createdBy != "" {
 			notesParts = append(notesParts, "Created by: "+createdBy)
 		}
@@ -748,6 +940,7 @@ func importSalesRows(userID uuid.UUID, content []byte, progress services.Progres
 			SubTotal:      total,
 			TotalAmount:   total,
 			Notes:         notes,
+			SourceURL:     invoiceLink,
 		}
 
 		// Single summary line — line items are not present in the export.
@@ -788,8 +981,119 @@ func importSalesRows(userID uuid.UUID, content []byte, progress services.Progres
 		}
 
 		imported++
+		// Index the new invoice so a repeated row later in the same file is
+		// treated as a match instead of being created twice.
+		newInv := invoice
+		exactInvoices[invoiceNo] = &newInv
+		if key := docNumberKey(invoiceNo); key != "" {
+			normInvoices[key] = &newInv
+		}
 	}
-	return imported, errs, nil
+	return map[string]interface{}{
+		"imported":  imported,
+		"updated":   updated,
+		"unmatched": unmatched,
+	}, errs, nil
+}
+
+// -----------------------------------------------------------------------------
+// 3b. Sales invoice links CSV  —  POST /api/v1/migration/sales-links/import/csv
+//
+// Expected header (myBillBook "Sale Summary Report"):
+//   Invoice No, ..., Invoice Link, ...
+//
+// Backfills invoices.source_url for already-imported invoices whose
+// source_url is empty, matching "Invoice No" to invoice_number
+// prefix-agnostic ("1" matches "INV-0001"). Invoices that already have a link
+// are left unchanged; rows with no matching invoice are reported — nothing is
+// created by this importer.
+// -----------------------------------------------------------------------------
+
+func ImportSalesInvoiceLinksCSV(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	content, err := importFile(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	result, errs, perr := importSalesInvoiceLinkRows(userID, content, nil)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	result["errors"] = errs
+	c.JSON(http.StatusOK, result)
+}
+
+func importSalesInvoiceLinkRows(userID uuid.UUID, content []byte, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
+	header, rows, err := mbReadCSV(content, "Invoice No")
+	if err != nil {
+		// Fall back to a plain header-first parse for non-myBillBook files.
+		header, rows, err = mbReadCSVPlain(content)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	updated := 0
+	skipped := 0
+	var errs []string
+	seenLinks := map[string]bool{}
+
+	exactInvoices, normInvoices, err := invoiceNumberIndex(userID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	for i, row := range rows {
+		if progress != nil {
+			progress(i+1, len(rows), updated)
+		}
+		rowNum := i + 1
+		if len(row) == 0 {
+			continue
+		}
+		invoiceNo := strings.TrimSpace(mbFirstCSVValue(row, header, "Invoice No", "Invoice No.", "Invoice Number", "InvoiceNumber"))
+		if invoiceNo == "" {
+			errs = append(errs, fmt.Sprintf("Row %d: Invoice No is required", rowNum))
+			continue
+		}
+		link := strings.TrimSpace(mbFirstCSVValue(row, header, "Invoice Link", "InvoiceLink", "Invoice link"))
+		if link == "" {
+			skipped++
+			continue
+		}
+		// Deduplicate by invoice link (myBillBook exports can contain
+		// duplicate rows sharing the same link).
+		if seenLinks[link] {
+			continue
+		}
+		seenLinks[link] = true
+
+		existing := findInvoiceInIndex(exactInvoices, normInvoices, invoiceNo)
+		if existing == nil {
+			errs = append(errs, fmt.Sprintf("Row %d (%s): invoice not found", rowNum, invoiceNo))
+			continue
+		}
+		// Only fill invoices that do not already have a source link.
+		if existing.SourceURL != "" {
+			skipped++
+			continue
+		}
+		if err := utils.DB.Model(&models.Invoice{}).Where("id = ?", existing.ID).Update("source_url", link).Error; err != nil {
+			errs = append(errs, fmt.Sprintf("Row %d (%s): failed to update invoice link: %v", rowNum, invoiceNo, err))
+			continue
+		}
+		existing.SourceURL = link
+		updated++
+	}
+	return map[string]interface{}{
+		"imported": updated,
+		"updated":  updated,
+		"skipped":  skipped,
+	}, errs, nil
 }
 
 // snapshotSourceHTML fetches the source URL once and stores the HTML body via
@@ -1405,9 +1709,11 @@ func importMyBillBookZIPRows(userID uuid.UUID, body []byte, options map[string]s
 		addStep("parties", 0, []string{"all_party_balance_*.csv not found in ZIP"})
 	}
 
-	// 2. Purchase bills (with optional HTML snapshot of source links).
+	// 2. Purchase bills (with optional HTML snapshot of source links). The ZIP
+	// orchestrator is non-interactive, so unmatched rows are always imported.
 	if content, ok := findFile(files, "purchase_summary"); ok {
-		n, errs, _ := importPurchaseBillsRows(userID, content, snapshotHTML, "", makeProgress())
+		res, errs, _ := importPurchaseBillsRows(userID, content, snapshotHTML, "", true, makeProgress())
+		n, _ := res["imported"].(int)
 		addStep("purchase_bills", n, errs)
 		offset += rowCount(content, "Purchase No")
 	} else {

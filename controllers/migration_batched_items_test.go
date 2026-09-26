@@ -30,9 +30,10 @@ func openBatchedItemsTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-// The batched items report updates expiry/mfg dates and current stock on
-// existing products. Unknown products are errors; missing batch stock rows
-// are created; duplicate product+batch rows keep the last value.
+// The batched items report is an audit tool: it updates expiry/mfg dates on
+// matching inventory batches and reports stock quantity mismatches without
+// changing quantities. Unknown products and unmatched batches are errors;
+// duplicate product+batch rows flag a warning.
 func TestImportBatchedItemsRows(t *testing.T) {
 	db := openBatchedItemsTestDB(t)
 	previousDB := utils.DB
@@ -57,20 +58,16 @@ func TestImportBatchedItemsRows(t *testing.T) {
 		t.Fatal("no default warehouse")
 	}
 
-	// Seed one existing stock row for p1/Batch #1.
-	existing := models.InventoryStock{
-		ID:           uuid.New(),
-		UserID:       userID,
-		ProductID:    p1.ID,
-		OutletID:     whID,
-		BatchNo:      "Batch #1",
-		Quantity:     3,
-		AvailableQty: 3,
-		AverageCost:  10,
-		LastUpdated:  time.Now(),
+	// Seed stock rows: p1/"Batch #1" (qty 3 → will mismatch the CSV's 7/9)
+	// and p2/"batch#2" (lowercase — exercises normalized batch matching).
+	stocks := []models.InventoryStock{
+		{ID: uuid.New(), UserID: userID, ProductID: p1.ID, OutletID: whID, BatchNo: "Batch #1", Quantity: 3, AvailableQty: 3, AverageCost: 10, LastUpdated: time.Now()},
+		{ID: uuid.New(), UserID: userID, ProductID: p2.ID, OutletID: whID, BatchNo: "batch#2", Quantity: 4, AvailableQty: 4, AverageCost: 12, LastUpdated: time.Now()},
 	}
-	if err := db.Create(&existing).Error; err != nil {
-		t.Fatalf("seed stock: %v", err)
+	for _, s := range stocks {
+		if err := db.Create(&s).Error; err != nil {
+			t.Fatalf("seed stock: %v", err)
+		}
 	}
 
 	content := []byte(`Item Name,Batch Number,Expiry Date,MFG Date,MRP,Purchase Price,Selling Price,Current Stock
@@ -85,27 +82,37 @@ Widget A,Batch #1,31/12/2026,01/01/2025,25.0,10.0,20.0,9.0 PCS
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	if got := result["imported"].(int); got != 4 {
-		t.Fatalf("imported = %d, want 4", got)
+	if got := result["imported"].(int); got != 3 {
+		t.Fatalf("imported = %d, want 3", got)
 	}
-	if got := result["stock_updated"].(int); got != 2 {
-		t.Fatalf("stock_updated = %d, want 2 (dup row re-updates)", got)
+	if got := result["stock_updated"].(int); got != 3 {
+		t.Fatalf("stock_updated = %d, want 3", got)
 	}
-	if got := result["stock_created"].(int); got != 2 {
-		t.Fatalf("stock_created = %d, want 2", got)
-	}
-	// Expect: unknown product + duplicate row warning.
-	if len(errs) != 2 {
-		t.Fatalf("errors = %v, want 2", errs)
+	// Expect: unmatched batch (Widget B), unknown product (Ghost Item),
+	// duplicate row warning.
+	if len(errs) != 3 {
+		t.Fatalf("errors = %v, want 3", errs)
 	}
 
-	// The last duplicate row wins: qty 9, not 7.
+	// Rows 1 and 5 report stock mismatches (CSV 7/9 vs inventory 3).
+	mismatches := result["mismatches"].([]batchStockMismatch)
+	if len(mismatches) != 2 {
+		t.Fatalf("mismatches = %v, want 2", mismatches)
+	}
+	if mismatches[0].Row != 1 || mismatches[0].CSVStock != 7 || mismatches[0].InventoryStock != 3 {
+		t.Fatalf("mismatch[0] = %+v, want row 1 csv 7 inv 3", mismatches[0])
+	}
+	if mismatches[1].Row != 5 || mismatches[1].CSVStock != 9 || mismatches[1].InventoryStock != 3 {
+		t.Fatalf("mismatch[1] = %+v, want row 5 csv 9 inv 3", mismatches[1])
+	}
+
+	// Report-only: the quantity is left unchanged, dates are updated.
 	var s1 models.InventoryStock
 	if err := db.Where("product_id = ? AND batch_no = ?", p1.ID, "Batch #1").First(&s1).Error; err != nil {
 		t.Fatalf("load stock: %v", err)
 	}
-	if s1.Quantity != 9 || s1.AvailableQty != 9 {
-		t.Fatalf("qty = %v avail = %v, want 9/9", s1.Quantity, s1.AvailableQty)
+	if s1.Quantity != 3 || s1.AvailableQty != 3 {
+		t.Fatalf("qty = %v avail = %v, want 3/3 (unchanged)", s1.Quantity, s1.AvailableQty)
 	}
 	if s1.ExpDate == nil || s1.ExpDate.Format("02/01/2006") != "31/12/2026" {
 		t.Fatalf("exp date = %v, want 31/12/2026", s1.ExpDate)
@@ -114,13 +121,18 @@ Widget A,Batch #1,31/12/2026,01/01/2025,25.0,10.0,20.0,9.0 PCS
 		t.Fatalf("mfg date = %v, want 01/01/2025", s1.MfgDate)
 	}
 
-	// Price disambiguation: BATCH#2 must land on the 12/25 variant (p2).
+	// Price disambiguation + normalized batch match: BATCH#2 landed on the
+	// 12/25 variant (p2) via its lowercase "batch#2" row; equal qty → no
+	// mismatch, expiry date updated.
 	var s2 models.InventoryStock
-	if err := db.Where("product_id = ? AND batch_no = ?", p2.ID, "BATCH#2").First(&s2).Error; err != nil {
+	if err := db.Where("product_id = ? AND batch_no = ?", p2.ID, "batch#2").First(&s2).Error; err != nil {
 		t.Fatalf("load stock p2: %v", err)
 	}
 	if s2.Quantity != 4 {
 		t.Fatalf("p2 qty = %v, want 4", s2.Quantity)
+	}
+	if s2.ExpDate == nil || s2.ExpDate.Format("02/01/2006") != "15/06/2027" {
+		t.Fatalf("p2 exp date = %v, want 15/06/2027", s2.ExpDate)
 	}
 	// Batching is enabled since the row carried a batch number.
 	var p2After models.Product
@@ -131,22 +143,13 @@ Widget A,Batch #1,31/12/2026,01/01/2025,25.0,10.0,20.0,9.0 PCS
 		t.Fatal("p2 enable_batching = false, want true")
 	}
 
-	// Negative quantities are imported as-is (stock correction).
-	var s3 models.InventoryStock
-	if err := db.Where("product_id = ? AND batch_no = ?", p3.ID, "Batch #1").First(&s3).Error; err != nil {
-		t.Fatalf("load stock p3: %v", err)
-	}
-	if s3.Quantity != -2 {
-		t.Fatalf("p3 qty = %v, want -2", s3.Quantity)
-	}
-
-	// Re-import is idempotent: no new products or duplicate stock rows.
+	// Re-import is idempotent: no new products or stock rows are created.
 	result, errs, err = importBatchedItemsRows(userID, content, nil, nil)
 	if err != nil {
 		t.Fatalf("re-import: %v", err)
 	}
-	if got := result["stock_created"].(int); got != 0 {
-		t.Fatalf("re-import stock_created = %d, want 0", got)
+	if got := len(result["mismatches"].([]batchStockMismatch)); got != 2 {
+		t.Fatalf("re-import mismatches = %d, want 2", got)
 	}
 	var productCount, stockCount int64
 	db.Model(&models.Product{}).Where("user_id = ?", userID).Count(&productCount)
@@ -154,7 +157,7 @@ Widget A,Batch #1,31/12/2026,01/01/2025,25.0,10.0,20.0,9.0 PCS
 	if productCount != 3 {
 		t.Fatalf("products = %d, want 3", productCount)
 	}
-	if stockCount != 3 {
-		t.Fatalf("stock rows = %d, want 3", stockCount)
+	if stockCount != 2 {
+		t.Fatalf("stock rows = %d, want 2", stockCount)
 	}
 }

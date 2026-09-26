@@ -219,6 +219,49 @@ func runRawMigrations(db *gorm.DB) {
 	migrateWarehouseCodeUnique(db)
 	backfillProductGstEnabled(db)
 	BackfillProductPLUs(db)
+	backfillInvoiceSourceLinks(db)
+}
+
+// backfillInvoiceSourceLinks moves myBillBook "Invoice link: <url>" segments
+// previously stored inside invoices.notes into the dedicated source_url
+// column and removes them from notes so they render as a link, not note text.
+func backfillInvoiceSourceLinks(db *gorm.DB) {
+	if !db.Migrator().HasColumn(&models.Invoice{}, "source_url") {
+		return
+	}
+	const prefix = "Invoice link: "
+	var invoices []models.Invoice
+	if err := db.Select("id", "notes", "source_url").
+		Where("notes LIKE ?", "%"+prefix+"%").
+		Find(&invoices).Error; err != nil {
+		log.Printf("backfillInvoiceSourceLinks: load invoices failed: %v", err)
+		return
+	}
+	for _, inv := range invoices {
+		var link string
+		var kept []string
+		for _, part := range strings.Split(inv.Notes, " | ") {
+			if strings.HasPrefix(part, prefix) {
+				if link == "" {
+					link = strings.TrimSpace(strings.TrimPrefix(part, prefix))
+				}
+				continue
+			}
+			if strings.TrimSpace(part) != "" {
+				kept = append(kept, part)
+			}
+		}
+		if link == "" {
+			continue
+		}
+		updates := map[string]interface{}{"notes": strings.Join(kept, " | ")}
+		if inv.SourceURL == "" {
+			updates["source_url"] = link
+		}
+		if err := db.Model(&models.Invoice{}).Where("id = ?", inv.ID).Updates(updates).Error; err != nil {
+			log.Printf("backfillInvoiceSourceLinks: update invoice %s failed: %v", inv.ID, err)
+		}
+	}
 }
 
 func backfillProductGstEnabled(db *gorm.DB) {

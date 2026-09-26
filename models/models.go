@@ -195,28 +195,33 @@ type Invoice struct {
 	BankAccountID         *uuid.UUID     `json:"bank_account_id,omitempty" gorm:"type:uuid;index"`
 	PaymentSplits         []PaymentSplit `json:"payment_splits,omitempty" gorm:"-"`
 	Notes                 string         `json:"notes"`
-	Terms                 string         `json:"terms"`
-	IsInterState          bool           `json:"is_inter_state" gorm:"default:false"`
-	EWayBillRequired      bool           `json:"eway_bill_required" gorm:"default:false"`
-	EWayBillNumber        string         `json:"eway_bill_number"`
-	EWayBillStatus        string         `json:"eway_bill_status" gorm:"default:'pending'"` // pending, generated, cancelled
-	EWayBillValidUntil    *time.Time     `json:"eway_bill_valid_until,omitempty"`
-	Signature             string         `json:"signature"`                                 // Base64 encoded signature
-	CustomFields          string         `json:"custom_fields" gorm:"type:text"`            // JSON map of custom field key -> value
-	PDFTemplate           string         `json:"pdf_template"`                              // optional per-invoice layout: classic, modern, minimal
-	PlaceOfSupply         string         `json:"place_of_supply"`                           // State code for GST compliance
-	ReverseCharge         bool           `json:"reverse_charge" gorm:"default:false"`       // Reverse charge mechanism
-	IRN                   string         `json:"irn"`                                       // Invoice Reference Number for e-invoicing
-	EInvoiceStatus        string         `json:"e_invoice_status" gorm:"default:'pending'"` // pending, generated, cancelled
-	EInvoiceGeneratedAt   *time.Time     `json:"e_invoice_generated_at,omitempty"`
-	IsPOS                 bool           `json:"is_pos" gorm:"default:false"`
-	ClientSaleID          *uuid.UUID     `json:"client_sale_id,omitempty" gorm:"type:uuid;index;uniqueIndex:idx_invoice_user_client_sale"`
-	PosSessionID          *uuid.UUID     `json:"pos_session_id,omitempty" gorm:"type:uuid;index"`
-	Party                 Party          `json:"party,omitempty" gorm:"foreignKey:PartyID"`
-	Items                 []InvoiceItem  `json:"items" gorm:"foreignKey:InvoiceID;constraint:OnDelete:CASCADE;"`
-	CreatedAt             time.Time      `json:"created_at"`
-	UpdatedAt             time.Time      `json:"updated_at"`
-	DeletedAt             gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+	// SourceURL is the original external invoice link (e.g. myBillBook
+	// https://mybillbook.in/csi/<id>). Populated during migration import so
+	// the source document can be re-opened later. Kept out of Notes so it is
+	// rendered as a link instead of note text.
+	SourceURL           string         `json:"source_url" gorm:"type:text"`
+	Terms               string         `json:"terms"`
+	IsInterState        bool           `json:"is_inter_state" gorm:"default:false"`
+	EWayBillRequired    bool           `json:"eway_bill_required" gorm:"default:false"`
+	EWayBillNumber      string         `json:"eway_bill_number"`
+	EWayBillStatus      string         `json:"eway_bill_status" gorm:"default:'pending'"` // pending, generated, cancelled
+	EWayBillValidUntil  *time.Time     `json:"eway_bill_valid_until,omitempty"`
+	Signature           string         `json:"signature"`                                 // Base64 encoded signature
+	CustomFields        string         `json:"custom_fields" gorm:"type:text"`            // JSON map of custom field key -> value
+	PDFTemplate         string         `json:"pdf_template"`                              // optional per-invoice layout: classic, modern, minimal
+	PlaceOfSupply       string         `json:"place_of_supply"`                           // State code for GST compliance
+	ReverseCharge       bool           `json:"reverse_charge" gorm:"default:false"`       // Reverse charge mechanism
+	IRN                 string         `json:"irn"`                                       // Invoice Reference Number for e-invoicing
+	EInvoiceStatus      string         `json:"e_invoice_status" gorm:"default:'pending'"` // pending, generated, cancelled
+	EInvoiceGeneratedAt *time.Time     `json:"e_invoice_generated_at,omitempty"`
+	IsPOS               bool           `json:"is_pos" gorm:"default:false"`
+	ClientSaleID        *uuid.UUID     `json:"client_sale_id,omitempty" gorm:"type:uuid;index;uniqueIndex:idx_invoice_user_client_sale"`
+	PosSessionID        *uuid.UUID     `json:"pos_session_id,omitempty" gorm:"type:uuid;index"`
+	Party               Party          `json:"party,omitempty" gorm:"foreignKey:PartyID"`
+	Items               []InvoiceItem  `json:"items" gorm:"foreignKey:InvoiceID;constraint:OnDelete:CASCADE;"`
+	CreatedAt           time.Time      `json:"created_at"`
+	UpdatedAt           time.Time      `json:"updated_at"`
+	DeletedAt           gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type InvoiceItem struct {

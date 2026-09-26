@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -1246,10 +1247,9 @@ func parseStockUnit(value string) string {
 // -----------------------------------------------------------------------------
 // Item Batched Report  —  POST /api/v1/migration/batched-items/import/csv
 //
-// Parses a myBillBook-style "Item Batched Report" CSV and updates existing
-// batch stock rows. Unlike the stock summary importer this is a correction
-// tool: it never creates products — rows whose item name does not match an
-// existing product are reported as errors.
+// Parses a myBillBook-style "Item Batched Report" CSV and reconciles it
+// against existing batch stock rows. It is an audit tool: it never creates
+// products or stock rows — unmatched items/batches are reported as errors.
 //
 // Expected header:
 //   Item Name,Batch Number,Expiry Date,MFG Date,MRP,Purchase Price,Selling Price,Current Stock
@@ -1258,18 +1258,32 @@ func parseStockUnit(value string) string {
 //  1. The product is resolved by item name (trimmed, exact then
 //     case-insensitive). When several products share the name, the row's
 //     purchase/selling prices disambiguate.
-//  2. The InventoryStock row for (product, default warehouse, batch) is
-//     updated: ExpDate, MfgDate (when present), and Quantity from the
-//     "Current Stock" column (e.g. "1.0 PCS"). A missing stock row is created.
+//  2. The InventoryStock row for (product, batch) is matched — exact batch
+//     number first, then a case/whitespace-insensitive match — preferring
+//     the default warehouse. MfgDate and ExpDate are updated when present.
+//  3. The "Current Stock" column (e.g. "1.0 PCS") is compared against the
+//     inventory quantity; differences are reported in "mismatches" and the
+//     quantity is left unchanged.
 //
 // Returns:
 //   {
-//     "imported": <int>,        // rows processed
-//     "stock_updated": <int>,   // existing batch stock rows updated
-//     "stock_created": <int>,   // batch stock rows created
+//     "imported": <int>,        // rows matched to an existing batch
+//     "stock_updated": <int>,   // batch stock rows updated (dates/cost)
+//     "mismatches": [{row, item_name, batch_no, unit, csv_stock, inventory_stock}, ...],
 //     "errors": [string, ...]
 //   }
 // -----------------------------------------------------------------------------
+
+// batchStockMismatch is one row whose CSV "Current Stock" differs from the
+// matched inventory batch quantity.
+type batchStockMismatch struct {
+	Row            int     `json:"row"`
+	ItemName       string  `json:"item_name"`
+	BatchNo        string  `json:"batch_no"`
+	Unit           string  `json:"unit,omitempty"`
+	CSVStock       float64 `json:"csv_stock"`
+	InventoryStock float64 `json:"inventory_stock"`
+}
 
 func ImportBatchedItemsCSV(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
@@ -1288,7 +1302,7 @@ func ImportBatchedItemsCSV(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"imported":      result["imported"],
 		"stock_updated": result["stock_updated"],
-		"stock_created": result["stock_created"],
+		"mismatches":    result["mismatches"],
 		"errors":        errs,
 	})
 }
@@ -1335,9 +1349,9 @@ func importBatchedItemsRows(userID uuid.UUID, content []byte, _ map[string]strin
 	}
 
 	stockUpdated := 0
-	stockCreated := 0
 	imported := 0
 	var errs []string
+	mismatches := []batchStockMismatch{}
 
 	// Cache product candidates by lower(name) to avoid repeated lookups.
 	candidateCache := map[string][]models.Product{}
@@ -1447,53 +1461,38 @@ func importBatchedItemsRows(userID uuid.UUID, content []byte, _ map[string]strin
 		updateQty := strings.TrimSpace(stockRaw) != ""
 		qty := parseStockQty(stockRaw)
 
-		// --- 3. Upsert the batch stock row ---
-		var stock models.InventoryStock
-		queryErr := utils.DB.Where(
-			"user_id = ? AND product_id = ? AND outlet_id = ? AND batch_no = ?",
-			userID, product.ID, defaultWH, batchNo,
-		).First(&stock).Error
+		// --- 3. Match the batch stock row; update dates, report stock diffs ---
+		stock, found := findBatchStock(userID, product.ID, defaultWH, batchNo)
+		if !found {
+			errs = append(errs, fmt.Sprintf("Row %d (%s): batch %q not found in inventory", rowNum, name, batchNo))
+			continue
+		}
 
-		if queryErr == nil {
-			if updateQty {
-				stock.Quantity = qty
-				stock.AvailableQty = qty - stock.ReservedQty
-			}
-			if purchasePrice > 0 {
-				stock.AverageCost = purchasePrice
-			}
-			if mfgDate != nil {
-				stock.MfgDate = mfgDate
-			}
-			if expDate != nil {
-				stock.ExpDate = expDate
-			}
-			stock.LastUpdated = time.Now()
-			if err := utils.DB.Save(&stock).Error; err != nil {
-				errs = append(errs, fmt.Sprintf("Row %d (%s): failed to update stock: %v", rowNum, name, err))
-				continue
-			}
-			stockUpdated++
-		} else {
-			stock = models.InventoryStock{
-				ID:              uuid.New(),
-				UserID:          userID,
-				ProductID:       product.ID,
-				OutletID:        defaultWH,
-				BatchNo:         batchNo,
-				MfgDate:         mfgDate,
-				ExpDate:         expDate,
-				Quantity:        qty,
-				InitialQuantity: qty,
-				AvailableQty:    qty,
-				AverageCost:     purchasePrice,
-				LastUpdated:     time.Now(),
-			}
-			if err := utils.DB.Create(&stock).Error; err != nil {
-				errs = append(errs, fmt.Sprintf("Row %d (%s): failed to create stock: %v", rowNum, name, err))
-				continue
-			}
-			stockCreated++
+		if mfgDate != nil {
+			stock.MfgDate = mfgDate
+		}
+		if expDate != nil {
+			stock.ExpDate = expDate
+		}
+		if purchasePrice > 0 {
+			stock.AverageCost = purchasePrice
+		}
+		stock.LastUpdated = time.Now()
+		if err := utils.DB.Save(&stock).Error; err != nil {
+			errs = append(errs, fmt.Sprintf("Row %d (%s): failed to update batch: %v", rowNum, name, err))
+			continue
+		}
+		stockUpdated++
+
+		if updateQty && math.Abs(stock.Quantity-qty) > 1e-9 {
+			mismatches = append(mismatches, batchStockMismatch{
+				Row:            rowNum,
+				ItemName:       name,
+				BatchNo:        stock.BatchNo,
+				Unit:           parseStockUnit(stockRaw),
+				CSVStock:       qty,
+				InventoryStock: stock.Quantity,
+			})
 		}
 		imported++
 	}
@@ -1501,8 +1500,59 @@ func importBatchedItemsRows(userID uuid.UUID, content []byte, _ map[string]strin
 	return map[string]interface{}{
 		"imported":      imported,
 		"stock_updated": stockUpdated,
-		"stock_created": stockCreated,
+		"mismatches":    mismatches,
 	}, errs, nil
+}
+
+// normalizeBatchNo canonicalizes a batch number for matching: lowercased with
+// all whitespace and '#' removed, so "Batch #1", "BATCH #1" and "batch#1"
+// compare equal.
+func normalizeBatchNo(s string) string {
+	s = strings.Join(strings.Fields(s), "")
+	s = strings.ReplaceAll(s, "#", "")
+	return strings.ToLower(s)
+}
+
+// findBatchStock locates the InventoryStock row for a product batch. It tries
+// an exact batch_no match in the default warehouse first, then falls back to
+// a normalized (case/whitespace-insensitive) match across the product's stock
+// rows, preferring the default warehouse.
+func findBatchStock(userID, productID, defaultWH uuid.UUID, batchNo string) (models.InventoryStock, bool) {
+	var stock models.InventoryStock
+	err := utils.DB.Where(
+		"user_id = ? AND product_id = ? AND outlet_id = ? AND batch_no = ?",
+		userID, productID, defaultWH, batchNo,
+	).First(&stock).Error
+	if err == nil {
+		return stock, true
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return stock, false
+	}
+
+	var stocks []models.InventoryStock
+	if err := utils.DB.Where(
+		"user_id = ? AND product_id = ?", userID, productID,
+	).Find(&stocks).Error; err != nil {
+		return stock, false
+	}
+	target := normalizeBatchNo(batchNo)
+	fallback := -1
+	for i := range stocks {
+		if normalizeBatchNo(stocks[i].BatchNo) != target {
+			continue
+		}
+		if stocks[i].OutletID == defaultWH {
+			return stocks[i], true
+		}
+		if fallback == -1 {
+			fallback = i
+		}
+	}
+	if fallback >= 0 {
+		return stocks[fallback], true
+	}
+	return stock, false
 }
 
 // -----------------------------------------------------------------------------

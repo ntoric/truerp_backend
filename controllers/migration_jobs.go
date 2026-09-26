@@ -100,12 +100,15 @@ func RegisterMigrationRunners() {
 	register("purchase-bills", func(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 		snapshotHTML := options["snapshot_html"] == "true"
 		defaultVendor := options["default_vendor"]
-		n, errs, err := importPurchaseBillsRows(userID, content, snapshotHTML, defaultVendor, progress)
-		return map[string]interface{}{"imported": n}, errs, err
+		importUnmatched := options["import_unmatched"] == "true"
+		return importPurchaseBillsRows(userID, content, snapshotHTML, defaultVendor, importUnmatched, progress)
 	})
 	register("sales", func(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
-		n, errs, err := importSalesRows(userID, content, progress)
-		return map[string]interface{}{"imported": n}, errs, err
+		importUnmatched := options["import_unmatched"] == "true"
+		return importSalesRows(userID, content, importUnmatched, progress)
+	})
+	register("sales-links", func(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
+		return importSalesInvoiceLinkRows(userID, content, progress)
 	})
 	register("payments", func(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
 		res, err := importPaymentsRows(userID, content, progress)

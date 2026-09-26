@@ -973,6 +973,7 @@ func SetupRoutes(r *gin.Engine) {
 		migration.POST("/purchase-payments/import/csv", controllers.ImportPurchasePaymentStatusCSV)
 		migration.POST("/purchase-items/import/csv", controllers.ImportPurchaseItemsCSV)
 		migration.POST("/sales-items/import/csv", controllers.ImportSalesItemsCSV)
+		migration.POST("/sales-links/import/csv", controllers.ImportSalesInvoiceLinksCSV)
 		migration.POST("/sales/import/csv", controllers.ImportSalesCSV)
 		migration.POST("/purchase-returns/import/csv", controllers.ImportPurchaseReturnsCSV)
 		migration.POST("/sales-returns/import/csv", controllers.ImportSalesReturnsCSV)

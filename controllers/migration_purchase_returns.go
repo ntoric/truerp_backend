@@ -34,8 +34,10 @@ import (
 // Daybook / Cash & Bank statement importers. A pending "Balance Amount" is
 // noted on the return's notes.
 //
-// Idempotent: returns dedupe by return number, so re-running with the same
-// file is safe.
+// Idempotent: returns dedupe by content signature (party + date + amount)
+// rather than return number, so re-running is a no-op even if a previous
+// migration used a different numbering scheme or an app-created return
+// coincidentally shares the generated number.
 // -----------------------------------------------------------------------------
 
 func ImportPurchaseReturnsCSV(c *gin.Context) {
@@ -81,6 +83,24 @@ func importPurchaseReturnsRows(userID uuid.UUID, content []byte, _ map[string]st
 		}
 		partyCache[key] = id
 		return id, nil
+	}
+
+	// Load existing returns once. Dedupe is by content signature
+	// (party + date + amount): an earlier migration may have used a
+	// different numbering scheme, and an app-created return may share a
+	// generated number without being the same document.
+	var existing []models.PurchaseReturn
+	utils.DB.Select("return_number", "party_id", "amount", "date").
+		Where("user_id = ?", userID).Find(&existing)
+
+	sigOf := func(partyID uuid.UUID, d time.Time, amount float64) string {
+		return fmt.Sprintf("%s|%s|%.2f", partyID, d.Format("2006-01-02"), amount)
+	}
+	seenSigs := map[string]bool{}
+	usedNumbers := map[string]bool{}
+	for _, e := range existing {
+		seenSigs[sigOf(e.PartyID, e.Date, e.Amount)] = true
+		usedNumbers[strings.ToUpper(strings.TrimSpace(e.ReturnNumber))] = true
 	}
 
 	imported := 0
@@ -134,26 +154,35 @@ func importPurchaseReturnsRows(userID uuid.UUID, content []byte, _ map[string]st
 			errs = append(errs, fmt.Sprintf("Row %d (%s): Sr No. is required", rowNum, name))
 			continue
 		}
-		returnNumber := txnNo
-		if !strings.HasPrefix(strings.ToUpper(txnNo), "PR-") {
-			returnNumber = fmt.Sprintf("PR-%04s", txnNo)
-		}
-
-		// Dedupe by return number so re-imports are a no-op.
-		var existing models.PurchaseReturn
-		if err := utils.DB.Where("user_id = ? AND return_number = ?", userID, returnNumber).First(&existing).Error; err == nil {
-			skipped++
-			continue
-		}
-
 		if name == "" {
-			errs = append(errs, fmt.Sprintf("Row %d (%s): vendor name is required", rowNum, returnNumber))
+			errs = append(errs, fmt.Sprintf("Row %d (PR-%s): vendor name is required", rowNum, txnNo))
 			continue
 		}
 		partyID, perr := findParty(name, "vendor")
 		if perr != nil {
 			errs = append(errs, fmt.Sprintf("Row %d (%s): %v", rowNum, name, perr))
 			continue
+		}
+
+		// Already imported (or manually entered) — the same return exists
+		// under whatever number it was given.
+		sig := sigOf(partyID, date, total)
+		if seenSigs[sig] {
+			skipped++
+			continue
+		}
+
+		// Number as PR-<Sr No.> zero-padded to match the app's own
+		// convention. If that number is already taken by an unrelated
+		// document (e.g. an app-created return), fall back to a suffixed
+		// variant rather than overwriting or skipping the row.
+		base := txnNo
+		if !strings.HasPrefix(strings.ToUpper(txnNo), "PR-") {
+			base = fmt.Sprintf("PR-%04s", txnNo)
+		}
+		returnNumber := base
+		for suffix := 2; usedNumbers[strings.ToUpper(returnNumber)]; suffix++ {
+			returnNumber = fmt.Sprintf("%s-%d", base, suffix)
 		}
 
 		notes := ""
@@ -192,10 +221,14 @@ func importPurchaseReturnsRows(userID uuid.UUID, content []byte, _ map[string]st
 				},
 			},
 		}
-		if err := utils.DB.Create(&ret).Error; err != nil {
+		// Omit PurchaseBillID so a NULL is written — the zero UUID would
+		// violate the fk_purchase_returns_purchase_bill constraint.
+		if err := utils.DB.Omit("PurchaseBillID", "PurchaseBill").Create(&ret).Error; err != nil {
 			errs = append(errs, fmt.Sprintf("Row %d (%s): %v", rowNum, returnNumber, err))
 			continue
 		}
+		seenSigs[sig] = true
+		usedNumbers[strings.ToUpper(returnNumber)] = true
 		imported++
 	}
 
