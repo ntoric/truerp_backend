@@ -975,7 +975,7 @@ func importSalesRows(userID uuid.UUID, content []byte, importUnmatched bool, pro
 		}
 		if invoice.AmountPaid > 0 {
 			payNotes := fmt.Sprintf("Auto-created from sale import %s", invoiceNo)
-			if err := createLinkedSalePaymentIn(utils.DB, userID, &invoice, invoice.AmountPaid, invoice.Date, payNotes); err != nil {
+			if err := createLinkedSalePaymentInMigration(utils.DB, userID, &invoice, invoice.AmountPaid, invoice.Date, payNotes); err != nil {
 				log.Printf("migration: sale payment-in error for %s: %v", invoiceNo, err)
 			}
 		}
@@ -1248,7 +1248,6 @@ func importOnePaymentIn(userID uuid.UUID, header, row []string, rowNum int) (int
 		if err := utils.DB.Create(&p).Error; err != nil {
 			return 0, []string{fmt.Sprintf("Row %d: %v", rowNum, err)}
 		}
-		updatePartyBalance(utils.DB, partyID, -received)
 		return 1, nil
 	}
 
@@ -1291,9 +1290,6 @@ func importOnePaymentIn(userID uuid.UUID, header, row []string, rowNum int) (int
 		}
 		remaining -= alloc
 		created++
-	}
-	if created > 0 {
-		updatePartyBalance(utils.DB, partyID, -received)
 	}
 	return created, nil
 }
@@ -1353,7 +1349,6 @@ func importOnePaymentOut(userID uuid.UUID, header, row []string, rowNum int, isP
 	if purchaseBillID != nil {
 		markPurchaseBillPaid(utils.DB, userID, *purchaseBillID, paid)
 	}
-	updatePartyBalance(utils.DB, partyID, paid)
 	return 1, nil
 }
 
@@ -1432,10 +1427,6 @@ func markPurchaseBillPaid(db *gorm.DB, userID, billID uuid.UUID, amount float64)
 	})
 }
 
-func updatePartyBalance(db *gorm.DB, partyID uuid.UUID, delta float64) {
-	db.Model(&models.Party{}).Where("id = ?", partyID).
-		UpdateColumn("balance", gorm.Expr("balance + ?", delta))
-}
 
 // -----------------------------------------------------------------------------
 // 4. Expenses CSV importer  —  POST /api/v1/expenses/import/csv

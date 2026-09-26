@@ -1122,7 +1122,6 @@ func stmtImportSalesReturnRow(userID uuid.UUID, number, txnNo, partyName, notes,
 		tx.Rollback()
 		return 0, []string{fmt.Sprintf("sales return %s: %v", txnNo, err)}
 	}
-	updatePartyBalance(tx, partyID, paid)
 	if err := tx.Commit().Error; err != nil {
 		return 0, []string{fmt.Sprintf("sales return %s: %v", txnNo, err)}
 	}
@@ -1166,7 +1165,6 @@ func stmtImportPurchaseReturnRow(userID uuid.UUID, number, txnNo, partyName, not
 		tx.Rollback()
 		return 0, []string{fmt.Sprintf("purchase return %s: %v", txnNo, err)}
 	}
-	updatePartyBalance(tx, partyID, -received)
 	if err := tx.Commit().Error; err != nil {
 		return 0, []string{fmt.Sprintf("purchase return %s: %v", txnNo, err)}
 	}

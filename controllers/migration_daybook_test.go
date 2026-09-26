@@ -273,13 +273,14 @@ Date,Name,Transaction Type,Sr No.,Total Amount,Money In,Money Out,Balance Amount
 		t.Fatalf("cash txns add=%d reduce=%d expense=%d, want 8/5/1", addN, reduceN, expenseN)
 	}
 
-	// Party balances: Acme -= paid-to-us amounts and += refund paid back.
+	// Party balances are not touched by migration — they are imported
+	// separately via the party balance file.
 	var acme models.Party
 	if err := db.First(&acme, "id = ?", party.ID).Error; err != nil {
 		t.Fatalf("load party: %v", err)
 	}
-	if acme.Balance != -2060 {
-		t.Fatalf("Acme balance = %v, want -2060", acme.Balance)
+	if acme.Balance != 0 {
+		t.Fatalf("Acme balance = %v, want 0", acme.Balance)
 	}
 
 	// Re-running the same file must be a complete no-op.

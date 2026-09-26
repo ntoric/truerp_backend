@@ -288,7 +288,7 @@ func daybookImportSaleRow(userID uuid.UUID, txnNo, partyName, notes string, tota
 		tx.Rollback()
 		return 0, []string{fmt.Sprintf("invoice %s: %v", txnNo, err)}
 	}
-	if err := createLinkedSalePaymentInWithMode(tx, userID, &invoice, moneyIn, "cash", nil, date, notes); err != nil {
+	if err := createLinkedSalePaymentInWithModeMigration(tx, userID, &invoice, moneyIn, "cash", nil, date, notes); err != nil {
 		tx.Rollback()
 		return 0, []string{fmt.Sprintf("invoice %s: %v", txnNo, err)}
 	}
@@ -377,7 +377,7 @@ func daybookImportPurchaseBillRow(userID uuid.UUID, txnNo, partyName, notes stri
 		tx.Rollback()
 		return 0, []string{fmt.Sprintf("purchase bill %s: %v", billNumber, err)}
 	}
-	if err := createLinkedPurchasePaymentOut(tx, userID, &bill, paid, date, notes); err != nil {
+	if err := createLinkedPurchasePaymentOutMigration(tx, userID, &bill, paid, date, notes); err != nil {
 		tx.Rollback()
 		return 0, []string{fmt.Sprintf("purchase bill %s: %v", billNumber, err)}
 	}
@@ -466,9 +466,6 @@ func daybookImportPaymentInRow(userID uuid.UUID, txnNo, partyName, notes string,
 		}
 		created++
 	}
-	if created > 0 {
-		updatePartyBalance(tx, partyID, -received)
-	}
 	if err := tx.Commit().Error; err != nil {
 		return 0, []string{fmt.Sprintf("payment-in %s: %v", txnNo, err)}
 	}
@@ -545,9 +542,6 @@ func daybookImportPaymentOutRow(userID uuid.UUID, txnNo, partyName, notes string
 			return 0, []string{fmt.Sprintf("payment-out %s: %v", txnNo, err)}
 		}
 		created++
-	}
-	if created > 0 {
-		updatePartyBalance(tx, partyID, paid)
 	}
 	if err := tx.Commit().Error; err != nil {
 		return 0, []string{fmt.Sprintf("payment-out %s: %v", txnNo, err)}

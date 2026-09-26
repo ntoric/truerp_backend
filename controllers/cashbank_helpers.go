@@ -80,6 +80,17 @@ func recordPurchasePaymentOut(tx *gorm.DB, userID uuid.UUID, accountID *uuid.UUI
 // and posts cash/bank + AR reduction. Invoice amount_paid/status must already be set.
 // When invoice.PaymentSplits is set, one Payment + cash transaction is created per split.
 func createLinkedSalePaymentIn(tx *gorm.DB, userID uuid.UUID, invoice *models.Invoice, amount float64, date time.Time, notes string) error {
+	return createLinkedSalePaymentInInternal(tx, userID, invoice, amount, date, notes, true)
+}
+
+// createLinkedSalePaymentInMigration behaves like createLinkedSalePaymentIn but
+// leaves the party balance unchanged — migrations import party balances from
+// the party balance file instead of deriving them from transactions.
+func createLinkedSalePaymentInMigration(tx *gorm.DB, userID uuid.UUID, invoice *models.Invoice, amount float64, date time.Time, notes string) error {
+	return createLinkedSalePaymentInInternal(tx, userID, invoice, amount, date, notes, false)
+}
+
+func createLinkedSalePaymentInInternal(tx *gorm.DB, userID uuid.UUID, invoice *models.Invoice, amount float64, date time.Time, notes string, adjustPartyBalance bool) error {
 	if amount <= 0 || invoice == nil {
 		return nil
 	}
@@ -88,7 +99,7 @@ func createLinkedSalePaymentIn(tx *gorm.DB, userID uuid.UUID, invoice *models.In
 		return err
 	}
 	for _, split := range resolved {
-		if err := createLinkedSalePaymentInWithMode(tx, userID, invoice, split.Amount, split.Mode, split.BankAccountID, date, notes); err != nil {
+		if err := createLinkedSalePaymentInWithModeInternal(tx, userID, invoice, split.Amount, split.Mode, split.BankAccountID, date, notes, adjustPartyBalance); err != nil {
 			return err
 		}
 	}
@@ -96,6 +107,17 @@ func createLinkedSalePaymentIn(tx *gorm.DB, userID uuid.UUID, invoice *models.In
 }
 
 func createLinkedSalePaymentInWithMode(tx *gorm.DB, userID uuid.UUID, invoice *models.Invoice, amount float64, mode string, accountID *uuid.UUID, date time.Time, notes string) error {
+	return createLinkedSalePaymentInWithModeInternal(tx, userID, invoice, amount, mode, accountID, date, notes, true)
+}
+
+// createLinkedSalePaymentInWithModeMigration behaves like
+// createLinkedSalePaymentInWithMode but leaves the party balance unchanged —
+// migrations import party balances separately.
+func createLinkedSalePaymentInWithModeMigration(tx *gorm.DB, userID uuid.UUID, invoice *models.Invoice, amount float64, mode string, accountID *uuid.UUID, date time.Time, notes string) error {
+	return createLinkedSalePaymentInWithModeInternal(tx, userID, invoice, amount, mode, accountID, date, notes, false)
+}
+
+func createLinkedSalePaymentInWithModeInternal(tx *gorm.DB, userID uuid.UUID, invoice *models.Invoice, amount float64, mode string, accountID *uuid.UUID, date time.Time, notes string, adjustPartyBalance bool) error {
 	if amount <= 0 || invoice == nil {
 		return nil
 	}
@@ -135,10 +157,12 @@ func createLinkedSalePaymentInWithMode(tx *gorm.DB, userID uuid.UUID, invoice *m
 		}
 	}
 
-	var party models.Party
-	if err := tx.Where("user_id = ? AND id = ?", userID, invoice.PartyID).First(&party).Error; err == nil {
-		if err := tx.Model(&party).Update("balance", party.Balance-amount).Error; err != nil {
-			return err
+	if adjustPartyBalance {
+		var party models.Party
+		if err := tx.Where("user_id = ? AND id = ?", userID, invoice.PartyID).First(&party).Error; err == nil {
+			if err := tx.Model(&party).Update("balance", party.Balance-amount).Error; err != nil {
+				return err
+			}
 		}
 	}
 
@@ -561,6 +585,17 @@ func resyncLinkedInvoicePayments(db *gorm.DB, userID uuid.UUID, previous, curren
 // createLinkedPurchasePaymentOut records a PaymentOut row for a purchase bill payment
 // and posts cash/bank + AP reduction. Bill paid_amount/balance_due must already be updated.
 func createLinkedPurchasePaymentOut(tx *gorm.DB, userID uuid.UUID, bill *models.PurchaseBill, amount float64, date time.Time, notes string) error {
+	return createLinkedPurchasePaymentOutInternal(tx, userID, bill, amount, date, notes, true)
+}
+
+// createLinkedPurchasePaymentOutMigration behaves like
+// createLinkedPurchasePaymentOut but leaves the party balance unchanged —
+// migrations import party balances separately.
+func createLinkedPurchasePaymentOutMigration(tx *gorm.DB, userID uuid.UUID, bill *models.PurchaseBill, amount float64, date time.Time, notes string) error {
+	return createLinkedPurchasePaymentOutInternal(tx, userID, bill, amount, date, notes, false)
+}
+
+func createLinkedPurchasePaymentOutInternal(tx *gorm.DB, userID uuid.UUID, bill *models.PurchaseBill, amount float64, date time.Time, notes string, adjustPartyBalance bool) error {
 	if amount <= 0 || bill == nil {
 		return nil
 	}
@@ -602,10 +637,12 @@ func createLinkedPurchasePaymentOut(tx *gorm.DB, userID uuid.UUID, bill *models.
 	}
 
 	// Match standalone PaymentOut behaviour: bump party balance by amount paid.
-	var party models.Party
-	if err := tx.Where("user_id = ? AND id = ?", userID, bill.PartyID).First(&party).Error; err == nil {
-		if err := tx.Model(&party).Update("balance", party.Balance+amount).Error; err != nil {
-			return err
+	if adjustPartyBalance {
+		var party models.Party
+		if err := tx.Where("user_id = ? AND id = ?", userID, bill.PartyID).First(&party).Error; err == nil {
+			if err := tx.Model(&party).Update("balance", party.Balance+amount).Error; err != nil {
+				return err
+			}
 		}
 	}
 
