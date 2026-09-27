@@ -369,7 +369,7 @@ func GetPurchaseBills(c *gin.Context) {
 		query = query.Where("status = ?", status)
 	}
 
-	if err := query.Order("updated_at DESC").Find(&bills).Error; err != nil {
+	if err := query.Order("bill_date DESC, created_at DESC").Find(&bills).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch bills"})
 		return
 	}
