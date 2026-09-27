@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"truerp/models"
@@ -14,17 +15,21 @@ import (
 	"gorm.io/gorm"
 )
 
+// orderByInvoiceNumber orders by numeric-aware invoice number (INV-9 before
+// INV-10) using a length+value ordering that works on both SQLite and Postgres.
+func orderByInvoiceNumber(query *gorm.DB, dir string) *gorm.DB {
+	return query.Order("length(invoice_number) " + dir).Order("invoice_number " + dir)
+}
+
 func GetInvoices(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 	status := c.Query("status")
 	partyID := c.Query("party_id")
-
-	fmt.Printf("[DEBUG] GetInvoices - UserID: %s, Status: %s, PartyID: %s\n", userID, status, partyID)
+	search := strings.TrimSpace(c.Query("search"))
 
 	syncOverdueInvoices(userID)
 
-	var invoices []models.Invoice
-	query := utils.DB.Where("user_id = ?", userID).Preload("Party")
+	query := utils.DB.Model(&models.Invoice{}).Where("user_id = ?", userID)
 
 	// Filter by status
 	if status != "" {
@@ -34,21 +39,80 @@ func GetInvoices(c *gin.Context) {
 	if partyID != "" {
 		query = query.Where("party_id = ?", partyID)
 	}
-	// Date range
+	// Date range (day-inclusive: timestamps later on the `to` day still match)
 	if from := c.Query("from"); from != "" {
-		query = query.Where("date >= ?", from)
+		query = query.Where(utils.SQLDateGTE("date"), from)
 	}
 	if to := c.Query("to"); to != "" {
-		query = query.Where("date <= ?", to)
+		query = query.Where(utils.SQLDateLTE("date"), to)
+	}
+	// Search invoice number or party name (case-insensitive on both dialects)
+	if search != "" {
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where(
+			"LOWER(invoices.invoice_number) LIKE ? OR invoices.party_id IN (SELECT id FROM parties WHERE LOWER(name) LIKE ?)",
+			like, like,
+		)
 	}
 
-	if err := query.Order("invoice_number DESC").Find(&invoices).Error; err != nil {
-		fmt.Printf("[DEBUG] GetInvoices - DB error: %v\n", err)
+	dir := "DESC"
+	if strings.EqualFold(c.Query("order"), "asc") {
+		dir = "ASC"
+	}
+	switch c.Query("sort") {
+	case "date":
+		query = orderByInvoiceNumber(query.Order("date "+dir), dir)
+	case "status":
+		query = orderByInvoiceNumber(query.Order("status "+dir), dir)
+	case "total_amount":
+		query = orderByInvoiceNumber(query.Order("total_amount "+dir), dir)
+	default:
+		query = orderByInvoiceNumber(query, dir)
+	}
+
+	invoices := make([]models.Invoice, 0)
+
+	// Paginated mode (opt-in via page/per_page) returns an envelope so large
+	// ledgers don't need to serialize the whole table per request.
+	// per_page <= 0 returns every matching row (used by CSV export).
+	if c.Query("page") != "" || c.Query("per_page") != "" {
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "25"))
+
+		var total int64
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch invoices"})
+			return
+		}
+
+		pageQuery := query.Preload("Party")
+		if perPage > 0 {
+			pageQuery = pageQuery.Limit(perPage).Offset((page - 1) * perPage)
+		}
+		if err := pageQuery.Find(&invoices).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch invoices"})
+			return
+		}
+
+		attachInvoicePaymentSplitsList(utils.DB, invoices)
+		c.JSON(http.StatusOK, gin.H{
+			"invoices": invoices,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+		})
+		return
+	}
+
+	// Legacy unpaginated response for screens that consume the whole list.
+	if err := query.Preload("Party").Find(&invoices).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch invoices"})
 		return
 	}
 
-	fmt.Printf("[DEBUG] GetInvoices - Found %d invoices\n", len(invoices))
 	attachInvoicePaymentSplitsList(utils.DB, invoices)
 	c.JSON(http.StatusOK, invoices)
 }
@@ -81,34 +145,35 @@ func CreateInvoice(c *gin.Context) {
 	}
 
 	var input struct {
-		InvoiceNumber         string                 `json:"invoice_number"`
-		InvoiceType           string                 `json:"invoice_type"`
-		PartyID               uuid.UUID              `json:"party_id"`
-		CustomerID            uuid.UUID              `json:"customer_id"`
-		Date                  time.Time              `json:"date" binding:"required"`
-		DueDate               *models.FlexibleTime   `json:"due_date"`
-		PaymentTerms          int                    `json:"payment_terms"`
-		Status                string                 `json:"status"`
-		PaymentMode           string                 `json:"payment_mode"`
-		AmountPaid            float64                `json:"amount_paid"`
-		ReceivedAmount        float64                `json:"received_amount"`
-		PaymentSplits         []models.PaymentSplit  `json:"payment_splits"`
-		BankAccountID         *uuid.UUID             `json:"bank_account_id"`
-		Notes                 string                 `json:"notes"`
-		Terms                 string                 `json:"terms"`
-		IsInterState          bool                   `json:"is_inter_state"`
-		EWayBillRequired      bool                   `json:"eway_bill_required"`
-		InvoiceDiscount       float64                `json:"invoice_discount"`
-		AdditionalCharges     float64                `json:"additional_charges"`
-		LoyaltyPointsRedeemed int64                  `json:"loyalty_points_redeemed"`
-		IsPOS                 bool                   `json:"is_pos"`
-		ClientSaleID          *uuid.UUID             `json:"client_sale_id"`
-		PosSessionID          *uuid.UUID             `json:"pos_session_id"`
-		SessionOpeningCash    float64                `json:"session_opening_cash"`
-		Party                 *posPartySnapshot      `json:"party"`
-		Signature             string                 `json:"signature"`
-		PDFTemplate           string                 `json:"pdf_template"`
-		CustomFields          map[string]interface{} `json:"custom_fields"`
+		InvoiceNumber         string                    `json:"invoice_number"`
+		InvoiceType           string                    `json:"invoice_type"`
+		PartyID               uuid.UUID                 `json:"party_id"`
+		CustomerID            uuid.UUID                 `json:"customer_id"`
+		Date                  time.Time                 `json:"date" binding:"required"`
+		DueDate               *models.FlexibleTime      `json:"due_date"`
+		PaymentTerms          int                       `json:"payment_terms"`
+		Status                string                    `json:"status"`
+		PaymentMode           string                    `json:"payment_mode"`
+		AmountPaid            float64                   `json:"amount_paid"`
+		ReceivedAmount        float64                   `json:"received_amount"`
+		PaymentSplits         []models.PaymentSplit     `json:"payment_splits"`
+		BankAccountID         *uuid.UUID                `json:"bank_account_id"`
+		Notes                 string                    `json:"notes"`
+		Terms                 string                    `json:"terms"`
+		IsInterState          bool                      `json:"is_inter_state"`
+		EWayBillRequired      bool                      `json:"eway_bill_required"`
+		InvoiceDiscount       float64                   `json:"invoice_discount"`
+		AdditionalCharges     float64                   `json:"additional_charges"`
+		AdditionalChargeItems []models.AdditionalCharge `json:"additional_charge_items"`
+		LoyaltyPointsRedeemed int64                     `json:"loyalty_points_redeemed"`
+		IsPOS                 bool                      `json:"is_pos"`
+		ClientSaleID          *uuid.UUID                `json:"client_sale_id"`
+		PosSessionID          *uuid.UUID                `json:"pos_session_id"`
+		SessionOpeningCash    float64                   `json:"session_opening_cash"`
+		Party                 *posPartySnapshot         `json:"party"`
+		Signature             string                    `json:"signature"`
+		PDFTemplate           string                    `json:"pdf_template"`
+		CustomFields          map[string]interface{}    `json:"custom_fields"`
 		Items                 []struct {
 			ProductID   *uuid.UUID           `json:"product_id"`
 			Description string               `json:"description"`
@@ -162,6 +227,16 @@ func CreateInvoice(c *gin.Context) {
 		return
 	}
 
+	chargeItems, err := models.NormalizeAdditionalCharges(input.AdditionalChargeItems)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(chargeItems) > 0 {
+		// Labelled rows are authoritative; keep the aggregate in sync.
+		input.AdditionalCharges = models.SumAdditionalCharges(chargeItems)
+	}
+
 	input.InvoiceNumber = allocateUniqueInvoiceNumber(userID, input.InvoiceNumber)
 
 	if input.AmountPaid == 0 && input.ReceivedAmount > 0 {
@@ -179,30 +254,31 @@ func CreateInvoice(c *gin.Context) {
 	resolvedSessionID := resolvePOSSessionID(userID, input.PosSessionID, input.SessionOpeningCash)
 
 	invoice := models.Invoice{
-		ID:                uuid.New(),
-		UserID:            userID,
-		InvoiceNumber:     input.InvoiceNumber,
-		InvoiceType:       input.InvoiceType,
-		PartyID:           input.PartyID,
-		Date:              input.Date,
-		DueDate:           input.DueDate.Ptr(),
-		PaymentTerms:      input.PaymentTerms,
-		Status:            input.Status,
-		PaymentMode:       input.PaymentMode,
-		AmountPaid:        input.AmountPaid,
-		BankAccountID:     resolvedBankAccount,
-		Notes:             input.Notes,
-		Terms:             input.Terms,
-		IsInterState:      input.IsInterState,
-		EWayBillRequired:  input.EWayBillRequired,
-		InvoiceDiscount:   input.InvoiceDiscount,
-		AdditionalCharges: input.AdditionalCharges,
-		Signature:         input.Signature,
-		PDFTemplate:       input.PDFTemplate,
-		CustomFields:      encodeCustomFieldsMap(input.CustomFields),
-		IsPOS:             input.IsPOS,
-		ClientSaleID:      input.ClientSaleID,
-		PosSessionID:      resolvedSessionID,
+		ID:                    uuid.New(),
+		UserID:                userID,
+		InvoiceNumber:         input.InvoiceNumber,
+		InvoiceType:           input.InvoiceType,
+		PartyID:               input.PartyID,
+		Date:                  input.Date,
+		DueDate:               input.DueDate.Ptr(),
+		PaymentTerms:          input.PaymentTerms,
+		Status:                input.Status,
+		PaymentMode:           input.PaymentMode,
+		AmountPaid:            input.AmountPaid,
+		BankAccountID:         resolvedBankAccount,
+		Notes:                 input.Notes,
+		Terms:                 input.Terms,
+		IsInterState:          input.IsInterState,
+		EWayBillRequired:      input.EWayBillRequired,
+		InvoiceDiscount:       input.InvoiceDiscount,
+		AdditionalCharges:     input.AdditionalCharges,
+		AdditionalChargeItems: chargeItems,
+		Signature:             input.Signature,
+		PDFTemplate:           input.PDFTemplate,
+		CustomFields:          encodeCustomFieldsMap(input.CustomFields),
+		IsPOS:                 input.IsPOS,
+		ClientSaleID:          input.ClientSaleID,
+		PosSessionID:          resolvedSessionID,
 	}
 
 	if invoice.Status == "" {
@@ -412,26 +488,27 @@ func UpdateInvoice(c *gin.Context) {
 	}
 
 	var input struct {
-		InvoiceNumber     string                 `json:"invoice_number"`
-		PartyID           uuid.UUID              `json:"party_id"`
-		CustomerID        uuid.UUID              `json:"customer_id"`
-		Date              time.Time              `json:"date"`
-		DueDate           *models.FlexibleTime   `json:"due_date"`
-		PaymentTerms      int                    `json:"payment_terms"`
-		Status            string                 `json:"status"`
-		IsInterState      bool                   `json:"is_inter_state"`
-		PaymentMode       string                 `json:"payment_mode"`
-		AmountPaid        float64                `json:"amount_paid"`
-		PaymentSplits     []models.PaymentSplit  `json:"payment_splits"`
-		BankAccountID     *uuid.UUID             `json:"bank_account_id"`
-		Notes             string                 `json:"notes"`
-		Terms             string                 `json:"terms"`
-		InvoiceDiscount   float64                `json:"invoice_discount"`
-		AdditionalCharges float64                `json:"additional_charges"`
-		Signature         string                 `json:"signature"`
-		PDFTemplate       string                 `json:"pdf_template"`
-		CustomFields      map[string]interface{} `json:"custom_fields"`
-		Items             []struct {
+		InvoiceNumber         string                    `json:"invoice_number"`
+		PartyID               uuid.UUID                 `json:"party_id"`
+		CustomerID            uuid.UUID                 `json:"customer_id"`
+		Date                  time.Time                 `json:"date"`
+		DueDate               *models.FlexibleTime      `json:"due_date"`
+		PaymentTerms          int                       `json:"payment_terms"`
+		Status                string                    `json:"status"`
+		IsInterState          bool                      `json:"is_inter_state"`
+		PaymentMode           string                    `json:"payment_mode"`
+		AmountPaid            float64                   `json:"amount_paid"`
+		PaymentSplits         []models.PaymentSplit     `json:"payment_splits"`
+		BankAccountID         *uuid.UUID                `json:"bank_account_id"`
+		Notes                 string                    `json:"notes"`
+		Terms                 string                    `json:"terms"`
+		InvoiceDiscount       float64                   `json:"invoice_discount"`
+		AdditionalCharges     float64                   `json:"additional_charges"`
+		AdditionalChargeItems []models.AdditionalCharge `json:"additional_charge_items"`
+		Signature             string                    `json:"signature"`
+		PDFTemplate           string                    `json:"pdf_template"`
+		CustomFields          map[string]interface{}    `json:"custom_fields"`
+		Items                 []struct {
 			ProductID   *uuid.UUID           `json:"product_id"`
 			Description string               `json:"description"`
 			Quantity    models.FlexibleFloat `json:"quantity"`
@@ -490,6 +567,12 @@ func UpdateInvoice(c *gin.Context) {
 		}
 		invoice.CustomFields = encodeCustomFieldsMap(input.CustomFields)
 	}
+
+	chargeItems, err := models.NormalizeAdditionalCharges(input.AdditionalChargeItems)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	if input.PDFTemplate != "" {
 		invoice.PDFTemplate = input.PDFTemplate
 	}
@@ -508,7 +591,17 @@ func UpdateInvoice(c *gin.Context) {
 	invoice.Notes = input.Notes
 	invoice.Terms = input.Terms
 	invoice.InvoiceDiscount = input.InvoiceDiscount
-	invoice.AdditionalCharges = input.AdditionalCharges
+	if input.AdditionalChargeItems != nil {
+		// Labelled rows are authoritative; keep the aggregate in sync.
+		if len(chargeItems) == 0 {
+			invoice.AdditionalChargeItems = nil
+		} else {
+			invoice.AdditionalChargeItems = chargeItems
+		}
+		invoice.AdditionalCharges = models.SumAdditionalCharges(chargeItems)
+	} else {
+		invoice.AdditionalCharges = input.AdditionalCharges
+	}
 	invoice.Signature = input.Signature
 
 	// Delete old items and recreate
@@ -734,10 +827,10 @@ func GetNextInvoiceNumber(c *gin.Context) {
 func invoiceListFilters(c *gin.Context) func(*gorm.DB) *gorm.DB {
 	return func(db *gorm.DB) *gorm.DB {
 		if from := c.Query("from"); from != "" {
-			db = db.Where("date >= ?", from)
+			db = db.Where(utils.SQLDateGTE("date"), from)
 		}
 		if to := c.Query("to"); to != "" {
-			db = db.Where("date <= ?", to)
+			db = db.Where(utils.SQLDateLTE("date"), to)
 		}
 		if status := c.Query("status"); status != "" {
 			db = db.Where("status = ?", status)

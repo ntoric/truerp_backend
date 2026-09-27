@@ -17,7 +17,7 @@ func TestWrapPDFTextFitsWidth(t *testing.T) {
 	wrapW := innerW - 2.0
 	samples := []string{
 		"Purchases 0 · Ops expenses 0 · AP 0.00",
-		"Sales - purchases - expenses +/- returns",
+		"Sales - expenses - returns/notes",
 		"Sale value - purchase cost on items",
 		"Payments in - out - expenses",
 		"Purchase expense",

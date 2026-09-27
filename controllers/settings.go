@@ -109,17 +109,18 @@ func UpdateInvoiceSettings(c *gin.Context) {
 }
 
 var allowedColorThemes = map[string]bool{
-	"blue":    true,
-	"sky":     true,
-	"teal":    true,
-	"emerald": true,
-	"violet":  true,
-	"purple":  true,
-	"rose":    true,
-	"orange":  true,
-	"amber":   true,
-	"slate":   true,
-	"custom":  true,
+	"runerail": true,
+	"blue":     true,
+	"sky":      true,
+	"teal":     true,
+	"emerald":  true,
+	"violet":   true,
+	"purple":   true,
+	"rose":     true,
+	"orange":   true,
+	"amber":    true,
+	"slate":    true,
+	"custom":   true,
 }
 
 func normalizeCustomHex(hex string) string {
@@ -130,12 +131,12 @@ func normalizeCustomHex(hex string) string {
 	if len(value) == 7 && value[0] == '#' {
 		for _, ch := range value[1:] {
 			if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
-				return "#2563eb"
+				return "#c81e3a"
 			}
 		}
 		return strings.ToLower(value)
 	}
-	return "#2563eb"
+	return "#c81e3a"
 }
 
 func GetAppearanceSettings(c *gin.Context) {

@@ -3,6 +3,7 @@ package controllers
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"truerp/models"
@@ -10,13 +11,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 func GetPayments(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
+	search := strings.TrimSpace(c.Query("search"))
 
-	var payments []models.Payment
-	query := utils.DB.Where("user_id = ?", userID).Preload("Party").Preload("Invoice")
+	query := utils.DB.Model(&models.Payment{}).Where("user_id = ?", userID)
 
 	if invoiceID := c.Query("invoice_id"); invoiceID != "" {
 		query = query.Where("invoice_id = ?", invoiceID)
@@ -24,8 +26,61 @@ func GetPayments(c *gin.Context) {
 	if partyID := c.Query("party_id"); partyID != "" {
 		query = query.Where("party_id = ?", partyID)
 	}
+	if mode := c.Query("mode"); mode != "" {
+		query = query.Where("mode = ?", mode)
+	}
+	// Day-inclusive range: payments.date is a timestamp.
+	if from := c.Query("from"); from != "" {
+		query = query.Where(utils.SQLDateGTE("payments.date"), from)
+	}
+	if to := c.Query("to"); to != "" {
+		query = query.Where(utils.SQLDateLTE("payments.date"), to)
+	}
+	if search != "" {
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where(
+			"LOWER(payments.payment_in_number) LIKE ? OR LOWER(payments.reference) LIKE ? OR LOWER(payments.notes) LIKE ? OR payments.party_id IN (SELECT id FROM parties WHERE LOWER(name) LIKE ?)",
+			like, like, like, like,
+		)
+	}
+	query = query.Order("payments.updated_at DESC")
 
-	if err := query.Order("updated_at DESC").Find(&payments).Error; err != nil {
+	payments := make([]models.Payment, 0)
+
+	// Paginated mode (opt-in via page/per_page); per_page <= 0 returns every
+	// matching row. Unparameterized callers keep the legacy plain array.
+	if c.Query("page") != "" || c.Query("per_page") != "" {
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "25"))
+
+		var total int64
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch payments"})
+			return
+		}
+
+		pageQuery := query.Preload("Party").Preload("Invoice")
+		if perPage > 0 {
+			pageQuery = pageQuery.Limit(perPage).Offset((page - 1) * perPage)
+		}
+		if err := pageQuery.Find(&payments).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch payments"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"payments": payments,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+		})
+		return
+	}
+
+	if err := query.Preload("Party").Preload("Invoice").Find(&payments).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch payments"})
 		return
 	}

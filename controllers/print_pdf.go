@@ -156,8 +156,8 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 		writeTotalRow(pdf, usable, "CGST", fmt.Sprintf("Rs. %.2f", invoice.CGSTTotal), false)
 		writeTotalRow(pdf, usable, "SGST", fmt.Sprintf("Rs. %.2f", invoice.SGSTTotal), false)
 	}
-	if invoice.AdditionalCharges > 0 {
-		writeTotalRow(pdf, usable, "Additional", fmt.Sprintf("Rs. %.2f", invoice.AdditionalCharges), false)
+	for _, charge := range additionalChargeRows(invoice.AdditionalChargeItems, invoice.AdditionalCharges) {
+		writeTotalRow(pdf, usable, sanitizePDFText(charge.Label), fmt.Sprintf("Rs. %.2f", charge.Amount), false)
 	}
 	if invoice.RoundOff != 0 {
 		writeTotalRow(pdf, usable, "Round Off", fmt.Sprintf("Rs. %.2f", invoice.RoundOff), false)
@@ -185,6 +185,8 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 		pdf.SetTextColor(80, 80, 80)
 		pdf.MultiCell(0, 5, sanitizePDFText(invoice.Terms), "", "L", false)
 	}
+
+	pdfDrawSignature(pdf, invoice.Signature)
 
 	if ps.PrintFooter {
 		pdf.Ln(8)

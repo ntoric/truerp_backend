@@ -95,6 +95,57 @@ func applyPayrollPayment(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll,
 	return tx.Model(payroll).Update("expense_id", expenseID).Error
 }
 
+// applyPayrollAdvanceRecovery marks the deducted advances as recovered by the payroll,
+// so the same advance is not deducted again in a later payroll.
+func applyPayrollAdvanceRecovery(tx *gorm.DB, advances []models.StaffAdvancePayment, payrollID uuid.UUID) error {
+	for _, adv := range advances {
+		if err := tx.Model(&models.StaffAdvancePayment{}).
+			Where("id = ?", adv.ID).
+			Updates(map[string]interface{}{
+				"recovered_amount":        adv.RecoveredAmount + adv.PendingAmount,
+				"pending_amount":          0,
+				"is_recovered":            true,
+				"status":                  "recovered",
+				"recovered_by_payroll_id": payrollID,
+				"payroll_recovery_amount": adv.PendingAmount,
+			}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reversePayrollAdvanceRecovery restores advances that were marked recovered by a payroll,
+// used when the payroll is deleted.
+func reversePayrollAdvanceRecovery(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll) error {
+	var advances []models.StaffAdvancePayment
+	if err := tx.Where("user_id = ? AND recovered_by_payroll_id = ?", userID, payroll.ID).Find(&advances).Error; err != nil {
+		return err
+	}
+	for _, adv := range advances {
+		recovered := adv.PayrollRecoveryAmount
+		newRecovered := adv.RecoveredAmount - recovered
+		newPending := adv.PendingAmount + recovered
+		status := "pending"
+		if newRecovered > 0 {
+			status = "partial"
+		}
+		if err := tx.Model(&models.StaffAdvancePayment{}).
+			Where("id = ?", adv.ID).
+			Updates(map[string]interface{}{
+				"recovered_amount":        newRecovered,
+				"pending_amount":          newPending,
+				"is_recovered":            false,
+				"status":                  status,
+				"recovered_by_payroll_id": nil,
+				"payroll_recovery_amount": 0,
+			}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // reversePayrollPayment restores cash/bank and removes the linked payroll expense.
 func reversePayrollPayment(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll) error {
 	if err := reversePayrollCashOut(tx, userID, payroll.PaymentNumber); err != nil {
@@ -150,6 +201,133 @@ func GetPayroll(c *gin.Context) {
 	c.JSON(http.StatusOK, payroll)
 }
 
+// payrollPeriodData is the attendance + deduction + advance picture for one
+// staff over a payroll period. Shared by CreatePayroll (which persists it) and
+// CalculatePayroll (which previews it for the form).
+type payrollPeriodData struct {
+	WorkingDays   int
+	PresentDays   int
+	AbsentDays    int
+	HalfDays      int
+	PaidLeaveDays int
+	WeeklyOffDays int
+	// PayableDays counts paid attendance: present + paid_leave + weekly_off
+	// plus half days at 0.5. Absent days are unpaid.
+	PayableDays         float64
+	PeriodDeductions    float64
+	AdvanceRecovery     float64
+	OutstandingAdvances []models.StaffAdvancePayment
+}
+
+func computePayrollPeriodData(userID, staffID uuid.UUID, startDateStr, endDateStr string) payrollPeriodData {
+	var data payrollPeriodData
+
+	var attendances []models.Attendance
+	utils.DB.Where("user_id = ? AND staff_id = ? AND date >= ? AND date <= ?", userID, staffID, startDateStr, endDateStr).Find(&attendances)
+
+	for _, att := range attendances {
+		data.WorkingDays++
+		switch att.Status {
+		case "present":
+			data.PresentDays++
+		case "absent":
+			data.AbsentDays++
+		case "half_day":
+			data.HalfDays++
+		case "paid_leave":
+			data.PaidLeaveDays++
+		case "weekly_off":
+			data.WeeklyOffDays++
+		}
+	}
+	data.PayableDays = float64(data.PresentDays) + float64(data.HalfDays)*0.5 + float64(data.PaidLeaveDays) + float64(data.WeeklyOffDays)
+
+	utils.DB.Model(&models.StaffDeduction{}).
+		Where("user_id = ? AND staff_id = ? AND deduction_date >= ? AND deduction_date <= ? AND status = ?",
+			userID, staffID, startDateStr, endDateStr, "active").
+		Select("COALESCE(SUM(amount), 0)").
+		Scan(&data.PeriodDeductions)
+
+	// Any advance still outstanding up to the period end is recovered through this payroll.
+	utils.DB.Where("user_id = ? AND staff_id = ? AND advance_date <= ? AND status IN ? AND pending_amount > 0",
+		userID, staffID, endDateStr, []string{"pending", "partial"}).
+		Order("advance_date ASC").
+		Find(&data.OutstandingAdvances)
+
+	for _, adv := range data.OutstandingAdvances {
+		data.AdvanceRecovery += adv.PendingAmount
+	}
+
+	return data
+}
+
+// payableSalary prorates the basic salary by attendance. With no attendance
+// recorded the full basic is payable. Monthly salary uses a /30 daily rate;
+// daily/hourly staff treat BasicSalary as the per-day rate (matches the payroll
+// form's "Basic Salary" semantics).
+func payableSalary(basicSalary float64, salaryType string, data payrollPeriodData) float64 {
+	if data.WorkingDays == 0 {
+		return basicSalary
+	}
+	dailyRate := basicSalary
+	if salaryType == "monthly" {
+		dailyRate = basicSalary / 30
+	}
+	return data.PayableDays * dailyRate
+}
+
+// CalculatePayroll previews the attendance-based salary computation for a staff
+// + period so the payroll form can prefill the exact amounts CreatePayroll will
+// store. GET /payroll/calculate?staff_id=&start_date=&end_date=
+func CalculatePayroll(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	staffID, err := uuid.Parse(c.Query("staff_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "staff_id is required"})
+		return
+	}
+	startDate, err := time.Parse("2006-01-02", c.Query("start_date"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid start_date is required"})
+		return
+	}
+	endDate, err := time.Parse("2006-01-02", c.Query("end_date"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid end_date is required"})
+		return
+	}
+
+	var staff models.Staff
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, staffID).First(&staff).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Staff not found"})
+		return
+	}
+
+	data := computePayrollPeriodData(userID, staff.ID, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+	calculated := payableSalary(staff.Salary, staff.SalaryType, data)
+	net := calculated - data.PeriodDeductions - data.AdvanceRecovery
+	if net < 0 {
+		net = 0
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"salary":            staff.Salary,
+		"salary_type":       staff.SalaryType,
+		"working_days":      data.WorkingDays,
+		"present_days":      data.PresentDays,
+		"absent_days":       data.AbsentDays,
+		"half_days":         data.HalfDays,
+		"paid_leave_days":   data.PaidLeaveDays,
+		"weekly_off_days":   data.WeeklyOffDays,
+		"payable_days":      data.PayableDays,
+		"calculated_salary": calculated,
+		"period_deductions": data.PeriodDeductions,
+		"advance_recovery":  data.AdvanceRecovery,
+		"advance_count":     len(data.OutstandingAdvances),
+		"estimated_net":     net,
+	})
+}
+
 func CreatePayroll(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
@@ -187,62 +365,23 @@ func CreatePayroll(c *gin.Context) {
 	startDateStr := input.StartDate.Format("2006-01-02")
 	endDateStr := input.EndDate.Format("2006-01-02")
 
-	var attendances []models.Attendance
-	utils.DB.Where("user_id = ? AND staff_id = ? AND date >= ? AND date <= ?", userID, input.StaffID, startDateStr, endDateStr).Find(&attendances)
-
-	workingDays := 0
-	presentDays := 0
-	absentDays := 0
-	halfDays := 0
-	paidLeaveDays := 0
-	weeklyOffDays := 0
-
-	for _, att := range attendances {
-		workingDays++
-		switch att.Status {
-		case "present":
-			presentDays++
-		case "absent":
-			absentDays++
-		case "half_day":
-			halfDays++
-		case "paid_leave":
-			paidLeaveDays++
-		case "weekly_off":
-			weeklyOffDays++
-		}
-	}
+	periodData := computePayrollPeriodData(userID, input.StaffID, startDateStr, endDateStr)
+	workingDays := periodData.WorkingDays
+	presentDays := periodData.PresentDays
+	absentDays := periodData.AbsentDays
+	halfDays := periodData.HalfDays
+	paidLeaveDays := periodData.PaidLeaveDays
+	weeklyOffDays := periodData.WeeklyOffDays
+	totalPeriodDeductions := periodData.PeriodDeductions
+	outstandingAdvances := periodData.OutstandingAdvances
+	totalAdvanceRecovery := periodData.AdvanceRecovery
 
 	basicSalary := input.BasicSalary
 	if basicSalary == 0 {
 		basicSalary = staff.Salary
 	}
 
-	var payableAmount float64
-	if workingDays == 0 {
-		payableAmount = basicSalary
-	} else {
-		dailyRate := basicSalary
-		if staff.SalaryType == "monthly" {
-			dailyRate = basicSalary / 30
-		}
-		payableDays := float64(presentDays) + float64(halfDays)*0.5 + float64(paidLeaveDays) + float64(weeklyOffDays)
-		payableAmount = payableDays * dailyRate
-	}
-
-	var totalPeriodDeductions float64
-	utils.DB.Model(&models.StaffDeduction{}).
-		Where("user_id = ? AND staff_id = ? AND deduction_date >= ? AND deduction_date <= ? AND status = ?",
-			userID, input.StaffID, startDateStr, endDateStr, "active").
-		Select("COALESCE(SUM(amount), 0)").
-		Scan(&totalPeriodDeductions)
-
-	var totalAdvanceRecovery float64
-	utils.DB.Model(&models.StaffAdvancePayment{}).
-		Where("user_id = ? AND staff_id = ? AND advance_date >= ? AND advance_date <= ? AND status IN ?",
-			userID, input.StaffID, startDateStr, endDateStr, []string{"pending", "partial"}).
-		Select("COALESCE(SUM(pending_amount), 0)").
-		Scan(&totalAdvanceRecovery)
+	payableAmount := payableSalary(basicSalary, staff.SalaryType, periodData)
 
 	totalDeductions := input.Deductions + totalPeriodDeductions + totalAdvanceRecovery
 
@@ -302,6 +441,9 @@ func CreatePayroll(c *gin.Context) {
 
 	err := utils.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&payroll).Error; err != nil {
+			return err
+		}
+		if err := applyPayrollAdvanceRecovery(tx, outstandingAdvances, payroll.ID); err != nil {
 			return err
 		}
 		return applyPayrollPayment(tx, userID, &payroll, staff.Name)
@@ -422,6 +564,9 @@ func DeletePayroll(c *gin.Context) {
 		if err := reversePayrollPayment(tx, userID, &payroll); err != nil {
 			return err
 		}
+		if err := reversePayrollAdvanceRecovery(tx, userID, &payroll); err != nil {
+			return err
+		}
 		return tx.Delete(&payroll).Error
 	})
 	if err != nil {
@@ -451,6 +596,9 @@ func BulkDeletePayrolls(c *gin.Context) {
 		}
 		for i := range payrolls {
 			if err := reversePayrollPayment(tx, userID, &payrolls[i]); err != nil {
+				return err
+			}
+			if err := reversePayrollAdvanceRecovery(tx, userID, &payrolls[i]); err != nil {
 				return err
 			}
 		}

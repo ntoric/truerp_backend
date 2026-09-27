@@ -827,8 +827,8 @@ func prepareInvoiceData(invoice models.Invoice, business models.Business, printS
 			totalLines = append(totalLines, formatLabelValue("SGST", fmt.Sprintf("%.2f", invoice.SGSTTotal), cols))
 		}
 	}
-	if invoice.AdditionalCharges > 0 {
-		totalLines = append(totalLines, formatLabelValue("Addl Charges", fmt.Sprintf("%.2f", invoice.AdditionalCharges), cols))
+	for _, charge := range additionalChargeRows(invoice.AdditionalChargeItems, invoice.AdditionalCharges) {
+		totalLines = append(totalLines, formatLabelValue(truncateString(charge.Label, 12), fmt.Sprintf("%.2f", charge.Amount), cols))
 	}
 	if invoice.LoyaltyDiscount > 0 {
 		totalLines = append(totalLines, formatLabelValue("Loyalty", fmt.Sprintf("-%.2f", invoice.LoyaltyDiscount), cols))

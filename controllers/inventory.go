@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"truerp/models"
@@ -112,7 +113,7 @@ func GetStockEntries(c *gin.Context) {
 	fmt.Printf("[DEBUG] GetStockEntries - UserID: %s, ProductID: %s, EntryType: %s, OutletID: %s\n", userID, productID, entryType, outletID)
 
 	var entries []models.StockEntry
-	query := utils.DB.Where("user_id = ?", userID).Preload("Product")
+	query := utils.DB.Model(&models.StockEntry{}).Where("user_id = ?", userID)
 
 	if productID != "" {
 		query = query.Where("product_id = ?", productID)
@@ -135,13 +136,45 @@ func GetStockEntries(c *gin.Context) {
 	}
 
 	if fromDate != "" {
-		query = query.Where("entry_date >= ?", fromDate)
+		query = query.Where(utils.SQLDateGTE("entry_date"), fromDate)
 	}
 	if toDate != "" {
-		query = query.Where("entry_date <= ?", toDate)
+		query = query.Where(utils.SQLDateLTE("entry_date"), toDate)
 	}
 
-	if err := query.Order("entry_date DESC").Find(&entries).Error; err != nil {
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where(
+			"LOWER(stock_entries.item_name) LIKE ? OR LOWER(stock_entries.item_code) LIKE ? OR LOWER(stock_entries.batch_no) LIKE ? OR stock_entries.product_id IN (SELECT id FROM products WHERE LOWER(name) LIKE ? OR LOWER(sku) LIKE ?)",
+			like, like, like, like, like,
+		)
+	}
+	query = query.Order("entry_date DESC")
+
+	// Paginated mode (opt-in via page/per_page); per_page <= 0 returns every
+	// matching row. Unparameterized callers keep the legacy {data: [...]} shape.
+	paginated := c.Query("page") != "" || c.Query("per_page") != ""
+	var total int64
+	page, perPage := 1, 0
+	if paginated {
+		page, _ = strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		perPage, _ = strconv.Atoi(c.DefaultQuery("per_page", "25"))
+
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			fmt.Printf("[DEBUG] GetStockEntries - count error: %v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch entries"})
+			return
+		}
+	}
+
+	findQuery := query.Preload("Product")
+	if paginated && perPage > 0 {
+		findQuery = findQuery.Limit(perPage).Offset((page - 1) * perPage)
+	}
+	if err := findQuery.Find(&entries).Error; err != nil {
 		fmt.Printf("[DEBUG] GetStockEntries - DB error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch entries"})
 		return
@@ -176,6 +209,15 @@ func GetStockEntries(c *gin.Context) {
 		})
 	}
 
+	if paginated {
+		c.JSON(http.StatusOK, gin.H{
+			"data":     entriesWithDetails,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+		})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"data": entriesWithDetails})
 }
 
@@ -1008,13 +1050,56 @@ func GetStockTransfers(c *gin.Context) {
 	fmt.Printf("[DEBUG] GetStockTransfers - UserID: %s, Status: %s\n", userID, status)
 
 	var transfers []models.StockTransfer
-	query := utils.DB.Where("user_id = ?", userID).Preload("Items")
+	query := utils.DB.Model(&models.StockTransfer{}).Where("user_id = ?", userID)
 
 	if status != "" {
 		query = query.Where("status = ?", status)
 	}
+	if fromDate := c.Query("from_date"); fromDate != "" {
+		query = query.Where(utils.SQLDateGTE("created_at"), fromDate)
+	}
+	if toDate := c.Query("to_date"); toDate != "" {
+		query = query.Where(utils.SQLDateLTE("created_at"), toDate)
+	}
+	query = query.Order("created_at DESC")
 
-	if err := query.Order("created_at DESC").Find(&transfers).Error; err != nil {
+	// Paginated mode (opt-in via page/per_page); per_page <= 0 returns every
+	// matching row. Unparameterized callers keep the legacy plain array.
+	if c.Query("page") != "" || c.Query("per_page") != "" {
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "25"))
+
+		var total int64
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			fmt.Printf("[DEBUG] GetStockTransfers - count error: %v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch transfers"})
+			return
+		}
+
+		pageQuery := query.Preload("Items")
+		if perPage > 0 {
+			pageQuery = pageQuery.Limit(perPage).Offset((page - 1) * perPage)
+		}
+		if err := pageQuery.Find(&transfers).Error; err != nil {
+			fmt.Printf("[DEBUG] GetStockTransfers - DB error: %v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch transfers"})
+			return
+		}
+
+		fmt.Printf("[DEBUG] GetStockTransfers - Found %d transfers (total %d)\n", len(transfers), total)
+		c.JSON(http.StatusOK, gin.H{
+			"data":     transfers,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+		})
+		return
+	}
+
+	if err := query.Preload("Items").Find(&transfers).Error; err != nil {
 		fmt.Printf("[DEBUG] GetStockTransfers - DB error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch transfers"})
 		return
@@ -1242,7 +1327,7 @@ func GetInventoryStocks(c *gin.Context) {
 	fmt.Printf("[DEBUG] GetInventoryStocks - UserID: %s, ProductID: %s, OutletID: %s\n", userID, productID, outletID)
 
 	var stocks []models.InventoryStock
-	query := utils.DB.Where("user_id = ?", userID).Preload("Product")
+	query := utils.DB.Model(&models.InventoryStock{}).Where("user_id = ?", userID)
 
 	if productID != "" {
 		query = query.Where("product_id = ?", productID)
@@ -1263,10 +1348,40 @@ func GetInventoryStocks(c *gin.Context) {
 			query = query.Where("exp_date IS NOT NULL AND exp_date <= ?", cutoff)
 		}
 	}
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where(
+			"LOWER(inventory_stocks.batch_no) LIKE ? OR inventory_stocks.product_id IN (SELECT id FROM products WHERE LOWER(name) LIKE ? OR LOWER(sku) LIKE ?)",
+			like, like, like,
+		)
+	}
 
 	query = query.Order("CASE WHEN exp_date IS NULL THEN 1 ELSE 0 END ASC, exp_date ASC, batch_no ASC")
 
-	if err := query.Find(&stocks).Error; err != nil {
+	// Paginated mode (opt-in via page/per_page); per_page <= 0 returns every
+	// matching row. Unparameterized callers keep the legacy plain array.
+	paginated := c.Query("page") != "" || c.Query("per_page") != ""
+	var total int64
+	page, perPage := 1, 0
+	if paginated {
+		page, _ = strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		perPage, _ = strconv.Atoi(c.DefaultQuery("per_page", "25"))
+
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			fmt.Printf("[DEBUG] GetInventoryStocks - count error: %v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch inventory stocks"})
+			return
+		}
+	}
+
+	findQuery := query.Preload("Product")
+	if paginated && perPage > 0 {
+		findQuery = findQuery.Limit(perPage).Offset((page - 1) * perPage)
+	}
+	if err := findQuery.Find(&stocks).Error; err != nil {
 		fmt.Printf("[DEBUG] GetInventoryStocks - DB error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch inventory stocks"})
 		return
@@ -1338,6 +1453,15 @@ func GetInventoryStocks(c *gin.Context) {
 		})
 	}
 
+	if paginated {
+		c.JSON(http.StatusOK, gin.H{
+			"data":     stocksWithOutlet,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+		})
+		return
+	}
 	c.JSON(http.StatusOK, stocksWithOutlet)
 }
 

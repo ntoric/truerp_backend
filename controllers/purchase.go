@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"truerp/models"
@@ -358,9 +359,9 @@ func SubmitPurchaseReceipt(c *gin.Context) {
 
 func GetPurchaseBills(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
+	search := strings.TrimSpace(c.Query("search"))
 
-	var bills []models.PurchaseBill
-	query := utils.DB.Where("user_id = ?", userID).Preload("Party")
+	query := utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ?", userID)
 
 	if partyID := c.Query("party_id"); partyID != "" {
 		query = query.Where("party_id = ?", partyID)
@@ -368,8 +369,77 @@ func GetPurchaseBills(c *gin.Context) {
 	if status := c.Query("status"); status != "" {
 		query = query.Where("status = ?", status)
 	}
+	if fromDate := c.Query("from_date"); fromDate != "" {
+		query = query.Where(utils.SQLDateGTE("bill_date"), fromDate)
+	}
+	if toDate := c.Query("to_date"); toDate != "" {
+		query = query.Where(utils.SQLDateLTE("bill_date"), toDate)
+	}
+	// Search bill number or party name (case-insensitive on both dialects)
+	if search != "" {
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where(
+			"LOWER(purchase_bills.bill_number) LIKE ? OR purchase_bills.party_id IN (SELECT id FROM parties WHERE LOWER(name) LIKE ?)",
+			like, like,
+		)
+	}
 
-	if err := query.Order("bill_date DESC, created_at DESC").Find(&bills).Error; err != nil {
+	dir := "DESC"
+	if strings.EqualFold(c.Query("order"), "asc") {
+		dir = "ASC"
+	}
+	switch c.Query("sort") {
+	case "bill_number":
+		// Natural-ish ordering so BILL-9 sorts before BILL-10 on both dialects.
+		query = query.Order("length(bill_number) " + dir).Order("bill_number " + dir)
+	case "status":
+		query = query.Order("status " + dir).Order("bill_date " + dir + ", created_at " + dir)
+	case "total_amount":
+		query = query.Order("total_amount " + dir).Order("bill_date " + dir + ", created_at " + dir)
+	case "bill_date":
+		query = query.Order("bill_date " + dir + ", created_at " + dir)
+	default:
+		query = query.Order("bill_date DESC, created_at DESC")
+	}
+
+	bills := make([]models.PurchaseBill, 0)
+
+	// Paginated mode (opt-in via page/per_page) returns an envelope so large
+	// ledgers don't need to serialize the whole table per request.
+	// per_page <= 0 returns every matching row (used by CSV export).
+	if c.Query("page") != "" || c.Query("per_page") != "" {
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "25"))
+
+		var total int64
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch bills"})
+			return
+		}
+
+		pageQuery := query.Preload("Party")
+		if perPage > 0 {
+			pageQuery = pageQuery.Limit(perPage).Offset((page - 1) * perPage)
+		}
+		if err := pageQuery.Find(&bills).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch bills"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"bills":    bills,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+		})
+		return
+	}
+
+	// Legacy unpaginated response for screens that consume the whole list.
+	if err := query.Preload("Party").Find(&bills).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch bills"})
 		return
 	}
@@ -381,22 +451,26 @@ func CreatePurchaseBill(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		PurchaseReceiptID *uuid.UUID `json:"purchase_receipt_id"`
-		PartyID           uuid.UUID  `json:"party_id" binding:"required"`
-		BillNumber        string     `json:"bill_number" binding:"required"`
-		BillDate          time.Time  `json:"bill_date" binding:"required"`
-		DueDate           *time.Time `json:"due_date"`
-		WarehouseID       *uuid.UUID `json:"warehouse_id"`
-		TotalAmount       float64    `json:"total_amount"` // 0 allowed (esp. drafts / zero-priced lines)
-		PaidAmount        float64    `json:"paid_amount"`
-		BalanceDue        float64    `json:"balance_due"`
-		PaymentMode       string     `json:"payment_mode"`
-		BankAccountID     *uuid.UUID `json:"bank_account_id"`
-		Status            string     `json:"status"`
-		Notes             string     `json:"notes"`
-		TaxExempt         bool       `json:"tax_exempt"`
-		ClientBillID      *uuid.UUID `json:"client_bill_id"`
-		Items             []struct {
+		PurchaseReceiptID     *uuid.UUID                `json:"purchase_receipt_id"`
+		PartyID               uuid.UUID                 `json:"party_id" binding:"required"`
+		BillNumber            string                    `json:"bill_number" binding:"required"`
+		BillDate              time.Time                 `json:"bill_date" binding:"required"`
+		DueDate               *time.Time                `json:"due_date"`
+		WarehouseID           *uuid.UUID                `json:"warehouse_id"`
+		TotalAmount           float64                   `json:"total_amount"` // 0 allowed (esp. drafts / zero-priced lines)
+		PaidAmount            float64                   `json:"paid_amount"`
+		BalanceDue            float64                   `json:"balance_due"`
+		PaymentMode           string                    `json:"payment_mode"`
+		BankAccountID         *uuid.UUID                `json:"bank_account_id"`
+		Status                string                    `json:"status"`
+		Notes                 string                    `json:"notes"`
+		Signature             string                    `json:"signature"`
+		TaxExempt             bool                      `json:"tax_exempt"`
+		InvoiceDiscount       float64                   `json:"invoice_discount"`
+		AdditionalCharges     float64                   `json:"additional_charges"`
+		AdditionalChargeItems []models.AdditionalCharge `json:"additional_charge_items"`
+		ClientBillID          *uuid.UUID                `json:"client_bill_id"`
+		Items                 []struct {
 			ProductID     *uuid.UUID           `json:"product_id"`
 			ItemCode      string               `json:"item_code"`
 			Description   string               `json:"description" binding:"required"`
@@ -436,6 +510,16 @@ func CreatePurchaseBill(c *gin.Context) {
 			c.JSON(http.StatusOK, existing)
 			return
 		}
+	}
+
+	chargeItems, err := models.NormalizeAdditionalCharges(input.AdditionalChargeItems)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(chargeItems) > 0 {
+		// Labelled rows are authoritative; keep the aggregate in sync.
+		input.AdditionalCharges = models.SumAdditionalCharges(chargeItems)
 	}
 
 	status := input.Status
@@ -479,21 +563,24 @@ func CreatePurchaseBill(c *gin.Context) {
 	}
 
 	bill := models.PurchaseBill{
-		ID:                uuid.New(),
-		UserID:            userID,
-		PurchaseReceiptID: input.PurchaseReceiptID,
-		PartyID:           input.PartyID,
-		VendorID:          &input.PartyID,
-		BillNumber:        input.BillNumber,
-		BillDate:          input.BillDate,
-		DueDate:           input.DueDate,
-		WarehouseID:       warehouseID,
-		StockStatus:       "none",
-		Status:            status,
-		TaxExempt:         input.TaxExempt,
-		ClientBillID:      input.ClientBillID,
-		TotalAmount:       input.TotalAmount,
-		PaidAmount:        input.PaidAmount,
+		ID:                    uuid.New(),
+		UserID:                userID,
+		PurchaseReceiptID:     input.PurchaseReceiptID,
+		PartyID:               input.PartyID,
+		VendorID:              &input.PartyID,
+		BillNumber:            input.BillNumber,
+		BillDate:              input.BillDate,
+		DueDate:               input.DueDate,
+		WarehouseID:           warehouseID,
+		StockStatus:           "none",
+		Status:                status,
+		TaxExempt:             input.TaxExempt,
+		InvoiceDiscount:       input.InvoiceDiscount,
+		AdditionalCharges:     input.AdditionalCharges,
+		AdditionalChargeItems: chargeItems,
+		ClientBillID:          input.ClientBillID,
+		TotalAmount:           input.TotalAmount,
+		PaidAmount:            input.PaidAmount,
 		BalanceDue: func() float64 {
 			due := input.TotalAmount - input.PaidAmount
 			if due < 0 {
@@ -504,6 +591,7 @@ func CreatePurchaseBill(c *gin.Context) {
 		PaymentMode:   input.PaymentMode,
 		BankAccountID: resolvedBankAccount,
 		Notes:         input.Notes,
+		Signature:     input.Signature,
 	}
 
 	var subTotal, taxTotal float64
@@ -774,20 +862,24 @@ func UpdatePurchaseBill(c *gin.Context) {
 	}
 
 	var input struct {
-		PartyID       uuid.UUID  `json:"party_id"`
-		BillNumber    string     `json:"bill_number"`
-		BillDate      time.Time  `json:"bill_date"`
-		DueDate       *time.Time `json:"due_date"`
-		WarehouseID   *uuid.UUID `json:"warehouse_id"`
-		TotalAmount   float64    `json:"total_amount"`
-		PaidAmount    float64    `json:"paid_amount"`
-		BalanceDue    float64    `json:"balance_due"`
-		PaymentMode   string     `json:"payment_mode"`
-		BankAccountID *uuid.UUID `json:"bank_account_id"`
-		Status        string     `json:"status"`
-		Notes         string     `json:"notes"`
-		TaxExempt     bool       `json:"tax_exempt"`
-		Items         []struct {
+		PartyID               uuid.UUID                 `json:"party_id"`
+		BillNumber            string                    `json:"bill_number"`
+		BillDate              time.Time                 `json:"bill_date"`
+		DueDate               *time.Time                `json:"due_date"`
+		WarehouseID           *uuid.UUID                `json:"warehouse_id"`
+		TotalAmount           float64                   `json:"total_amount"`
+		PaidAmount            float64                   `json:"paid_amount"`
+		BalanceDue            float64                   `json:"balance_due"`
+		PaymentMode           string                    `json:"payment_mode"`
+		BankAccountID         *uuid.UUID                `json:"bank_account_id"`
+		Status                string                    `json:"status"`
+		Notes                 string                    `json:"notes"`
+		Signature             string                    `json:"signature"`
+		TaxExempt             bool                      `json:"tax_exempt"`
+		InvoiceDiscount       float64                   `json:"invoice_discount"`
+		AdditionalCharges     float64                   `json:"additional_charges"`
+		AdditionalChargeItems []models.AdditionalCharge `json:"additional_charge_items"`
+		Items                 []struct {
 			ProductID     *uuid.UUID           `json:"product_id"`
 			ItemCode      string               `json:"item_code"`
 			Description   string               `json:"description"`
@@ -809,6 +901,12 @@ func UpdatePurchaseBill(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	chargeItems, err := models.NormalizeAdditionalCharges(input.AdditionalChargeItems)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -909,7 +1007,20 @@ func UpdatePurchaseBill(c *gin.Context) {
 	bill.BankAccountID = resolvedBankAccount
 	bill.Status = input.Status
 	bill.Notes = input.Notes
+	bill.Signature = input.Signature
 	bill.TaxExempt = input.TaxExempt
+	bill.InvoiceDiscount = input.InvoiceDiscount
+	if input.AdditionalChargeItems != nil {
+		// Labelled rows are authoritative; keep the aggregate in sync.
+		if len(chargeItems) == 0 {
+			bill.AdditionalChargeItems = nil
+		} else {
+			bill.AdditionalChargeItems = chargeItems
+		}
+		bill.AdditionalCharges = models.SumAdditionalCharges(chargeItems)
+	} else {
+		bill.AdditionalCharges = input.AdditionalCharges
+	}
 
 	// Validate quantities before opening the transaction so a bad payload
 	// cannot hold a row lock or leave the bill with no lines.
@@ -1119,14 +1230,16 @@ func GetPurchaseBillStats(c *gin.Context) {
 	qUnpaid := utils.DB.Model(&models.PurchaseBill{}).Where("user_id = ? AND status <> ?", userID, "draft")
 
 	if fromDate := c.Query("from_date"); fromDate != "" {
-		qTotal = qTotal.Where("bill_date >= ?", fromDate)
-		qPaid = qPaid.Where("bill_date >= ?", fromDate)
-		qUnpaid = qUnpaid.Where("bill_date >= ?", fromDate)
+		gte := utils.SQLDateGTE("bill_date")
+		qTotal = qTotal.Where(gte, fromDate)
+		qPaid = qPaid.Where(gte, fromDate)
+		qUnpaid = qUnpaid.Where(gte, fromDate)
 	}
 	if toDate := c.Query("to_date"); toDate != "" {
-		qTotal = qTotal.Where("bill_date <= ?", toDate)
-		qPaid = qPaid.Where("bill_date <= ?", toDate)
-		qUnpaid = qUnpaid.Where("bill_date <= ?", toDate)
+		lte := utils.SQLDateLTE("bill_date")
+		qTotal = qTotal.Where(lte, toDate)
+		qPaid = qPaid.Where(lte, toDate)
+		qUnpaid = qUnpaid.Where(lte, toDate)
 	}
 
 	qTotal.Select("COALESCE(SUM(total_amount), 0)").Scan(&stats.TotalPurchase)
@@ -1229,6 +1342,7 @@ func GeneratePurchaseBillPDF(c *gin.Context) {
 	<div class="totals">
 		<div class="total-row"><span class="total-label">Sub Total:</span><span class="total-value">₹%.2f</span></div>
 		<div class="total-row"><span class="total-label">Tax Total:</span><span class="total-value">₹%.2f</span></div>
+		%s
 		<div class="total-row grand-total"><span class="total-label">Grand Total:</span><span class="total-value">₹%.2f</span></div>
 		<div class="total-row"><span class="total-label">Paid Amount:</span><span class="total-value">₹%.2f</span></div>
 	</div>
@@ -1236,6 +1350,7 @@ func GeneratePurchaseBillPDF(c *gin.Context) {
 		<div class="section-title">Notes</div>
 		<div class="terms">%s</div>
 	</div>
+	%s
 	<script>window.onload = function() { window.print(); };</script>
 </body>
 </html>`,
@@ -1272,9 +1387,18 @@ func GeneratePurchaseBillPDF(c *gin.Context) {
 		}(),
 		bill.SubTotal,
 		bill.TaxTotal,
+		func() string {
+			var sb strings.Builder
+			if bill.InvoiceDiscount > 0 {
+				sb.WriteString(fmt.Sprintf(`<div class="total-row"><span class="total-label">Discount:</span><span class="total-value">-₹%.2f</span></div>`, bill.InvoiceDiscount))
+			}
+			sb.WriteString(additionalChargeRowsHTML(bill.AdditionalChargeItems, bill.AdditionalCharges))
+			return sb.String()
+		}(),
 		bill.TotalAmount,
 		bill.PaidAmount,
 		bill.Notes,
+		signatureBlockHTML(bill.Signature),
 	)
 
 	c.Header("Content-Type", "text/html")
@@ -1426,6 +1550,18 @@ func DownloadPurchaseBillPDF(c *gin.Context) {
 	pdf.Cell(30, 6, "Tax Total:")
 	pdf.Cell(0, 6, fmt.Sprintf("Rs. %.2f", bill.TaxTotal))
 	pdf.Ln(6)
+	if bill.InvoiceDiscount > 0 {
+		pdf.Cell(140, 6, "")
+		pdf.Cell(30, 6, "Discount:")
+		pdf.Cell(0, 6, fmt.Sprintf("-Rs. %.2f", bill.InvoiceDiscount))
+		pdf.Ln(6)
+	}
+	for _, charge := range additionalChargeRows(bill.AdditionalChargeItems, bill.AdditionalCharges) {
+		pdf.Cell(140, 6, "")
+		pdf.Cell(30, 6, sanitizePDFText(truncateString(charge.Label, 18))+":")
+		pdf.Cell(0, 6, fmt.Sprintf("Rs. %.2f", charge.Amount))
+		pdf.Ln(6)
+	}
 	pdf.SetFont("Arial", "B", 12)
 	pdf.SetTextColor(37, 99, 235)
 	pdf.Cell(140, 8, "")
@@ -1449,6 +1585,8 @@ func DownloadPurchaseBillPDF(c *gin.Context) {
 		pdf.SetTextColor(100, 100, 100)
 		pdf.MultiCell(190, 5, sanitizePDFText(bill.Notes), "", "L", false)
 	}
+
+	pdfDrawSignature(pdf, bill.Signature)
 
 	// Footer
 	pdf.SetY(-20)

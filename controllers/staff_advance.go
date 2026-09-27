@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 func GetStaffAdvancePayments(c *gin.Context) {
@@ -111,10 +112,17 @@ func CreateStaffAdvancePayment(c *gin.Context) {
 		Status:               "pending",
 	}
 
-	if err := utils.DB.Create(&advance).Error; err != nil {
+	err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&advance).Error; err != nil {
+			return err
+		}
+		return applyStaffAdvanceExpense(tx, userID, &advance, staff.Name)
+	})
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create advance payment"})
 		return
 	}
+	utils.DB.First(&advance, advance.ID)
 
 	// Log advance payment creation
 	CreateAuditLog(
@@ -137,6 +145,50 @@ func CreateStaffAdvancePayment(c *gin.Context) {
 	)
 
 	c.JSON(http.StatusCreated, advance)
+}
+
+// applyStaffAdvanceExpense records the advance payout as a Staff Advance expense,
+// deducts it from cash in-hand, and posts the expense to the general ledger.
+func applyStaffAdvanceExpense(tx *gorm.DB, userID uuid.UUID, advance *models.StaffAdvancePayment, staffName string) error {
+	if advance.Amount <= 0 {
+		return nil
+	}
+	desc := fmt.Sprintf("Advance salary %s — %s", advance.AdvanceNumber, staffName)
+	expense := models.Expense{
+		ID:            uuid.New(),
+		UserID:        userID,
+		ExpenseNumber: nextExpenseNumber(tx, userID),
+		Category:      "Staff Advance",
+		Description:   desc,
+		Amount:        advance.Amount,
+		SubTotal:      advance.Amount,
+		Date:          advance.AdvanceDate,
+		Vendor:        staffName,
+		PaymentMode:   advance.PaymentMode,
+		Notes:         advance.Notes,
+	}
+	if err := tx.Create(&expense).Error; err != nil {
+		return err
+	}
+	item := models.ExpenseItem{
+		ID:          uuid.New(),
+		ExpenseID:   expense.ID,
+		Description: desc,
+		Quantity:    1,
+		UnitPrice:   advance.Amount,
+		Total:       advance.Amount,
+	}
+	if err := tx.Create(&item).Error; err != nil {
+		return err
+	}
+	if err := recordExpenseCashOut(tx, userID, nil, advance.Amount, advance.AdvanceDate, expense.ExpenseNumber, desc); err != nil {
+		return err
+	}
+	if err := postExpenseAccounting(tx, userID, &expense); err != nil {
+		return err
+	}
+	advance.ExpenseID = &expense.ID
+	return tx.Model(advance).Update("expense_id", expense.ID).Error
 }
 
 func UpdateStaffAdvancePayment(c *gin.Context) {
@@ -238,7 +290,28 @@ func DeleteStaffAdvancePayment(c *gin.Context) {
 		return
 	}
 
-	if err := utils.DB.Delete(&advance).Error; err != nil {
+	err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		// Reverse the expense/cash-out that was created for this advance.
+		if advance.ExpenseID != nil {
+			var expense models.Expense
+			if err := tx.Where("user_id = ? AND id = ?", userID, *advance.ExpenseID).First(&expense).Error; err == nil {
+				if err := reverseExpenseCashOut(tx, userID, expense.ExpenseNumber); err != nil {
+					return err
+				}
+				if err := reverseAccountingByRef(tx, userID, "expense", expense.ID); err != nil {
+					return err
+				}
+				if err := tx.Where("expense_id = ?", expense.ID).Delete(&models.ExpenseItem{}).Error; err != nil {
+					return err
+				}
+				if err := tx.Delete(&expense).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return tx.Delete(&advance).Error
+	})
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete advance payment"})
 		return
 	}

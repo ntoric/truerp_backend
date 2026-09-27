@@ -143,7 +143,7 @@ func TestBuildCashBankSummaryDeductsCashInHandExpense(t *testing.T) {
 		t.Fatalf("record expense: %v", err)
 	}
 
-	summary := buildCashBankSummary(db, userID, nil)
+	summary := buildCashBankSummary(db, userID, nil, "", "")
 	if summary.CashInHand != 750 {
 		t.Fatalf("cash in-hand = %.2f, want 750", summary.CashInHand)
 	}
@@ -175,7 +175,7 @@ func TestBuildCashBankSummaryDeductsBankExpense(t *testing.T) {
 		t.Fatalf("record expense: %v", err)
 	}
 
-	summary := buildCashBankSummary(db, userID, []models.BankAccount{account})
+	summary := buildCashBankSummary(db, userID, []models.BankAccount{account}, "", "")
 	if summary.CashInHand != 0 {
 		t.Fatalf("cash in-hand = %.2f, want 0", summary.CashInHand)
 	}
@@ -275,7 +275,7 @@ func TestCreateLinkedPurchasePaymentOutInitialInvestmentDoesNotMoveCash(t *testi
 		t.Fatalf("create payment out: %v", err)
 	}
 
-	summary := buildCashBankSummary(db, userID, nil)
+	summary := buildCashBankSummary(db, userID, nil, "", "")
 	if summary.CashInHand != 0 {
 		t.Fatalf("cash in-hand = %.2f, want 0", summary.CashInHand)
 	}
@@ -352,7 +352,7 @@ func TestCreateLinkedPurchasePaymentOutCashReducesCashInHand(t *testing.T) {
 		t.Fatalf("create payment out: %v", err)
 	}
 
-	summary := buildCashBankSummary(db, userID, nil)
+	summary := buildCashBankSummary(db, userID, nil, "", "")
 	if summary.CashInHand != -1200 {
 		t.Fatalf("cash in-hand = %.2f, want -1200", summary.CashInHand)
 	}

@@ -262,7 +262,7 @@ func TestImportCashBankStatementRows(t *testing.T) {
 	}
 	// Cash in hand keeps only the cash rows: pin1 500+300, add-money 5000,
 	// less the sales-return refund 140.
-	if got := sumSignedCashMovements(db, userID, nil); got != 5660 {
+	if got := sumSignedCashMovements(db, userID, nil, ""); got != 5660 {
 		t.Fatalf("cash in hand = %v, want 5660", got)
 	}
 

@@ -183,9 +183,12 @@ func loadReportForRange(userID uuid.UUID, startDate, endDate string) (models.Dai
 	aggregate(&models.PaymentOut{}, "date", "amount_paid", "", &report.PaymentsOut)
 	aggregate(&models.SalesReturn{}, "date", "amount", "status != 'cancelled'", &report.SalesReturns)
 	aggregate(&models.PurchaseReturn{}, "date", "amount", "status != 'cancelled'", &report.PurchaseReturns)
+	aggregate(&models.ProfitDistribution{}, "date", "amount", "", &report.ProfitDistributions)
+	aggregate(&models.Payroll{}, "payment_date", "net_salary", "status = 'paid'", &report.Payrolls)
 
 	report.PaymentsByMethod = loadPaymentsByMethod(userID, startDate, endDate)
 	report.ExpenseLines = loadExpenseLines(userID, startDate, endDate)
+	report.PayrollLines = loadPayrollLines(userID, startDate, endDate)
 
 	utils.DB.Model(&models.PurchaseBill{}).
 		Where("user_id = ? AND DATE(bill_date) >= ? AND DATE(bill_date) <= ? AND total_amount > paid_amount", userID, startDate, endDate).
@@ -206,9 +209,6 @@ func loadReportForRange(userID uuid.UUID, startDate, endDate string) (models.Dai
 	report.DailyProfit = report.Sales.TotalAmount -
 		report.CreditNotes.TotalAmount -
 		report.SalesReturns.TotalAmount -
-		report.Purchases.TotalAmount +
-		report.PurchaseReturns.TotalAmount +
-		report.DebitNotes.TotalAmount -
 		report.Expenses.TotalAmount
 
 	report.ProductProfit = computeProductProfitForRange(userID, startDate, endDate)
@@ -412,6 +412,34 @@ func loadExpenseLines(userID uuid.UUID, startDate, endDate string) []models.Expe
 	return lines
 }
 
+// loadPayrollLines returns one row per paid payroll payment dated in
+// [startDate, endDate], newest first, for the per-staff payroll breakdown
+// in the daily/periodic report.
+func loadPayrollLines(userID uuid.UUID, startDate, endDate string) []models.PayrollLine {
+	var payrolls []models.Payroll
+	if err := utils.DB.
+		Where("user_id = ? AND DATE(payment_date) >= ? AND DATE(payment_date) <= ? AND status = ?",
+			userID, startDate, endDate, "paid").
+		Preload("Staff").
+		Order("payment_date DESC, created_at DESC").
+		Find(&payrolls).Error; err != nil {
+		return nil
+	}
+
+	lines := make([]models.PayrollLine, 0, len(payrolls))
+	for _, p := range payrolls {
+		lines = append(lines, models.PayrollLine{
+			ID:            p.ID,
+			PaymentNumber: p.PaymentNumber,
+			StaffName:     p.Staff.Name,
+			Date:          p.PaymentDate.Format("2006-01-02"),
+			PaymentMode:   p.PaymentMode,
+			NetSalary:     p.NetSalary,
+		})
+	}
+	return lines
+}
+
 func loadPeriodReport(userID uuid.UUID, period, anchorDate, startDate, endDate string) (models.PeriodReport, error) {
 	start, end, label, err := resolvePeriodRange(period, anchorDate, startDate, endDate)
 	if err != nil {
@@ -471,7 +499,7 @@ type reportTableRow struct {
 }
 
 func periodReportTableRows(report models.PeriodReport) []reportTableRow {
-	return []reportTableRow{
+	rows := []reportTableRow{
 		{label: "Sales (Invoices)", m: report.Sales},
 		{label: "Purchase Expense", m: report.Purchases},
 		{label: "Payment Out", m: report.PaymentsOut},
@@ -483,6 +511,13 @@ func periodReportTableRows(report models.PeriodReport) []reportTableRow {
 		{label: "Sales Returns", m: report.SalesReturns},
 		{label: "Purchase Returns", m: report.PurchaseReturns},
 	}
+	if report.ProfitDistributions.Count > 0 {
+		rows = append(rows, reportTableRow{label: "Profit Distributions", m: report.ProfitDistributions})
+	}
+	if report.Payrolls.Count > 0 {
+		rows = append(rows, reportTableRow{label: "Payroll", m: report.Payrolls})
+	}
+	return rows
 }
 
 func writePeriodReportCSV(c *gin.Context, report models.PeriodReport, filename string) {
@@ -511,7 +546,7 @@ func writePeriodReportCSV(c *gin.Context, report models.PeriodReport, filename s
 	_ = writer.Write([]string{""})
 	_ = writer.Write([]string{"Accounts Payable (total outstanding)", "", fmt.Sprintf("%.2f", report.AccountsPayableTotal)})
 	_ = writer.Write([]string{"GST Collected (Sales)", "", fmt.Sprintf("%.2f", report.GSTCollected)})
-	_ = writer.Write([]string{"Period Profit (Sales − Purchases − Expenses ± returns/notes)", "", fmt.Sprintf("%.2f", report.DailyProfit)})
+	_ = writer.Write([]string{"Period Profit (Sales − Expenses − Sales Returns/Credit Notes)", "", fmt.Sprintf("%.2f", report.DailyProfit)})
 	_ = writer.Write([]string{"Product Profit (sale value − purchase cost on items sold)", "", fmt.Sprintf("%.2f", report.ProductProfit)})
 	_ = writer.Write([]string{"Net Cash Flow (In − Out − Expenses)", "", fmt.Sprintf("%.2f", report.NetCashFlow)})
 	if report.Loyalty != nil && report.Loyalty.Enabled {
@@ -597,6 +632,36 @@ func writePeriodReportCSV(c *gin.Context, report models.PeriodReport, filename s
 			"",
 			"",
 			fmt.Sprintf("%.2f", report.Expenses.TotalAmount),
+		})
+	}
+
+	if len(report.PayrollLines) > 0 {
+		_ = writer.Write([]string{""})
+		_ = writer.Write([]string{"Payroll (per staff payment)"})
+		_ = writer.Write([]string{"Payment No", "Date", "Staff", "Payment mode", "Net salary (INR)"})
+		for _, line := range report.PayrollLines {
+			mode := line.PaymentMode
+			if mode == "" {
+				mode = "-"
+			}
+			staff := line.StaffName
+			if staff == "" {
+				staff = "-"
+			}
+			_ = writer.Write([]string{
+				line.PaymentNumber,
+				line.Date,
+				staff,
+				mode,
+				fmt.Sprintf("%.2f", line.NetSalary),
+			})
+		}
+		_ = writer.Write([]string{
+			"Total",
+			"",
+			"",
+			"",
+			fmt.Sprintf("%.2f", report.Payrolls.TotalAmount),
 		})
 	}
 }
@@ -835,6 +900,73 @@ func writeExpenseLinesPDF(pdf *fpdf.Fpdf, report models.PeriodReport) {
 	pdf.CellFormat(colAmount, 7, fmt.Sprintf("%.2f", report.Expenses.TotalAmount), "1", 1, "R", true, 0, "")
 }
 
+// writePayrollLinesPDF renders a per-staff salary payment table when the
+// report contains any paid payroll in the period.
+func writePayrollLinesPDF(pdf *fpdf.Fpdf, report models.PeriodReport) {
+	lines := report.PayrollLines
+	if len(lines) == 0 {
+		return
+	}
+
+	pdf.Ln(8)
+	pdf.SetFont("Arial", "B", 11)
+	pdf.SetTextColor(37, 99, 235)
+	pdf.CellFormat(0, 7, "PAYROLL", "", 1, "L", false, 0, "")
+	pdf.SetFont("Arial", "", 8)
+	pdf.SetTextColor(100, 100, 100)
+	pdf.CellFormat(0, 5, "Salary payments made to staff in this period.", "", 1, "L", false, 0, "")
+	pdf.Ln(2)
+
+	pageW, _ := pdf.GetPageSize()
+	leftM, _, rightM, _ := pdf.GetMargins()
+	usable := pageW - leftM - rightM
+	colNum := usable * 0.16
+	colDate := usable * 0.14
+	colStaff := usable * 0.34
+	colMode := usable * 0.18
+	colAmount := usable * 0.18
+
+	pdf.SetFillColor(220, 252, 231)
+	pdf.SetDrawColor(134, 239, 172)
+	pdf.SetFont("Arial", "B", 8)
+	pdf.SetTextColor(20, 83, 45)
+	pdf.CellFormat(colNum, 8, "Payment No.", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colDate, 8, "Date", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colStaff, 8, "Staff", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colMode, 8, "Mode", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colAmount, 8, "Net Salary (INR)", "1", 1, "R", true, 0, "")
+
+	for _, line := range lines {
+		pdf.SetFillColor(240, 253, 244)
+		pdf.SetFont("Arial", "", 8)
+		pdf.SetTextColor(40, 40, 40)
+
+		staff := line.StaffName
+		if staff == "" {
+			staff = "-"
+		}
+		mode := paymentMethodLabel(line.PaymentMode)
+		if mode == "" {
+			mode = "-"
+		}
+
+		pdf.CellFormat(colNum, 6.5, sanitizePDFText(line.PaymentNumber), "1", 0, "L", true, 0, "")
+		pdf.CellFormat(colDate, 6.5, line.Date, "1", 0, "L", true, 0, "")
+		pdf.CellFormat(colStaff, 6.5, sanitizePDFText(truncatePDF(staff, 40)), "1", 0, "L", true, 0, "")
+		pdf.CellFormat(colMode, 6.5, sanitizePDFText(mode), "1", 0, "L", true, 0, "")
+		pdf.SetFont("Arial", "B", 9)
+		pdf.SetTextColor(154, 52, 18)
+		pdf.CellFormat(colAmount, 6.5, fmt.Sprintf("%.2f", line.NetSalary), "1", 1, "R", true, 0, "")
+	}
+
+	pdf.SetFillColor(220, 252, 231)
+	pdf.SetFont("Arial", "B", 9)
+	pdf.SetTextColor(20, 83, 45)
+	pdf.CellFormat(colNum+colDate+colStaff+colMode, 7,
+		fmt.Sprintf("Total (%d salary payments)", len(lines)), "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colAmount, 7, fmt.Sprintf("%.2f", report.Payrolls.TotalAmount), "1", 1, "R", true, 0, "")
+}
+
 func buildDailyReportPDF(report models.DailyReport) ([]byte, error) {
 	return buildPeriodReportPDF(models.PeriodReport{
 		DailyReport: report,
@@ -960,7 +1092,7 @@ func buildPeriodReportPDF(report models.PeriodReport) ([]byte, error) {
 	cards := []summaryCard{
 		{"Sales", fmt.Sprintf("Rs. %.2f", report.Sales.TotalAmount), fmt.Sprintf("%d invoices", report.Sales.Count), 22, 101, 52},
 		{"Purchase expense", fmt.Sprintf("Rs. %.2f", purchaseExpense), fmt.Sprintf("Purchases %d · Ops expenses %d · AP %.2f", report.Purchases.Count, report.Expenses.Count, report.AccountsPayable.TotalAmount), 154, 52, 18},
-		{"Period profit", fmt.Sprintf("Rs. %.2f", report.DailyProfit), "Sales - purchases - expenses +/- returns", profitR, profitG, profitB},
+		{"Period profit", fmt.Sprintf("Rs. %.2f", report.DailyProfit), "Sales - expenses - returns/notes", profitR, profitG, profitB},
 		{"Product profit", fmt.Sprintf("Rs. %.2f", report.ProductProfit), "Sale value - purchase cost on items", productR, productG, productB},
 		{"Net cash flow", fmt.Sprintf("Rs. %.2f", report.NetCashFlow), "Payments in - out - expenses", 30, 64, 175},
 	}
@@ -1058,7 +1190,7 @@ func buildPeriodReportPDF(report models.PeriodReport) ([]byte, error) {
 	pdf.CellFormat(colCount, 7, "-", "1", 0, "R", true, 0, "")
 	pdf.CellFormat(colAmount, 7, fmt.Sprintf("%.2f", report.GSTCollected), "1", 1, "R", true, 0, "")
 
-	pdf.CellFormat(colSection, 7, "Period profit (Sales - Purchases - Expenses)", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(colSection, 7, "Period profit (Sales - Expenses - Returns/Notes)", "1", 0, "L", true, 0, "")
 	pdf.CellFormat(colCount, 7, "-", "1", 0, "R", true, 0, "")
 	pdf.CellFormat(colAmount, 7, fmt.Sprintf("%.2f", report.DailyProfit), "1", 1, "R", true, 0, "")
 
@@ -1079,6 +1211,8 @@ func buildPeriodReportPDF(report models.PeriodReport) ([]byte, error) {
 	writePaymentsByMethodPDF(pdf, report)
 
 	writeExpenseLinesPDF(pdf, report)
+
+	writePayrollLinesPDF(pdf, report)
 
 	writeLoyaltySummaryPDF(pdf, report)
 

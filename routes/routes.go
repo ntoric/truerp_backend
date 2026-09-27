@@ -702,6 +702,7 @@ func SetupRoutes(r *gin.Engine) {
 		payroll.GET("", controllers.GetPayrolls)
 		payroll.GET("/stats", controllers.GetPayrollStats)
 		payroll.GET("/next-number", controllers.GetNextPaymentNumber)
+		payroll.GET("/calculate", controllers.CalculatePayroll)
 		payroll.POST("", controllers.CreatePayroll)
 		payroll.POST("/bulk/delete", controllers.BulkDeletePayrolls)
 		payroll.POST("/bulk/update-status", controllers.BulkUpdatePayrollStatus)

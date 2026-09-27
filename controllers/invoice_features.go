@@ -21,16 +21,35 @@ var allowedInvoiceStatuses = map[string]bool{
 
 func syncOverdueInvoices(userID uuid.UUID) {
 	now := time.Now()
-	var invoices []models.Invoice
-	utils.DB.Where("user_id = ? AND status IN ? AND due_date IS NOT NULL AND due_date < ? AND total_amount > amount_paid",
-		userID, []string{"sent", "partial"}, now).Find(&invoices)
-	for _, inv := range invoices {
-		prev := inv.Status
-		inv.Status = "overdue"
-		if err := utils.DB.Model(&inv).Update("status", "overdue").Error; err == nil && prev != "overdue" {
-			recordInvoiceStatusHistory(inv.ID, userID, prev, "overdue", "Automatically marked overdue", "system")
-		}
+	var stale []models.Invoice
+	utils.DB.Select("id", "status").Where(
+		"user_id = ? AND status IN ? AND due_date IS NOT NULL AND due_date < ? AND total_amount > amount_paid",
+		userID, []string{"sent", "partial"}, now).Find(&stale)
+	if len(stale) == 0 {
+		return
 	}
+	ids := make([]uuid.UUID, 0, len(stale))
+	for _, inv := range stale {
+		ids = append(ids, inv.ID)
+	}
+	if err := utils.DB.Model(&models.Invoice{}).Where("id IN ?", ids).
+		Update("status", "overdue").Error; err != nil {
+		return
+	}
+	entries := make([]models.InvoiceStatusHistory, 0, len(stale))
+	for _, inv := range stale {
+		entries = append(entries, models.InvoiceStatusHistory{
+			ID:         uuid.New(),
+			InvoiceID:  inv.ID,
+			UserID:     userID,
+			FromStatus: inv.Status,
+			ToStatus:   "overdue",
+			Note:       "Automatically marked overdue",
+			ChangedBy:  "system",
+			CreatedAt:  now,
+		})
+	}
+	utils.DB.Create(&entries)
 }
 
 func normalizeInvoicePaymentStatus(invoice *models.Invoice) {

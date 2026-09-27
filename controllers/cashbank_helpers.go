@@ -224,7 +224,7 @@ func bankAccountIDValue(id *uuid.UUID) interface{} {
 // (reduce, expense, payroll, transfer_out) is negative.
 const cashTxnSignedSumSQL = "COALESCE(SUM(CASE WHEN transaction_type IN ('add', 'transfer_in') THEN amount ELSE -amount END), 0)"
 
-func sumSignedCashMovements(db *gorm.DB, userID uuid.UUID, accountID *uuid.UUID) float64 {
+func sumSignedCashMovements(db *gorm.DB, userID uuid.UUID, accountID *uuid.UUID, endDate string) float64 {
 	var total float64
 	q := db.Model(&models.CashTransaction{}).Where("user_id = ?", userID)
 	if accountID == nil {
@@ -233,6 +233,9 @@ func sumSignedCashMovements(db *gorm.DB, userID uuid.UUID, accountID *uuid.UUID)
 		q = q.Where("account_id = ?", *accountID)
 	}
 	q = q.Where("deleted_at IS NULL")
+	if endDate != "" {
+		q = q.Where(utils.SQLDateLTE("date"), endDate)
+	}
 	// "? AS total" forces GORM to treat the aggregate as an expression instead of column names.
 	if err := q.Select("? AS total", gorm.Expr(cashTxnSignedSumSQL)).Scan(&total).Error; err != nil {
 		return 0
@@ -240,19 +243,49 @@ func sumSignedCashMovements(db *gorm.DB, userID uuid.UUID, accountID *uuid.UUID)
 	return total
 }
 
-func applyLedgerBalancesToAccounts(db *gorm.DB, userID uuid.UUID, accounts []models.BankAccount) {
+// sumSignedCashMovementsInRange nets cash/bank movements inside [startDate, endDate].
+// scope selects "cash" (account_id NULL), "bank" (any account), or "" for both.
+func sumSignedCashMovementsInRange(db *gorm.DB, userID uuid.UUID, scope, startDate, endDate string) float64 {
+	var total float64
+	q := db.Model(&models.CashTransaction{}).Where("user_id = ?", userID)
+	switch scope {
+	case "cash":
+		q = q.Where("account_id IS NULL")
+	case "bank":
+		q = q.Where("account_id IS NOT NULL")
+	}
+	q = q.Where("deleted_at IS NULL")
+	if startDate != "" {
+		q = q.Where(utils.SQLDateGTE("date"), startDate)
+	}
+	if endDate != "" {
+		q = q.Where(utils.SQLDateLTE("date"), endDate)
+	}
+	if err := q.Select("? AS total", gorm.Expr(cashTxnSignedSumSQL)).Scan(&total).Error; err != nil {
+		return 0
+	}
+	return total
+}
+
+func applyLedgerBalancesToAccounts(db *gorm.DB, userID uuid.UUID, accounts []models.BankAccount, endDate string) {
 	for i := range accounts {
 		accountID := accounts[i].ID
-		accounts[i].Balance = accounts[i].OpeningBalance + sumSignedCashMovements(db, userID, &accountID)
+		accounts[i].Balance = accounts[i].OpeningBalance + sumSignedCashMovements(db, userID, &accountID, endDate)
 	}
 }
 
-func sumInitialInvestmentCapital(db *gorm.DB, userID uuid.UUID) float64 {
+func sumInitialInvestmentCapital(db *gorm.DB, userID uuid.UUID, startDate, endDate string) float64 {
 	var total float64
 	// Opening stock and other purchases settled as owner's capital.
-	err := db.Model(&models.PaymentOut{}).
-		Where("user_id = ? AND LOWER(TRIM(COALESCE(mode, ''))) = ?", userID, paymentMethodInitialInvestment).
-		Select("? AS total", gorm.Expr("COALESCE(SUM(amount_paid - COALESCE(payment_out_discount, 0)), 0)")).
+	q := db.Model(&models.PaymentOut{}).
+		Where("user_id = ? AND LOWER(TRIM(COALESCE(mode, ''))) = ?", userID, paymentMethodInitialInvestment)
+	if startDate != "" {
+		q = q.Where(utils.SQLDateGTE("date"), startDate)
+	}
+	if endDate != "" {
+		q = q.Where(utils.SQLDateLTE("date"), endDate)
+	}
+	err := q.Select("? AS total", gorm.Expr("COALESCE(SUM(amount_paid - COALESCE(payment_out_discount, 0)), 0)")).
 		Scan(&total).Error
 	if err != nil {
 		return 0
@@ -260,34 +293,52 @@ func sumInitialInvestmentCapital(db *gorm.DB, userID uuid.UUID) float64 {
 	return total
 }
 
-func buildCashBankSummary(db *gorm.DB, userID uuid.UUID, accounts []models.BankAccount) models.CashBankSummary {
-	applyLedgerBalancesToAccounts(db, userID, accounts)
+// buildCashBankSummary reports balances as of endDate (empty = current) and
+// scopes flow stats (initial investment, unlinked, net changes) to [startDate, endDate].
+func buildCashBankSummary(db *gorm.DB, userID uuid.UUID, accounts []models.BankAccount, startDate, endDate string) models.CashBankSummary {
+	applyLedgerBalancesToAccounts(db, userID, accounts, endDate)
 
-	cashInHand := sumSignedCashMovements(db, userID, nil)
+	cashInHand := sumSignedCashMovements(db, userID, nil, endDate)
 
 	totalBankBalance := 0.0
 	for _, acc := range accounts {
 		totalBankBalance += acc.Balance
 	}
 
+	unlinkedQuery := func() *gorm.DB {
+		q := db.Model(&models.CashTransaction{}).
+			Where("user_id = ? AND is_linked = ?", userID, false)
+		if startDate != "" {
+			q = q.Where(utils.SQLDateGTE("date"), startDate)
+		}
+		if endDate != "" {
+			q = q.Where(utils.SQLDateLTE("date"), endDate)
+		}
+		return q
+	}
+
 	var unlinkedCount int64
 	var unlinkedAmount float64
-	db.Model(&models.CashTransaction{}).
-		Where("user_id = ? AND is_linked = ?", userID, false).
-		Count(&unlinkedCount)
-	db.Model(&models.CashTransaction{}).
-		Where("user_id = ? AND is_linked = ?", userID, false).
+	unlinkedQuery().Count(&unlinkedCount)
+	unlinkedQuery().
 		Select("? AS total", gorm.Expr("COALESCE(SUM(amount), 0)")).
 		Scan(&unlinkedAmount)
 
-	return models.CashBankSummary{
+	summary := models.CashBankSummary{
 		TotalBalance:      totalBankBalance + cashInHand,
 		CashInHand:        cashInHand,
-		InitialInvestment: sumInitialInvestmentCapital(db, userID),
+		InitialInvestment: sumInitialInvestmentCapital(db, userID, startDate, endDate),
 		BankAccounts:      accounts,
 		UnlinkedCount:     unlinkedCount,
 		UnlinkedAmount:    unlinkedAmount,
 	}
+
+	if startDate != "" || endDate != "" {
+		summary.CashNetChange = sumSignedCashMovementsInRange(db, userID, "cash", startDate, endDate)
+		summary.BankNetChange = sumSignedCashMovementsInRange(db, userID, "bank", startDate, endDate)
+	}
+
+	return summary
 }
 
 func adjustBankAccountBalance(tx *gorm.DB, userID uuid.UUID, accountID *uuid.UUID, delta float64, requireActive bool) error {

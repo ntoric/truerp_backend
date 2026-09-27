@@ -3,11 +3,49 @@ package models
 import (
 	"database/sql/driver"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+// AdditionalCharge is a labelled extra charge/expense line shown on a
+// document (invoice, quotation, purchase bill). Stored per document as a
+// JSON array; the aggregate is kept in the *_additional_charges column.
+type AdditionalCharge struct {
+	Label  string  `json:"label"`
+	Amount float64 `json:"amount"`
+}
+
+// NormalizeAdditionalCharges trims labels, defaults empty labels, drops
+// zero-amount rows and rejects negative amounts.
+func NormalizeAdditionalCharges(items []AdditionalCharge) ([]AdditionalCharge, error) {
+	out := make([]AdditionalCharge, 0, len(items))
+	for _, item := range items {
+		label := strings.TrimSpace(item.Label)
+		if item.Amount < 0 {
+			return nil, fmt.Errorf("additional charge amount cannot be negative")
+		}
+		if item.Amount == 0 {
+			continue
+		}
+		if label == "" {
+			label = "Additional Charge"
+		}
+		out = append(out, AdditionalCharge{Label: label, Amount: item.Amount})
+	}
+	return out, nil
+}
+
+// SumAdditionalCharges returns the aggregate of labelled charge rows.
+func SumAdditionalCharges(items []AdditionalCharge) float64 {
+	total := 0.0
+	for _, item := range items {
+		total += item.Amount
+	}
+	return total
+}
 
 // FlexibleTime is a custom time type that can parse both date-only (YYYY-MM-DD) and full datetime (ISO 8601) formats
 type FlexibleTime struct {
@@ -168,33 +206,36 @@ type PaymentSplit struct {
 }
 
 type Invoice struct {
-	ID                    uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID                uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index;uniqueIndex:idx_invoice_user_client_sale"`
-	InvoiceNumber         string         `json:"invoice_number" gorm:"not null;index"`
-	InvoiceType           string         `json:"invoice_type" gorm:"default:'tax_invoice'"` // tax_invoice, bill_of_supply, export
-	PartyID               uuid.UUID      `json:"party_id" gorm:"type:uuid;not null"`
-	Date                  time.Time      `json:"date" gorm:"not null"`
-	DueDate               *time.Time     `json:"due_date,omitempty"`
-	PaymentTerms          int            `json:"payment_terms" gorm:"default:0"` // Payment term in days
-	Status                string         `json:"status" gorm:"default:'draft'"`  // draft, sent, paid, overdue, cancelled
-	SubTotal              float64        `json:"sub_total" gorm:"default:0"`
-	DiscountTotal         float64        `json:"discount_total" gorm:"default:0"`
-	InvoiceDiscount       float64        `json:"invoice_discount" gorm:"default:0"` // Additional invoice-level discount
-	AdditionalCharges     float64        `json:"additional_charges" gorm:"default:0"`
-	TaxTotal              float64        `json:"tax_total" gorm:"default:0"`
-	CGSTTotal             float64        `json:"cgst_total" gorm:"default:0"`
-	SGSTTotal             float64        `json:"sgst_total" gorm:"default:0"`
-	IGSTTotal             float64        `json:"igst_total" gorm:"default:0"`
-	RoundOff              float64        `json:"round_off" gorm:"default:0"`
-	TotalAmount           float64        `json:"total_amount" gorm:"default:0"`
-	AmountPaid            float64        `json:"amount_paid" gorm:"default:0"`
-	LoyaltyPointsRedeemed int64          `json:"loyalty_points_redeemed" gorm:"default:0"`
-	LoyaltyPointsEarned   int64          `json:"loyalty_points_earned" gorm:"default:0"`
-	LoyaltyDiscount       float64        `json:"loyalty_discount" gorm:"default:0"`
-	PaymentMode           string         `json:"payment_mode"`
-	BankAccountID         *uuid.UUID     `json:"bank_account_id,omitempty" gorm:"type:uuid;index"`
-	PaymentSplits         []PaymentSplit `json:"payment_splits,omitempty" gorm:"-"`
-	Notes                 string         `json:"notes"`
+	ID                uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID            uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index;index:idx_invoices_user_status,priority:1;index:idx_invoices_user_date,priority:1;uniqueIndex:idx_invoice_user_client_sale"`
+	InvoiceNumber     string     `json:"invoice_number" gorm:"not null;index"`
+	InvoiceType       string     `json:"invoice_type" gorm:"default:'tax_invoice'"` // tax_invoice, bill_of_supply, export
+	PartyID           uuid.UUID  `json:"party_id" gorm:"type:uuid;not null"`
+	Date              time.Time  `json:"date" gorm:"not null;index:idx_invoices_user_date,priority:2"`
+	DueDate           *time.Time `json:"due_date,omitempty"`
+	PaymentTerms      int        `json:"payment_terms" gorm:"default:0"`                                          // Payment term in days
+	Status            string     `json:"status" gorm:"default:'draft';index:idx_invoices_user_status,priority:2"` // draft, sent, paid, overdue, cancelled
+	SubTotal          float64    `json:"sub_total" gorm:"default:0"`
+	DiscountTotal     float64    `json:"discount_total" gorm:"default:0"`
+	InvoiceDiscount   float64    `json:"invoice_discount" gorm:"default:0"` // Additional invoice-level discount
+	AdditionalCharges float64    `json:"additional_charges" gorm:"default:0"`
+	// AdditionalChargeItems is the labelled breakdown behind
+	// AdditionalCharges (e.g. [{"label":"Freight","amount":50}]).
+	AdditionalChargeItems []AdditionalCharge `json:"additional_charge_items,omitempty" gorm:"type:text;serializer:json"`
+	TaxTotal              float64            `json:"tax_total" gorm:"default:0"`
+	CGSTTotal             float64            `json:"cgst_total" gorm:"default:0"`
+	SGSTTotal             float64            `json:"sgst_total" gorm:"default:0"`
+	IGSTTotal             float64            `json:"igst_total" gorm:"default:0"`
+	RoundOff              float64            `json:"round_off" gorm:"default:0"`
+	TotalAmount           float64            `json:"total_amount" gorm:"default:0"`
+	AmountPaid            float64            `json:"amount_paid" gorm:"default:0"`
+	LoyaltyPointsRedeemed int64              `json:"loyalty_points_redeemed" gorm:"default:0"`
+	LoyaltyPointsEarned   int64              `json:"loyalty_points_earned" gorm:"default:0"`
+	LoyaltyDiscount       float64            `json:"loyalty_discount" gorm:"default:0"`
+	PaymentMode           string             `json:"payment_mode"`
+	BankAccountID         *uuid.UUID         `json:"bank_account_id,omitempty" gorm:"type:uuid;index"`
+	PaymentSplits         []PaymentSplit     `json:"payment_splits,omitempty" gorm:"-"`
+	Notes                 string             `json:"notes"`
 	// SourceURL is the original external invoice link (e.g. myBillBook
 	// https://mybillbook.in/csi/<id>). Populated during migration import so
 	// the source document can be re-opened later. Kept out of Notes so it is
@@ -249,7 +290,7 @@ type InvoiceItem struct {
 
 type Payment struct {
 	ID                uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID            uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	UserID            uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index;index:idx_payments_user_date,priority:1"`
 	InvoiceID         *uuid.UUID     `json:"invoice_id,omitempty" gorm:"type:uuid"`
 	Invoice           *Invoice       `json:"invoice,omitempty" gorm:"foreignKey:InvoiceID"`
 	PartyID           uuid.UUID      `json:"party_id" gorm:"type:uuid;not null"`
@@ -258,7 +299,7 @@ type Payment struct {
 	PaymentInDiscount float64        `json:"payment_in_discount" gorm:"default:0"`
 	PaymentInNumber   string         `json:"payment_in_number"`
 	Mode              string         `json:"mode"` // cash, upi, bank_transfer, cheque, card, initial_investment
-	Date              time.Time      `json:"date"`
+	Date              time.Time      `json:"date" gorm:"index:idx_payments_user_date,priority:2"`
 	Reference         string         `json:"reference"`
 	Notes             string         `json:"notes"`
 	CreatedAt         time.Time      `json:"created_at"`
@@ -268,7 +309,7 @@ type Payment struct {
 
 type PaymentOut struct {
 	ID                 uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID             uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	UserID             uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index;index:idx_payment_outs_user_date,priority:1"`
 	PurchaseBillID     *uuid.UUID     `json:"purchase_bill_id,omitempty" gorm:"type:uuid"`
 	PurchaseBill       *PurchaseBill  `json:"purchase_bill,omitempty" gorm:"foreignKey:PurchaseBillID"`
 	PartyID            uuid.UUID      `json:"party_id" gorm:"type:uuid;not null"`
@@ -277,7 +318,7 @@ type PaymentOut struct {
 	PaymentOutDiscount float64        `json:"payment_out_discount" gorm:"default:0"`
 	PaymentOutNumber   string         `json:"payment_out_number"`
 	Mode               string         `json:"mode"` // cash, upi, bank_transfer, cheque, card, initial_investment
-	Date               time.Time      `json:"date"`
+	Date               time.Time      `json:"date" gorm:"index:idx_payment_outs_user_date,priority:2"`
 	Reference          string         `json:"reference"`
 	Notes              string         `json:"notes"`
 	CreatedAt          time.Time      `json:"created_at"`
@@ -370,6 +411,17 @@ type ExpenseLine struct {
 	SubTotal        float64    `json:"sub_total"`
 }
 
+// PayrollLine is a single salary payment shown in the daily/periodic report
+// payroll breakdown. One row is emitted per paid payroll in the period.
+type PayrollLine struct {
+	ID            uuid.UUID `json:"id"`
+	PaymentNumber string    `json:"payment_number"`
+	StaffName     string    `json:"staff_name"`
+	Date          string    `json:"date"`
+	PaymentMode   string    `json:"payment_mode"`
+	NetSalary     float64   `json:"net_salary"`
+}
+
 type DailyReport struct {
 	Date            string            `json:"date"`
 	BusinessName    string            `json:"business_name"`
@@ -382,6 +434,15 @@ type DailyReport struct {
 	PaymentsOut     DailyReportMetric `json:"payments_out"`
 	SalesReturns    DailyReportMetric `json:"sales_returns"`
 	PurchaseReturns DailyReportMetric `json:"purchase_returns"`
+	// ProfitDistributions is profit paid out to partners in this period.
+	// Renderers should only show it when Count > 0.
+	ProfitDistributions DailyReportMetric `json:"profit_distributions"`
+	// Payrolls is salary paid to staff in this period (paid payroll records by
+	// payment date). Renderers should only show it when Count > 0.
+	Payrolls DailyReportMetric `json:"payrolls"`
+	// PayrollLines lists each paid payroll dated in this period with the staff
+	// name, for the per-payment payroll breakdown. Empty when none exist.
+	PayrollLines []PayrollLine `json:"payroll_lines"`
 	// ExpenseLines lists each individual expense dated in this period, for the
 	// per-expense breakdown table. Empty when no expenses exist for the range.
 	ExpenseLines []ExpenseLine `json:"expense_lines"`
@@ -394,7 +455,8 @@ type DailyReport struct {
 	AccountsPayableTotal float64 `json:"accounts_payable_total"`
 	GSTCollected         float64 `json:"gst_collected"`
 	NetCashFlow          float64 `json:"net_cash_flow"`
-	// DailyProfit = net sales − net purchases − operating expenses (accrual, not cash flow).
+	// DailyProfit = net sales − operating expenses (accrual, not cash flow).
+	// Purchases, purchase returns and debit notes are excluded from this figure.
 	DailyProfit float64 `json:"daily_profit"`
 	// ProductProfit = gross margin on products sold (sale value − purchase cost), net of returns/credit notes.
 	ProductProfit float64 `json:"product_profit"`
@@ -488,7 +550,7 @@ type CashMovement struct {
 
 type StockEntry struct {
 	ID             uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID         uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	UserID         uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index;index:idx_stock_entries_user_date,priority:1"`
 	ItemName       string         `json:"item_name" gorm:"not null"`
 	ProductID      *uuid.UUID     `json:"product_id" gorm:"type:uuid;index"` // Optional link to product
 	Product        Product        `json:"product,omitempty" gorm:"foreignKey:ProductID"`
@@ -507,7 +569,7 @@ type StockEntry struct {
 	ApprovalStatus string         `json:"approval_status" gorm:"default:'approved';index"` // pending, approved, rejected
 	ApprovedBy     *uuid.UUID     `json:"approved_by,omitempty" gorm:"type:uuid"`
 	ApprovedAt     *time.Time     `json:"approved_at,omitempty"`
-	EntryDate      time.Time      `json:"entry_date"`
+	EntryDate      time.Time      `json:"entry_date" gorm:"index:idx_stock_entries_user_date,priority:2"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
 	DeletedAt      gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
@@ -534,7 +596,7 @@ type InventoryStock struct {
 
 type StockTransfer struct {
 	ID            uuid.UUID           `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID        uuid.UUID           `json:"user_id" gorm:"type:uuid;not null;index"`
+	UserID        uuid.UUID           `json:"user_id" gorm:"type:uuid;not null;index;index:idx_stock_transfers_user_created,priority:1"`
 	FromOutletID  uuid.UUID           `json:"from_outlet_id" gorm:"type:uuid"`
 	ToOutletID    uuid.UUID           `json:"to_outlet_id" gorm:"type:uuid"`
 	Status        string              `json:"status" gorm:"default:'draft'"` // draft, submitted, received, cancelled
@@ -543,7 +605,7 @@ type StockTransfer struct {
 	Notes         string              `json:"notes"`
 	SentDate      *time.Time          `json:"sent_date,omitempty"`
 	ReceivedDate  *time.Time          `json:"received_date,omitempty"`
-	CreatedAt     time.Time           `json:"created_at"`
+	CreatedAt     time.Time           `json:"created_at" gorm:"index:idx_stock_transfers_user_created,priority:2"`
 	UpdatedAt     time.Time           `json:"updated_at"`
 	DeletedAt     gorm.DeletedAt      `json:"deleted_at,omitempty" gorm:"index"`
 	Items         []StockTransferItem `json:"items" gorm:"foreignKey:TransferID;constraint:OnDelete:CASCADE;"`
@@ -632,7 +694,7 @@ type PurchaseReceiptItem struct {
 
 type PurchaseBill struct {
 	ID                uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID            uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index"`
+	UserID            uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index;index:idx_purchase_bills_user_status,priority:1;index:idx_purchase_bills_user_date,priority:1"`
 	PurchaseReceiptID *uuid.UUID `json:"purchase_receipt_id" gorm:"type:uuid"`
 	PartyID           uuid.UUID  `json:"party_id" gorm:"type:uuid;not null"`
 	VendorID          *uuid.UUID `json:"vendor_id,omitempty" gorm:"type:uuid"` // legacy alias for party_id
@@ -640,22 +702,28 @@ type PurchaseBill struct {
 	// ClientBillID is a frontend-generated UUID that makes bill creation
 	// idempotent: a retry with the same value returns the already-saved bill
 	// instead of creating a duplicate. Mirrors Invoice.ClientSaleID.
-	ClientBillID  *uuid.UUID `json:"client_bill_id,omitempty" gorm:"type:uuid;index;uniqueIndex:idx_purchase_bill_user_client_bill"`
-	BillNumber    string     `json:"bill_number" gorm:"not null;index"`
-	BillDate      time.Time  `json:"bill_date" gorm:"not null"`
-	DueDate       *time.Time `json:"due_date,omitempty"`
-	Status        string     `json:"status" gorm:"default:'unpaid'"` // unpaid, paid, partial
-	WarehouseID   *uuid.UUID `json:"warehouse_id,omitempty" gorm:"type:uuid;index"`
-	StockStatus   string     `json:"stock_status" gorm:"default:'none'"` // none, pending, approved, rejected, partial
-	SubTotal      float64    `json:"sub_total" gorm:"default:0"`
-	TaxTotal      float64    `json:"tax_total" gorm:"default:0"`
-	TaxExempt     bool       `json:"tax_exempt" gorm:"default:false"`
-	TotalAmount   float64    `json:"total_amount" gorm:"default:0"`
-	PaidAmount    float64    `json:"paid_amount" gorm:"default:0"`
-	BalanceDue    float64    `json:"balance_due" gorm:"default:0"`
-	PaymentMode   string     `json:"payment_mode"`
-	BankAccountID *uuid.UUID `json:"bank_account_id,omitempty" gorm:"type:uuid;index"`
-	Notes         string     `json:"notes"`
+	ClientBillID      *uuid.UUID `json:"client_bill_id,omitempty" gorm:"type:uuid;index;uniqueIndex:idx_purchase_bill_user_client_bill"`
+	BillNumber        string     `json:"bill_number" gorm:"not null;index"`
+	BillDate          time.Time  `json:"bill_date" gorm:"not null;index:idx_purchase_bills_user_date,priority:2"`
+	DueDate           *time.Time `json:"due_date,omitempty"`
+	Status            string     `json:"status" gorm:"default:'unpaid';index:idx_purchase_bills_user_status,priority:2"` // unpaid, paid, partial
+	WarehouseID       *uuid.UUID `json:"warehouse_id,omitempty" gorm:"type:uuid;index"`
+	StockStatus       string     `json:"stock_status" gorm:"default:'none'"` // none, pending, approved, rejected, partial
+	SubTotal          float64    `json:"sub_total" gorm:"default:0"`
+	TaxTotal          float64    `json:"tax_total" gorm:"default:0"`
+	TaxExempt         bool       `json:"tax_exempt" gorm:"default:false"`
+	InvoiceDiscount   float64    `json:"invoice_discount" gorm:"default:0"`
+	AdditionalCharges float64    `json:"additional_charges" gorm:"default:0"`
+	// AdditionalChargeItems is the labelled breakdown behind
+	// AdditionalCharges (e.g. [{"label":"Transport","amount":200}]).
+	AdditionalChargeItems []AdditionalCharge `json:"additional_charge_items,omitempty" gorm:"type:text;serializer:json"`
+	TotalAmount           float64            `json:"total_amount" gorm:"default:0"`
+	PaidAmount            float64            `json:"paid_amount" gorm:"default:0"`
+	BalanceDue            float64            `json:"balance_due" gorm:"default:0"`
+	PaymentMode           string             `json:"payment_mode"`
+	BankAccountID         *uuid.UUID         `json:"bank_account_id,omitempty" gorm:"type:uuid;index"`
+	Notes                 string             `json:"notes"`
+	Signature             string             `json:"signature"`
 	// SourceURL is the original external bill link (e.g. myBillBook
 	// https://mybillbook.in/cpp/<id>). Populated during migration import so
 	// the source document can be re-opened or re-downloaded later.
@@ -1006,12 +1074,12 @@ type BankAccount struct {
 
 type CashTransaction struct {
 	ID              uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index;index:idx_cash_txns_user_date,priority:1"`
 	AccountID       *uuid.UUID     `json:"account_id,omitempty" gorm:"type:uuid"`
 	Account         *BankAccount   `json:"account,omitempty" gorm:"foreignKey:AccountID"`
 	TransactionType string         `json:"transaction_type" gorm:"not null"` // add, reduce, transfer_in, transfer_out, payroll
 	Amount          float64        `json:"amount" gorm:"not null"`
-	Date            time.Time      `json:"date" gorm:"not null"`
+	Date            time.Time      `json:"date" gorm:"not null;index:idx_cash_txns_user_date,priority:2"`
 	Description     string         `json:"description"`
 	Reference       string         `json:"reference"`
 	FromAccountID   *uuid.UUID     `json:"from_account_id,omitempty" gorm:"type:uuid"` // For transfers
@@ -1029,6 +1097,8 @@ type CashBankSummary struct {
 	BankAccounts      []BankAccount `json:"bank_accounts"`
 	UnlinkedCount     int64         `json:"unlinked_count"`
 	UnlinkedAmount    float64       `json:"unlinked_amount"`
+	CashNetChange     float64       `json:"cash_net_change"`
+	BankNetChange     float64       `json:"bank_net_change"`
 }
 
 type PaymentMethodAccountMap struct {
@@ -1143,25 +1213,28 @@ type StaffDeduction struct {
 }
 
 type StaffAdvancePayment struct {
-	ID                   uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID               uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
-	StaffID              uuid.UUID      `json:"staff_id" gorm:"type:uuid;not null;index"`
-	Staff                Staff          `json:"staff,omitempty" gorm:"foreignKey:StaffID"`
-	AdvanceNumber        string         `json:"advance_number" gorm:"not null;index"`
-	Amount               float64        `json:"amount" gorm:"default:0"`
-	Reason               string         `json:"reason"`
-	AdvanceDate          time.Time      `json:"advance_date" gorm:"not null"`
-	ExpectedRecoveryDate *time.Time     `json:"expected_recovery_date,omitempty"`
-	IsRecovered          bool           `json:"is_recovered" gorm:"default:false"`
-	RecoveredAmount      float64        `json:"recovered_amount" gorm:"default:0"`
-	PendingAmount        float64        `json:"pending_amount" gorm:"default:0"`
-	PaymentMode          string         `json:"payment_mode"` // cash, bank_transfer, upi, cheque
-	Reference            string         `json:"reference"`
-	Notes                string         `json:"notes"`
-	Status               string         `json:"status" gorm:"default:'pending'"` // pending, partial, recovered
-	CreatedAt            time.Time      `json:"created_at"`
-	UpdatedAt            time.Time      `json:"updated_at"`
-	DeletedAt            gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+	ID                    uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID                uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	StaffID               uuid.UUID      `json:"staff_id" gorm:"type:uuid;not null;index"`
+	Staff                 Staff          `json:"staff,omitempty" gorm:"foreignKey:StaffID"`
+	AdvanceNumber         string         `json:"advance_number" gorm:"not null;index"`
+	Amount                float64        `json:"amount" gorm:"default:0"`
+	Reason                string         `json:"reason"`
+	AdvanceDate           time.Time      `json:"advance_date" gorm:"not null"`
+	ExpectedRecoveryDate  *time.Time     `json:"expected_recovery_date,omitempty"`
+	IsRecovered           bool           `json:"is_recovered" gorm:"default:false"`
+	RecoveredAmount       float64        `json:"recovered_amount" gorm:"default:0"`
+	PendingAmount         float64        `json:"pending_amount" gorm:"default:0"`
+	PaymentMode           string         `json:"payment_mode"` // cash, bank_transfer, upi, cheque
+	Reference             string         `json:"reference"`
+	Notes                 string         `json:"notes"`
+	Status                string         `json:"status" gorm:"default:'pending'"` // pending, partial, recovered
+	ExpenseID             *uuid.UUID     `json:"expense_id,omitempty" gorm:"type:uuid;index"`
+	RecoveredByPayrollID  *uuid.UUID     `json:"recovered_by_payroll_id,omitempty" gorm:"type:uuid;index"`
+	PayrollRecoveryAmount float64        `json:"payroll_recovery_amount" gorm:"default:0"`
+	CreatedAt             time.Time      `json:"created_at"`
+	UpdatedAt             time.Time      `json:"updated_at"`
+	DeletedAt             gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type InvoiceSettings struct {
@@ -1187,7 +1260,7 @@ type InvoiceSettings struct {
 type AppearanceSettings struct {
 	ID         uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID     uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
-	ColorTheme string         `json:"color_theme" gorm:"default:'blue'"`
+	ColorTheme string         `json:"color_theme" gorm:"default:'runerail'"`
 	CustomHex  string         `json:"custom_hex"`
 	CreatedAt  time.Time      `json:"created_at"`
 	UpdatedAt  time.Time      `json:"updated_at"`
@@ -1977,42 +2050,45 @@ type TaxRate struct {
 }
 
 type Quotation struct {
-	ID                   uuid.UUID          `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID               uuid.UUID          `json:"user_id" gorm:"type:uuid;not null;index"`
-	QuotationNumber      string             `json:"quotation_number" gorm:"not null;index"`
-	PartyID              uuid.UUID          `json:"party_id" gorm:"type:uuid;not null"`
-	Date                 time.Time          `json:"date" gorm:"not null"`
-	ValidUntil           *time.Time         `json:"valid_until,omitempty"`
-	PaymentTerms         int                `json:"payment_terms" gorm:"default:0"`
-	Status               string             `json:"status" gorm:"default:'draft'"`            // draft, sent, accepted, rejected, expired, converted
-	ApprovalStatus       string             `json:"approval_status" gorm:"default:'pending'"` // pending, approved, rejected
-	ApprovedBy           *uuid.UUID         `json:"approved_by" gorm:"type:uuid"`
-	ApprovedAt           *time.Time         `json:"approved_at,omitempty"`
-	SubTotal             float64            `json:"sub_total" gorm:"default:0"`
-	DiscountTotal        float64            `json:"discount_total" gorm:"default:0"`
-	QuotationDiscount    float64            `json:"quotation_discount" gorm:"default:0"`
-	AdditionalCharges    float64            `json:"additional_charges" gorm:"default:0"`
-	TaxTotal             float64            `json:"tax_total" gorm:"default:0"`
-	CGSTTotal            float64            `json:"cgst_total" gorm:"default:0"`
-	SGSTTotal            float64            `json:"sgst_total" gorm:"default:0"`
-	IGSTTotal            float64            `json:"igst_total" gorm:"default:0"`
-	RoundOff             float64            `json:"round_off" gorm:"default:0"`
-	TotalAmount          float64            `json:"total_amount" gorm:"default:0"`
-	Notes                string             `json:"notes"`
-	Terms                string             `json:"terms"`
-	IsInterState         bool               `json:"is_inter_state" gorm:"default:false"`
-	PlaceOfSupply        string             `json:"place_of_supply"`
-	ReverseCharge        bool               `json:"reverse_charge" gorm:"default:false"`
-	Signature            string             `json:"signature"`
-	ConvertedToInvoiceID *uuid.UUID         `json:"converted_to_invoice_id" gorm:"type:uuid"`
-	ConvertedAt          *time.Time         `json:"converted_at,omitempty"`
-	Version              int                `json:"version" gorm:"default:1"`
-	Party                Party              `json:"party,omitempty" gorm:"foreignKey:PartyID"`
-	Items                []QuotationItem    `json:"items" gorm:"foreignKey:QuotationID;constraint:OnDelete:CASCADE;"`
-	Versions             []QuotationVersion `json:"versions,omitempty" gorm:"foreignKey:QuotationID;constraint:OnDelete:CASCADE;"`
-	CreatedAt            time.Time          `json:"created_at"`
-	UpdatedAt            time.Time          `json:"updated_at"`
-	DeletedAt            gorm.DeletedAt     `json:"deleted_at,omitempty" gorm:"index"`
+	ID                uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID            uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index"`
+	QuotationNumber   string     `json:"quotation_number" gorm:"not null;index"`
+	PartyID           uuid.UUID  `json:"party_id" gorm:"type:uuid;not null"`
+	Date              time.Time  `json:"date" gorm:"not null"`
+	ValidUntil        *time.Time `json:"valid_until,omitempty"`
+	PaymentTerms      int        `json:"payment_terms" gorm:"default:0"`
+	Status            string     `json:"status" gorm:"default:'draft'"`            // draft, sent, accepted, rejected, expired, converted
+	ApprovalStatus    string     `json:"approval_status" gorm:"default:'pending'"` // pending, approved, rejected
+	ApprovedBy        *uuid.UUID `json:"approved_by" gorm:"type:uuid"`
+	ApprovedAt        *time.Time `json:"approved_at,omitempty"`
+	SubTotal          float64    `json:"sub_total" gorm:"default:0"`
+	DiscountTotal     float64    `json:"discount_total" gorm:"default:0"`
+	QuotationDiscount float64    `json:"quotation_discount" gorm:"default:0"`
+	AdditionalCharges float64    `json:"additional_charges" gorm:"default:0"`
+	// AdditionalChargeItems is the labelled breakdown behind
+	// AdditionalCharges.
+	AdditionalChargeItems []AdditionalCharge `json:"additional_charge_items,omitempty" gorm:"type:text;serializer:json"`
+	TaxTotal              float64            `json:"tax_total" gorm:"default:0"`
+	CGSTTotal             float64            `json:"cgst_total" gorm:"default:0"`
+	SGSTTotal             float64            `json:"sgst_total" gorm:"default:0"`
+	IGSTTotal             float64            `json:"igst_total" gorm:"default:0"`
+	RoundOff              float64            `json:"round_off" gorm:"default:0"`
+	TotalAmount           float64            `json:"total_amount" gorm:"default:0"`
+	Notes                 string             `json:"notes"`
+	Terms                 string             `json:"terms"`
+	IsInterState          bool               `json:"is_inter_state" gorm:"default:false"`
+	PlaceOfSupply         string             `json:"place_of_supply"`
+	ReverseCharge         bool               `json:"reverse_charge" gorm:"default:false"`
+	Signature             string             `json:"signature"`
+	ConvertedToInvoiceID  *uuid.UUID         `json:"converted_to_invoice_id" gorm:"type:uuid"`
+	ConvertedAt           *time.Time         `json:"converted_at,omitempty"`
+	Version               int                `json:"version" gorm:"default:1"`
+	Party                 Party              `json:"party,omitempty" gorm:"foreignKey:PartyID"`
+	Items                 []QuotationItem    `json:"items" gorm:"foreignKey:QuotationID;constraint:OnDelete:CASCADE;"`
+	Versions              []QuotationVersion `json:"versions,omitempty" gorm:"foreignKey:QuotationID;constraint:OnDelete:CASCADE;"`
+	CreatedAt             time.Time          `json:"created_at"`
+	UpdatedAt             time.Time          `json:"updated_at"`
+	DeletedAt             gorm.DeletedAt     `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type QuotationItem struct {

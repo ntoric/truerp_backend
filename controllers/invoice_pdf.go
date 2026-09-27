@@ -251,11 +251,12 @@ func InvoicePDFHTMLWithOptions(invoice models.Invoice, opts invoicePDFOptions) s
 		<div class="total-row"><span class="total-label">Sub Total:</span><span class="total-value">₹%.2f</span></div>
 		<div class="total-row"><span class="total-label">Discount:</span><span class="total-value">-₹%.2f</span></div>
 		<div class="total-row"><span class="total-label">Tax Total:</span><span class="total-value">₹%.2f</span></div>
-		<div class="total-row"><span class="total-label">Additional:</span><span class="total-value">₹%.2f</span></div>
+		%s
 		<div class="total-row"><span class="total-label">Round Off:</span><span class="total-value">₹%.2f</span></div>
 		<div class="total-row grand-total"><span class="total-label">Grand Total:</span><span class="total-value">₹%.2f</span></div>
 		%s
 	</div>
+	%s
 	%s
 	%s
 	%s
@@ -281,12 +282,13 @@ func InvoicePDFHTMLWithOptions(invoice models.Invoice, opts invoicePDFOptions) s
 		invoice.SubTotal,
 		invoice.DiscountTotal+invoice.InvoiceDiscount,
 		invoice.TaxTotal,
-		invoice.AdditionalCharges,
+		additionalChargeRowsHTML(invoice.AdditionalChargeItems, invoice.AdditionalCharges),
 		invoice.RoundOff,
 		invoice.TotalAmount,
 		balanceHTML,
 		bankHTML,
 		termsHTML,
+		signatureBlockHTML(invoice.Signature),
 		footerHTML,
 	)
 }

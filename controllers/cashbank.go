@@ -3,12 +3,15 @@ package controllers
 import (
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 	"truerp/models"
 	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // Bank Account Controllers
@@ -181,13 +184,17 @@ func SetPrimaryBankAccount(c *gin.Context) {
 
 func GetCashTransactions(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
+	search := strings.TrimSpace(c.Query("search"))
 
-	var transactions []models.CashTransaction
-	query := utils.DB.Where("user_id = ?", userID).Preload("Account")
+	query := utils.DB.Model(&models.CashTransaction{}).Where("user_id = ?", userID)
 
-	// Filter by account
+	// Filter by account ("cash" = cash in-hand, stored as NULL account_id)
 	if accountID := c.Query("account_id"); accountID != "" {
-		query = query.Where("account_id = ?", accountID)
+		if accountID == "cash" {
+			query = query.Where("account_id IS NULL")
+		} else {
+			query = query.Where("account_id = ?", accountID)
+		}
 	}
 
 	// Filter by transaction type
@@ -200,19 +207,77 @@ func GetCashTransactions(c *gin.Context) {
 		query = query.Where("is_linked = ?", false)
 	}
 
-	// Period filter
+	// Period filter (day-inclusive: date is a timestamp)
 	if startDate := c.Query("start_date"); startDate != "" {
-		if parsedDate, err := time.Parse("2006-01-02", startDate); err == nil {
-			query = query.Where("date >= ?", parsedDate)
+		if _, err := time.Parse("2006-01-02", startDate); err == nil {
+			query = query.Where(utils.SQLDateGTE("date"), startDate)
 		}
 	}
 	if endDate := c.Query("end_date"); endDate != "" {
-		if parsedDate, err := time.Parse("2006-01-02", endDate); err == nil {
-			query = query.Where("date <= ?", parsedDate)
+		if _, err := time.Parse("2006-01-02", endDate); err == nil {
+			query = query.Where(utils.SQLDateLTE("date"), endDate)
 		}
 	}
 
-	if err := query.Order("date DESC, created_at DESC").Find(&transactions).Error; err != nil {
+	if search != "" {
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where("LOWER(description) LIKE ? OR LOWER(reference) LIKE ?", like, like)
+	}
+	// Ordering is applied only to row fetches — aggregate/count queries run on
+	// `query` directly so Postgres doesn't see ORDER BY on a SUM/COUNT.
+	orderBy := "date DESC, created_at DESC"
+
+	transactions := make([]models.CashTransaction, 0)
+
+	// Paginated mode (opt-in via page/per_page); per_page <= 0 returns every
+	// matching row. Unparameterized callers keep the legacy plain array.
+	if c.Query("page") != "" || c.Query("per_page") != "" {
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "25"))
+
+		var total int64
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch cash transactions"})
+			return
+		}
+
+		// In/out totals across the entire filtered set (not just this page).
+		var totals struct {
+			TotalIn  float64
+			TotalOut float64
+		}
+		if err := query.Session(&gorm.Session{}).Select(
+			"COALESCE(SUM(CASE WHEN transaction_type IN ('add','transfer_in') THEN amount ELSE 0 END), 0) AS total_in, " +
+				"COALESCE(SUM(CASE WHEN transaction_type IN ('add','transfer_in') THEN 0 ELSE amount END), 0) AS total_out",
+		).Scan(&totals).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch cash transactions"})
+			return
+		}
+
+		pageQuery := query.Order(orderBy).Preload("Account")
+		if perPage > 0 {
+			pageQuery = pageQuery.Limit(perPage).Offset((page - 1) * perPage)
+		}
+		if err := pageQuery.Find(&transactions).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch cash transactions"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"transactions": transactions,
+			"total":        total,
+			"page":         page,
+			"per_page":     perPage,
+			"total_in":     totals.TotalIn,
+			"total_out":    totals.TotalOut,
+		})
+		return
+	}
+
+	if err := query.Order(orderBy).Preload("Account").Find(&transactions).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch cash transactions"})
 		return
 	}
@@ -471,11 +536,22 @@ func DeleteCashTransaction(c *gin.Context) {
 func GetCashBankSummary(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
+	// Optional period filter (YYYY-MM-DD, day-inclusive): balances are reported
+	// as of end_date while flow stats are scoped to [start_date, end_date].
+	startDate := c.Query("start_date")
+	if _, err := time.Parse("2006-01-02", startDate); err != nil {
+		startDate = ""
+	}
+	endDate := c.Query("end_date")
+	if _, err := time.Parse("2006-01-02", endDate); err != nil {
+		endDate = ""
+	}
+
 	var accounts []models.BankAccount
 	if err := utils.DB.Where("user_id = ? AND is_active = ?", userID, true).Order("is_primary DESC, created_at DESC").Find(&accounts).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch bank accounts"})
 		return
 	}
 
-	c.JSON(http.StatusOK, buildCashBankSummary(utils.DB, userID, accounts))
+	c.JSON(http.StatusOK, buildCashBankSummary(utils.DB, userID, accounts, startDate, endDate))
 }
