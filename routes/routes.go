@@ -183,6 +183,9 @@ func SetupRoutes(r *gin.Engine) {
 		dashboard.GET("/periodic-report", controllers.GetPeriodicReport)
 		dashboard.GET("/periodic-report/export", controllers.ExportPeriodicReportCSV)
 		dashboard.GET("/periodic-report/pdf", controllers.ExportPeriodicReportPDF)
+		dashboard.GET("/profit-loss-report", controllers.GetProfitLossReport)
+		dashboard.GET("/profit-loss-report/excel", controllers.ExportProfitLossReportExcel)
+		dashboard.GET("/profit-loss-report/pdf", controllers.ExportProfitLossReportPDF)
 
 		// Daily report email automation (auto-mail PDF export to configured recipients)
 		dashboard.GET("/report-email-settings", controllers.GetDailyReportEmailSettingsHandler)
@@ -661,6 +664,8 @@ func SetupRoutes(r *gin.Engine) {
 		staff.GET("/:id", controllers.GetStaff)
 		staff.PUT("/:id", controllers.UpdateStaff)
 		staff.DELETE("/:id", controllers.DeleteStaff)
+		staff.GET("/:id/balance", controllers.GetStaffBalance)
+		staff.GET("/balances", controllers.GetStaffBalances)
 
 		// Staff Deductions routes
 		staff.GET("/deductions", controllers.GetStaffDeductions)
@@ -886,6 +891,11 @@ func SetupRoutes(r *gin.Engine) {
 		developerSettings.POST("/test-email", controllers.TestEmailConnection)
 		developerSettings.POST("/test-whatsapp", controllers.TestWhatsAppConnection)
 		developerSettings.POST("/test-sms", controllers.TestSMSConnection)
+
+		// Nightly database maintenance (dead-tuple / bloat cleanup, IST schedule)
+		developerSettings.GET("/db-maintenance", controllers.GetDBMaintenanceSettingsHandler)
+		developerSettings.PUT("/db-maintenance", controllers.UpdateDBMaintenanceSettingsHandler)
+		developerSettings.POST("/db-maintenance/run-now", controllers.RunDBMaintenanceNowHandler)
 	}
 
 	// Page / menu feature flags (read: any auth user; write: super admin)

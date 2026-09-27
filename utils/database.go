@@ -180,6 +180,7 @@ func allApplicationModels() []interface{} {
 		&models.DataBackup{},
 		&models.GDPRRequest{},
 		&models.DailyReportEmailSettings{},
+		&models.DBMaintenanceSettings{},
 		&models.MigrationJob{},
 	}
 }

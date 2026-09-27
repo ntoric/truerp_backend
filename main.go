@@ -39,6 +39,11 @@ func main() {
 	// report PDF to configured recipients at the configured time each day.
 	controllers.StartDailyReportEmailScheduler()
 
+	// Start the background scheduler that runs the nightly database
+	// maintenance (dead-tuple / bloat cleanup) at the configured IST time
+	// when enabled in Developer Settings.
+	controllers.StartDBMaintenanceScheduler()
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 

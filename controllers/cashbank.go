@@ -516,7 +516,7 @@ func DeleteCashTransaction(c *gin.Context) {
 			switch transaction.TransactionType {
 			case "add", "transfer_in":
 				account.Balance -= transaction.Amount
-			case "reduce", "transfer_out", "payroll", "expense":
+			case "reduce", "transfer_out", "payroll", "expense", "profit_distribution":
 				account.Balance += transaction.Amount
 			}
 			utils.DB.Save(&account)

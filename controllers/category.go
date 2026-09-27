@@ -3,11 +3,13 @@ package controllers
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"truerp/models"
 	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 func GetCategories(c *gin.Context) {
@@ -20,7 +22,7 @@ func GetCategories(c *gin.Context) {
 	_ = utils.EnsureDefaultCategories(utils.DB, userID)
 
 	var categories []models.Category
-	query := utils.DB.Where("user_id = ?", userID)
+	query := utils.DB.Model(&models.Category{}).Where("user_id = ?", userID)
 
 	if parentID != "" {
 		query = query.Where("parent_id = ?", parentID)
@@ -30,13 +32,45 @@ func GetCategories(c *gin.Context) {
 		query = query.Where("is_active = ?", active == "true")
 	}
 
-	if err := query.Order("name ASC").Find(&categories).Error; err != nil {
+	// Paginated mode (opt-in via page/per_page); per_page <= 0 returns every
+	// matching row. Unparameterized callers keep the legacy array shape.
+	paginated := c.Query("page") != "" || c.Query("per_page") != ""
+	var total int64
+	page, perPage := 1, 0
+	if paginated {
+		page, _ = strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		perPage, _ = strconv.Atoi(c.DefaultQuery("per_page", "25"))
+
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			fmt.Printf("[DEBUG] GetCategories - count error: %v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch categories"})
+			return
+		}
+	}
+
+	findQuery := query.Order("name ASC")
+	if paginated && perPage > 0 {
+		findQuery = findQuery.Limit(perPage).Offset((page - 1) * perPage)
+	}
+	if err := findQuery.Find(&categories).Error; err != nil {
 		fmt.Printf("[DEBUG] GetCategories - DB error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch categories"})
 		return
 	}
 
 	fmt.Printf("[DEBUG] GetCategories - Found %d categories\n", len(categories))
+	if paginated {
+		c.JSON(http.StatusOK, gin.H{
+			"categories": categories,
+			"total":      total,
+			"page":       page,
+			"per_page":   perPage,
+		})
+		return
+	}
 	c.JSON(http.StatusOK, categories)
 }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tealeg/xlsx/v3"
+	"gorm.io/gorm"
 )
 
 const itemCodeMaxLen = 14
@@ -70,7 +71,7 @@ func GetProducts(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var products []models.Product
-	query := utils.DB.Where("user_id = ?", userID)
+	query := utils.DB.Model(&models.Product{}).Where("user_id = ?", userID)
 
 	if category := c.Query("category"); category != "" && category != "all" {
 		query = query.Where("category = ?", category)
@@ -80,15 +81,45 @@ func GetProducts(c *gin.Context) {
 		query = query.Where("name LIKE ? OR sku LIKE ? OR item_code LIKE ? OR plu LIKE ?", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%")
 	}
 
-	if err := query.Order("created_at DESC").Find(&products).Error; err != nil {
+	// Paginated mode (opt-in via page/per_page); per_page <= 0 returns every
+	// matching row. Unparameterized callers keep the legacy array shape.
+	paginated := c.Query("page") != "" || c.Query("per_page") != ""
+	var total int64
+	page, perPage := 1, 0
+	if paginated {
+		page, _ = strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		perPage, _ = strconv.Atoi(c.DefaultQuery("per_page", "25"))
+
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch products"})
+			return
+		}
+	}
+
+	findQuery := query.Order("created_at DESC")
+	if paginated && perPage > 0 {
+		findQuery = findQuery.Limit(perPage).Offset((page - 1) * perPage)
+	}
+	if err := findQuery.Find(&products).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch products"})
 		return
 	}
 
 	stockByProduct := map[uuid.UUID]float64{}
 	if len(products) > 0 {
+		stockQuery := utils.DB.Where("user_id = ?", userID)
+		if paginated {
+			productIDs := make([]uuid.UUID, 0, len(products))
+			for _, p := range products {
+				productIDs = append(productIDs, p.ID)
+			}
+			stockQuery = stockQuery.Where("product_id IN ?", productIDs)
+		}
 		var stocks []models.InventoryStock
-		if err := utils.DB.Where("user_id = ?", userID).Find(&stocks).Error; err == nil {
+		if err := stockQuery.Find(&stocks).Error; err == nil {
 			for _, stock := range stocks {
 				stockByProduct[stock.ProductID] += stock.AvailableQty
 			}
@@ -107,6 +138,15 @@ func GetProducts(c *gin.Context) {
 		})
 	}
 
+	if paginated {
+		c.JSON(http.StatusOK, gin.H{
+			"products": out,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+		})
+		return
+	}
 	c.JSON(http.StatusOK, out)
 }
 

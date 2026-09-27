@@ -207,10 +207,10 @@ type PaymentSplit struct {
 
 type Invoice struct {
 	ID                uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID            uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index;index:idx_invoices_user_status,priority:1;index:idx_invoices_user_date,priority:1;uniqueIndex:idx_invoice_user_client_sale"`
+	UserID            uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index;index:idx_invoices_user_status,priority:1;index:idx_invoices_user_date,priority:1;index:idx_invoices_user_party,priority:1;uniqueIndex:idx_invoice_user_client_sale"`
 	InvoiceNumber     string     `json:"invoice_number" gorm:"not null;index"`
 	InvoiceType       string     `json:"invoice_type" gorm:"default:'tax_invoice'"` // tax_invoice, bill_of_supply, export
-	PartyID           uuid.UUID  `json:"party_id" gorm:"type:uuid;not null"`
+	PartyID           uuid.UUID  `json:"party_id" gorm:"type:uuid;not null;index:idx_invoices_user_party,priority:2"`
 	Date              time.Time  `json:"date" gorm:"not null;index:idx_invoices_user_date,priority:2"`
 	DueDate           *time.Time `json:"due_date,omitempty"`
 	PaymentTerms      int        `json:"payment_terms" gorm:"default:0"`                                          // Payment term in days
@@ -291,9 +291,9 @@ type InvoiceItem struct {
 type Payment struct {
 	ID                uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID            uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index;index:idx_payments_user_date,priority:1"`
-	InvoiceID         *uuid.UUID     `json:"invoice_id,omitempty" gorm:"type:uuid"`
+	InvoiceID         *uuid.UUID     `json:"invoice_id,omitempty" gorm:"type:uuid;index"`
 	Invoice           *Invoice       `json:"invoice,omitempty" gorm:"foreignKey:InvoiceID"`
-	PartyID           uuid.UUID      `json:"party_id" gorm:"type:uuid;not null"`
+	PartyID           uuid.UUID      `json:"party_id" gorm:"type:uuid;not null;index"`
 	Party             Party          `json:"party,omitempty" gorm:"foreignKey:PartyID"`
 	AmountReceived    float64        `json:"amount_received" gorm:"default:0"`
 	PaymentInDiscount float64        `json:"payment_in_discount" gorm:"default:0"`
@@ -310,9 +310,9 @@ type Payment struct {
 type PaymentOut struct {
 	ID                 uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID             uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index;index:idx_payment_outs_user_date,priority:1"`
-	PurchaseBillID     *uuid.UUID     `json:"purchase_bill_id,omitempty" gorm:"type:uuid"`
+	PurchaseBillID     *uuid.UUID     `json:"purchase_bill_id,omitempty" gorm:"type:uuid;index"`
 	PurchaseBill       *PurchaseBill  `json:"purchase_bill,omitempty" gorm:"foreignKey:PurchaseBillID"`
-	PartyID            uuid.UUID      `json:"party_id" gorm:"type:uuid;not null"`
+	PartyID            uuid.UUID      `json:"party_id" gorm:"type:uuid;not null;index"`
 	Party              Party          `json:"party,omitempty" gorm:"foreignKey:PartyID"`
 	AmountPaid         float64        `json:"amount_paid" gorm:"default:0"`
 	PaymentOutDiscount float64        `json:"payment_out_discount" gorm:"default:0"`
@@ -481,6 +481,59 @@ type PeriodReport struct {
 	StartDate string `json:"start_date"` // YYYY-MM-DD inclusive
 	EndDate   string `json:"end_date"`   // YYYY-MM-DD inclusive
 	Label     string `json:"label"`      // human-readable period label
+}
+
+// ProfitLossLine is one breakdown row in the Profit & Loss report — used for
+// per-account other income and indirect expense lines.
+type ProfitLossLine struct {
+	Name   string  `json:"name"`
+	Amount float64 `json:"amount"`
+	Count  int64   `json:"count"`
+}
+
+// ProfitLossReport is a trading & P&L style statement over an arbitrary period.
+// Gross profit follows the trading-account convention:
+// net sales + closing stock − opening stock − net purchases.
+// Net profit = gross profit + other income − indirect expenses − expenses.
+type ProfitLossReport struct {
+	BusinessName string `json:"business_name"`
+	Period       string `json:"period"`     // daily | weekly | monthly | yearly | custom
+	StartDate    string `json:"start_date"` // YYYY-MM-DD inclusive
+	EndDate      string `json:"end_date"`   // YYYY-MM-DD inclusive
+	Label        string `json:"label"`      // human-readable period label
+
+	Sales           DailyReportMetric `json:"sales"`
+	SalesReturns    DailyReportMetric `json:"sales_returns"`    // sales returns + credit notes
+	Purchases       DailyReportMetric `json:"purchases"`
+	PurchaseReturns DailyReportMetric `json:"purchase_returns"` // purchase returns + debit notes
+
+	// OpeningStock is inventory value at the end of the day before StartDate;
+	// ClosingStock is inventory value at the end of EndDate. Values are at
+	// weighted average cost replayed from the stock_entries ledger.
+	OpeningStockQty float64 `json:"opening_stock_qty"`
+	OpeningStock    float64 `json:"opening_stock"`
+	ClosingStockQty float64 `json:"closing_stock_qty"`
+	ClosingStock    float64 `json:"closing_stock"`
+
+	GrossProfit float64 `json:"gross_profit"`
+
+	// OtherIncome is net credits to income GL accounts other than Sales
+	// (e.g. manual journal income postings) in the period.
+	OtherIncome DailyReportMetric `json:"other_income"`
+	// IndirectExpenses is net debits to expense GL accounts other than
+	// Purchases, excluding postings already covered by the Expense module
+	// and payroll (which create Expense records).
+	IndirectExpenses DailyReportMetric `json:"indirect_expenses"`
+	// Expenses is the Expense module total recorded in the period.
+	Expenses DailyReportMetric `json:"expenses"`
+
+	NetProfit float64 `json:"net_profit"`
+
+	OtherIncomeLines     []ProfitLossLine `json:"other_income_lines"`
+	IndirectExpenseLines []ProfitLossLine `json:"indirect_expense_lines"`
+	// ExpenseLines lists each individual expense dated in this period, for the
+	// per-expense breakdown table. Empty when no expenses exist for the range.
+	ExpenseLines []ExpenseLine `json:"expense_lines"`
 }
 
 type GSTReport struct {
@@ -694,9 +747,9 @@ type PurchaseReceiptItem struct {
 
 type PurchaseBill struct {
 	ID                uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID            uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index;index:idx_purchase_bills_user_status,priority:1;index:idx_purchase_bills_user_date,priority:1"`
+	UserID            uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index;index:idx_purchase_bills_user_status,priority:1;index:idx_purchase_bills_user_date,priority:1;index:idx_purchase_bills_user_party,priority:1"`
 	PurchaseReceiptID *uuid.UUID `json:"purchase_receipt_id" gorm:"type:uuid"`
-	PartyID           uuid.UUID  `json:"party_id" gorm:"type:uuid;not null"`
+	PartyID           uuid.UUID  `json:"party_id" gorm:"type:uuid;not null;index:idx_purchase_bills_user_party,priority:2"`
 	VendorID          *uuid.UUID `json:"vendor_id,omitempty" gorm:"type:uuid"` // legacy alias for party_id
 	Party             Party      `json:"party,omitempty" gorm:"foreignKey:PartyID"`
 	// ClientBillID is a frontend-generated UUID that makes bill creation
@@ -1077,7 +1130,7 @@ type CashTransaction struct {
 	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index;index:idx_cash_txns_user_date,priority:1"`
 	AccountID       *uuid.UUID     `json:"account_id,omitempty" gorm:"type:uuid"`
 	Account         *BankAccount   `json:"account,omitempty" gorm:"foreignKey:AccountID"`
-	TransactionType string         `json:"transaction_type" gorm:"not null"` // add, reduce, transfer_in, transfer_out, payroll
+	TransactionType string         `json:"transaction_type" gorm:"not null"` // add, reduce, transfer_in, transfer_out, payroll, expense, profit_distribution
 	Amount          float64        `json:"amount" gorm:"not null"`
 	Date            time.Time      `json:"date" gorm:"not null;index:idx_cash_txns_user_date,priority:2"`
 	Description     string         `json:"description"`
@@ -1420,12 +1473,12 @@ type CAReportSharing struct {
 
 type Product struct {
 	ID                   uuid.UUID        `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID               uuid.UUID        `json:"user_id" gorm:"type:uuid;not null;index"`
+	UserID               uuid.UUID        `json:"user_id" gorm:"type:uuid;not null;index;index:idx_products_user_category,priority:1;index:idx_products_user_created,priority:1"`
 	Name                 string           `json:"name" gorm:"not null"`
 	SKU                  string           `json:"sku" gorm:"uniqueIndex"`
 	ItemCode             string           `json:"item_code"`
 	PLU                  string           `json:"plu"` // scale PLU — auto-assigned ascending; editable per product
-	Category             string           `json:"category"`
+	Category             string           `json:"category" gorm:"index:idx_products_user_category,priority:2"`
 	PurchasePrice        float64          `json:"purchase_price" gorm:"default:0"`
 	SalePrice            float64          `json:"sale_price" gorm:"default:0"`
 	MRP                  float64          `json:"mrp"`
@@ -1445,7 +1498,7 @@ type Product struct {
 	IsActive             bool             `json:"is_active" gorm:"default:true"`
 	Images               []ProductImage   `json:"images,omitempty" gorm:"foreignKey:ProductID;constraint:OnDelete:CASCADE;"`
 	Variants             []ProductVariant `json:"variants,omitempty" gorm:"foreignKey:ProductID;constraint:OnDelete:CASCADE;"`
-	CreatedAt            time.Time        `json:"created_at"`
+	CreatedAt            time.Time        `json:"created_at" gorm:"index:idx_products_user_created,priority:2"`
 	UpdatedAt            time.Time        `json:"updated_at"`
 	DeletedAt            gorm.DeletedAt   `json:"deleted_at,omitempty" gorm:"index"`
 }
@@ -2344,6 +2397,26 @@ type DailyReportEmailSettings struct {
 	CreatedAt       time.Time      `json:"created_at"`
 	UpdatedAt       time.Time      `json:"updated_at"`
 	DeletedAt       gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// DBMaintenanceSettings is a system-wide singleton controlling the nightly
+// database maintenance job that removes dead tuples and reduces table bloat
+// (VACUUM ANALYZE on PostgreSQL; VACUUM + ANALYZE on SQLite). A single row is
+// created lazily; the scheduler reloads it every minute and runs the job once
+// the configured RunTime (interpreted in Asia/Kolkata, i.e. IST) has passed.
+type DBMaintenanceSettings struct {
+	ID                uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	IsEnabled         bool           `json:"is_enabled" gorm:"default:false"`
+	RunTime           string         `json:"run_time" gorm:"default:'01:00'"` // HH:MM (24h) in Asia/Kolkata
+	VacuumFull        bool           `json:"vacuum_full" gorm:"default:false"`
+	LastRunAt         *time.Time     `json:"last_run_at,omitempty" gorm:"index"`
+	LastRunStatus     string         `json:"last_run_status"` // success, partial, failed
+	LastRunError      string         `json:"last_run_error,omitempty"`
+	LastRunTables     int            `json:"last_run_tables" gorm:"default:0"`
+	LastRunDurationMs int64          `json:"last_run_duration_ms" gorm:"default:0"`
+	CreatedAt         time.Time      `json:"created_at"`
+	UpdatedAt         time.Time      `json:"updated_at"`
+	DeletedAt         gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 // MigrationJob tracks an asynchronous data-migration import (CSV or myBillBook

@@ -33,8 +33,8 @@ func setupCashTransactionListTestDB(t *testing.T) *gorm.DB {
 func seedCashTransactions(t *testing.T, db *gorm.DB, userID uuid.UUID) {
 	t.Helper()
 	base := time.Now().AddDate(0, 0, -5)
-	types := []string{"add", "reduce", "transfer_in", "transfer_out", "expense"}
-	amounts := []float64{100, 40, 60, 30, 20}
+	types := []string{"add", "reduce", "transfer_in", "transfer_out", "expense", "profit_distribution"}
+	amounts := []float64{100, 40, 60, 30, 20, 15}
 	for i, txnType := range types {
 		txn := models.CashTransaction{
 			ID:              uuid.New(),
@@ -73,14 +73,14 @@ func TestGetCashTransactionsPaginatedReturnsEnvelope(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body.Total != 5 || body.Page != 1 || body.PerPage != 2 || len(body.Transactions) != 2 {
+	if body.Total != 6 || body.Page != 1 || body.PerPage != 2 || len(body.Transactions) != 2 {
 		t.Fatalf("unexpected envelope: total=%d page=%d per_page=%d rows=%d",
 			body.Total, body.Page, body.PerPage, len(body.Transactions))
 	}
 	// Aggregates cover the whole filtered set, not just page 1.
-	// in = add + transfer_in = 160; out = reduce + transfer_out + expense = 90.
-	if body.TotalIn != 160 || body.TotalOut != 90 {
-		t.Fatalf("totals: in=%v out=%v, want 160/90", body.TotalIn, body.TotalOut)
+	// in = add + transfer_in = 160; out = reduce + transfer_out + expense + profit_distribution = 105.
+	if body.TotalIn != 160 || body.TotalOut != 105 {
+		t.Fatalf("totals: in=%v out=%v, want 160/105", body.TotalIn, body.TotalOut)
 	}
 }
 
@@ -106,6 +106,18 @@ func TestGetCashTransactionsFilters(t *testing.T) {
 		t.Fatalf("type filter: total=%d in=%v out=%v, want 1/0/20", body.Total, body.TotalIn, body.TotalOut)
 	}
 
+	// Profit distribution is its own type: filterable and counted as money out,
+	// never as an expense or money in.
+	c, rec = newListContext("/cash-bank/transactions", "?page=1&per_page=10&transaction_type=profit_distribution")
+	c.Set("user_id", userID)
+	GetCashTransactions(c)
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Total != 1 || body.TotalOut != 15 || body.TotalIn != 0 {
+		t.Fatalf("profit_distribution filter: total=%d in=%v out=%v, want 1/0/15", body.Total, body.TotalIn, body.TotalOut)
+	}
+
 	// Day-inclusive end_date: the newest row is dated today; end_date=today must include it.
 	today := time.Now().Format("2006-01-02")
 	c, rec = newListContext("/cash-bank/transactions", "?page=1&per_page=10&end_date="+today)
@@ -114,8 +126,8 @@ func TestGetCashTransactionsFilters(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body.Total != 5 {
-		t.Fatalf("end_date inclusive: total=%d, want 5", body.Total)
+	if body.Total != 6 {
+		t.Fatalf("end_date inclusive: total=%d, want 6", body.Total)
 	}
 
 	// Description search.
@@ -143,7 +155,7 @@ func TestGetCashTransactionsLegacyArrayWithoutParams(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
 		t.Fatalf("decode legacy array: %v", err)
 	}
-	if len(rows) != 5 {
-		t.Fatalf("legacy rows = %d, want 5", len(rows))
+	if len(rows) != 6 {
+		t.Fatalf("legacy rows = %d, want 6", len(rows))
 	}
 }
