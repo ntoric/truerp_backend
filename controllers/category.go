@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"truerp/models"
 	"truerp/utils"
 
@@ -30,6 +31,11 @@ func GetCategories(c *gin.Context) {
 
 	if active != "" {
 		query = query.Where("is_active = ?", active == "true")
+	}
+
+	if search := c.Query("search"); search != "" {
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where("LOWER(name) LIKE ? OR LOWER(description) LIKE ?", like, like)
 	}
 
 	// Paginated mode (opt-in via page/per_page); per_page <= 0 returns every

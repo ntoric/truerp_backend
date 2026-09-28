@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"net/http"
+	"strings"
 	"truerp/models"
 	"truerp/utils"
 
@@ -16,7 +17,8 @@ func GetStaffs(c *gin.Context) {
 	query := utils.DB.Where("user_id = ?", userID)
 
 	if search := c.Query("search"); search != "" {
-		query = query.Where("name LIKE ? OR phone LIKE ? OR email LIKE ? OR designation LIKE ?", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where("LOWER(name) LIKE ? OR LOWER(phone) LIKE ? OR LOWER(email) LIKE ? OR LOWER(designation) LIKE ?", like, like, like, like)
 	}
 
 	if err := query.Order("name ASC").Find(&staffs).Error; err != nil {

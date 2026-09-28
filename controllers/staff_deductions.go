@@ -3,6 +3,7 @@ package controllers
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 	"truerp/models"
 	"truerp/utils"
@@ -38,7 +39,8 @@ func GetStaffDeductions(c *gin.Context) {
 	}
 
 	if search := c.Query("search"); search != "" {
-		query = query.Where("description ILIKE ? OR deduction_number ILIKE ?", "%"+search+"%", "%"+search+"%")
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where("LOWER(description) LIKE ? OR LOWER(deduction_number) LIKE ?", like, like)
 	}
 
 	if err := query.Order("deduction_date DESC, created_at DESC").Find(&deductions).Error; err != nil {

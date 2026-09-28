@@ -1743,7 +1743,7 @@ func PrintPurchaseBillLabels(c *gin.Context) {
 			WidthMM:  size.WidthMM,
 			HeightMM: size.HeightMM,
 			Compact:  compact,
-			Labels:   purchaseItemsToBarcodeLabels(items, compact),
+			Labels:   purchaseItemsToBarcodeLabels(items, compact, labelBrandForUser(userID)),
 		}
 		c.JSON(http.StatusOK, payload)
 		return
@@ -1852,7 +1852,7 @@ func enrichPurchaseItemLabelPrices(item *models.PurchaseBillItem, userID uuid.UU
 	}
 }
 
-func purchaseItemsToBarcodeLabels(items []models.PurchaseBillItem, _ bool) []BarcodeLabelItemJSON {
+func purchaseItemsToBarcodeLabels(items []models.PurchaseBillItem, _ bool, brand string) []BarcodeLabelItemJSON {
 	out := make([]BarcodeLabelItemJSON, 0, len(items))
 	for _, item := range items {
 		barcodeVal := strings.TrimSpace(item.ItemCode)
@@ -1861,6 +1861,7 @@ func purchaseItemsToBarcodeLabels(items []models.PurchaseBillItem, _ bool) []Bar
 		}
 		entry := BarcodeLabelItemJSON{
 			Name:    item.Description,
+			Brand:   brand,
 			Barcode: barcodeVal,
 			Price:   item.SalePrice,
 		}
@@ -1918,8 +1919,9 @@ func labelConfigToA4Layout(config LabelConfig) A4LabelSheetLayout {
 
 func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]float64, config LabelConfig, screenPreview bool) string {
 	items := collectPurchaseLabelItems(bill, itemQuantities)
+	brand := labelBrandForUser(bill.UserID)
 	if isThermalLabelPaperSize(config.PaperSize) {
-		return generateThermalPurchaseLabelsHTML(bill.BillNumber, items, config.PaperSize)
+		return generateThermalPurchaseLabelsHTML(bill.BillNumber, items, config.PaperSize, brand)
 	}
 
 	layout := labelConfigToA4Layout(config)
@@ -1932,6 +1934,7 @@ func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]floa
 		}
 		labelHTMLs = append(labelHTMLs, buildProductLabelHTML(productLabelData{
 			Name:      item.Description,
+			Brand:     brand,
 			SKU:       item.ItemCode,
 			ItemCode:  barcodeVal,
 			SalePrice: item.SalePrice,
@@ -1942,19 +1945,19 @@ func generateLabelsHTML(bill models.PurchaseBill, itemQuantities map[string]floa
 	return buildA4LabelsSheetDocument("Labels - "+bill.BillNumber, labelHTMLs, layout, config.StartPosition, screenPreview)
 }
 
-func generateThermalPurchaseLabelsHTML(billNumber string, items []models.PurchaseBillItem, paperSize string) string {
+func generateThermalPurchaseLabelsHTML(billNumber string, items []models.PurchaseBillItem, paperSize string, brand string) string {
 	size := getBarcodeLabelSize(paperSize)
 	compact := paperSize == "1inch" || paperSize == "1.5inch"
 
 	var labelsHTML strings.Builder
 	for _, item := range items {
-		labelsHTML.WriteString(generateThermalPurchaseLabel(item, size, compact))
+		labelsHTML.WriteString(generateThermalPurchaseLabel(item, size, compact, brand))
 	}
 
 	return wrapBarcodeLabelDocument("Labels - "+billNumber, barcodeLabelPageCSS(size), labelsHTML.String())
 }
 
-func generateThermalPurchaseLabel(item models.PurchaseBillItem, size BarcodeLabelSize, compact bool) string {
+func generateThermalPurchaseLabel(item models.PurchaseBillItem, size BarcodeLabelSize, compact bool, brand string) string {
 	_ = compact
 	barcodeVal := strings.TrimSpace(item.ItemCode)
 	if barcodeVal == "" {
@@ -1962,23 +1965,32 @@ func generateThermalPurchaseLabel(item models.PurchaseBillItem, size BarcodeLabe
 	}
 
 	name := html.EscapeString(item.Description)
+	brandCell := ""
+	if strings.TrimSpace(brand) != "" {
+		brandCell = fmt.Sprintf(`<div class="label-brand">%s</div>`, html.EscapeString(brand))
+	}
+	mrp := item.MRP
+	if mrp <= 0 {
+		mrp = item.SalePrice
+	}
 	mrpCell := ""
-	if item.MRP > 0 {
-		mrpCell = fmt.Sprintf(`<span class="product-mrp">MRP: ₹%.2f</span>`, item.MRP)
+	if mrp > 0 {
+		mrpCell = fmt.Sprintf(`<span class="product-mrp">MRP: ₹%.2f</span>`, mrp)
 	}
 
 	return fmt.Sprintf(`<div class="label">
-	<div class="product-name">%s</div>
+	%s
 	<div class="product-barcode">
 		%s
 	</div>
+	<div class="product-name">%s</div>
 	<div class="price-row">
 		%s
-		<span class="product-price">₹%.2f</span>
+		<span class="product-price">SP: ₹%.2f</span>
 	</div>
-</div>`, name,
+</div>`, brandCell,
 		barcodeImageHTML(barcodeVal, size.BarcodeW, size.BarcodeH, size.MetaFontPx),
-		mrpCell, item.SalePrice)
+		name, mrpCell, item.SalePrice)
 }
 
 // ParseBillWithAI uses Gemini to parse purchase bill/invoice from image

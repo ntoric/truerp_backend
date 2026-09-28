@@ -714,6 +714,9 @@ func SetupRoutes(r *gin.Engine) {
 		payroll.GET("/:id", controllers.GetPayroll)
 		payroll.PUT("/:id", controllers.UpdatePayroll)
 		payroll.DELETE("/:id", controllers.DeletePayroll)
+		payroll.GET("/:id/payments", controllers.GetPayrollPayments)
+		payroll.POST("/:id/payments", controllers.CreatePayrollPayment)
+		payroll.DELETE("/:id/payments/:paymentId", controllers.DeletePayrollPayment)
 	}
 
 	// Settings routes
@@ -784,6 +787,7 @@ func SetupRoutes(r *gin.Engine) {
 		products.GET("/next-plu", controllers.NextProductPLU)
 		products.GET("/check-item-code", controllers.CheckProductItemCode)
 		products.GET("/check-plu", controllers.CheckProductPLU)
+		products.GET("/units", controllers.GetProductUnits)
 		products.GET("/:id", controllers.GetProduct)
 		products.PUT("/:id", controllers.UpdateProduct)
 		products.DELETE("/:id", controllers.DeleteProduct)

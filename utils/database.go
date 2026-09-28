@@ -122,6 +122,7 @@ func allApplicationModels() []interface{} {
 		&models.Staff{},
 		&models.Attendance{},
 		&models.Payroll{},
+		&models.PayrollPayment{},
 		&models.StaffDeduction{},
 		&models.StaffAdvancePayment{},
 		&models.Partner{},
@@ -213,6 +214,7 @@ func runRawMigrations(db *gorm.DB) {
 	}
 	migrateBarcodeColumnsToItemCode(db)
 	migratePayrollLabels(db)
+	backfillPayrollPayments(db)
 	reclassifyExpenseCategoryGLAccounts(db)
 	backfillExpenseCategories(db)
 	SeedDefaultCategoriesForAllUsers(db)
@@ -349,6 +351,44 @@ func migratePayrollLabels(db *gorm.DB) {
 	}
 
 	reclassifyPayrollGLAccounts(db)
+}
+
+// backfillPayrollPayments records a payroll_payments row for every payroll
+// paid before per-payment tracking existed, and fills paid_amount, so
+// partial-payment state and reports are consistent for historical data.
+func backfillPayrollPayments(db *gorm.DB) {
+	var payrolls []models.Payroll
+	if err := db.Where("status = 'paid' AND paid_amount = 0").Find(&payrolls).Error; err != nil {
+		log.Printf("backfillPayrollPayments: load payrolls failed: %v", err)
+		return
+	}
+	for i := range payrolls {
+		p := &payrolls[i]
+		var count int64
+		db.Model(&models.PayrollPayment{}).Where("payroll_id = ?", p.ID).Count(&count)
+		if count == 0 && p.NetSalary > 0 {
+			payment := models.PayrollPayment{
+				ID:            uuid.New(),
+				UserID:        p.UserID,
+				PayrollID:     p.ID,
+				PaymentNumber: p.PaymentNumber,
+				Amount:        p.NetSalary,
+				PaymentDate:   p.PaymentDate,
+				PaymentMode:   p.PaymentMode,
+				BankAccountID: p.BankAccountID,
+				ExpenseID:     p.ExpenseID,
+				Reference:     p.Reference,
+				Notes:         p.Notes,
+			}
+			if err := db.Create(&payment).Error; err != nil {
+				log.Printf("backfillPayrollPayments: create payment for %s failed: %v", p.PaymentNumber, err)
+				continue
+			}
+		}
+		if err := db.Model(p).Update("paid_amount", p.NetSalary).Error; err != nil {
+			log.Printf("backfillPayrollPayments: update payroll %s failed: %v", p.PaymentNumber, err)
+		}
+	}
 }
 
 // reclassifyPayrollGLAccounts moves payroll ledger/journal debit lines from

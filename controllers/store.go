@@ -849,6 +849,7 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 		if err := wipeStoreScopeModels(tx, ownerID,
 			&models.StaffAdvancePayment{},
 			&models.StaffDeduction{},
+			&models.PayrollPayment{},
 			&models.Payroll{},
 			&models.Attendance{},
 		); err != nil {
@@ -979,6 +980,11 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 			return err
 		}
 		if err := tx.Unscoped().Model(&models.Payroll{}).
+			Where("user_id = ? AND bank_account_id IS NOT NULL", ownerID).
+			Update("bank_account_id", nil).Error; err != nil {
+			return err
+		}
+		if err := tx.Unscoped().Model(&models.PayrollPayment{}).
 			Where("user_id = ? AND bank_account_id IS NOT NULL", ownerID).
 			Update("bank_account_id", nil).Error; err != nil {
 			return err

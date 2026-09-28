@@ -8,9 +8,11 @@ import (
 	"image/png"
 	"strings"
 	"truerp/models"
+	"truerp/utils"
 
 	"github.com/boombuler/barcode"
 	"github.com/boombuler/barcode/code128"
+	"github.com/google/uuid"
 )
 
 // BarcodeLabelSize describes a thermal barcode label roll preset.
@@ -73,11 +75,21 @@ func getBarcodeLabelSize(size string) BarcodeLabelSize {
 
 type productLabelData struct {
 	Name      string
+	Brand     string
 	SKU       string
 	ItemCode  string
 	Category  string
 	SalePrice float64
 	MRP       float64
+}
+
+// labelBrandForUser resolves the business name printed as the label header line.
+func labelBrandForUser(userID uuid.UUID) string {
+	var business models.Business
+	if err := utils.DB.Select("name").Where("user_id = ?", userID).First(&business).Error; err != nil {
+		return ""
+	}
+	return strings.TrimSpace(business.Name)
 }
 
 func barcodeValueForProduct(p productLabelData) string {
@@ -136,7 +148,9 @@ func code128PNGDataURI(value string, moduleWidth float64, heightPx int) string {
 }
 
 func barcodeImageHTML(value string, moduleWidth float64, heightPx int, fontPx float64) string {
-	dataURI := code128PNGDataURI(value, moduleWidth, heightPx)
+	// Render the PNG taller than its display size for crisper bars in print;
+	// the CSS height rule controls the on-label dimensions.
+	dataURI := code128PNGDataURI(value, moduleWidth, heightPx*3)
 	display := html.EscapeString(strings.TrimSpace(value))
 	if dataURI == "" {
 		return fmt.Sprintf(`<div class="product-barcode-fallback">%s</div>`, display)
@@ -152,31 +166,44 @@ func buildProductLabelHTML(p productLabelData, size BarcodeLabelSize, compact bo
 	code := barcodeValueForProduct(p)
 	name := html.EscapeString(p.Name)
 
-	// Vertical layout: name (1–2 lines) → barcode → MRP left / sale price right.
+	// Layout: brand header → barcode → product name → MRP left / SP right.
+	brandCell := ""
+	if brand := strings.TrimSpace(p.Brand); brand != "" {
+		brandCell = fmt.Sprintf(`<div class="label-brand">%s</div>`, html.EscapeString(brand))
+	}
+
+	// No MRP → print the sale price as MRP; SKU is only a last resort when
+	// there is no price at all.
+	mrp := p.MRP
+	if mrp <= 0 {
+		mrp = p.SalePrice
+	}
 	mrpCell := ""
-	if p.MRP > 0 {
-		mrpCell = fmt.Sprintf(`<span class="product-mrp">MRP: ₹%.2f</span>`, p.MRP)
+	if mrp > 0 {
+		mrpCell = fmt.Sprintf(`<span class="product-mrp">MRP: ₹%.2f</span>`, mrp)
 	} else if !compact && p.SKU != "" {
 		mrpCell = fmt.Sprintf(`<span class="product-sku">SKU: %s</span>`, html.EscapeString(p.SKU))
 	}
 
 	return fmt.Sprintf(`<div class="label">
-	<div class="product-name">%s</div>
+	%s
 	<div class="product-barcode">
 		%s
 	</div>
+	<div class="product-name">%s</div>
 	<div class="price-row">
 		%s
-		<span class="product-price">₹%.2f</span>
+		<span class="product-price">SP: ₹%.2f</span>
 	</div>
-</div>`, name,
+</div>`, brandCell,
 		barcodeImageHTML(code, size.BarcodeW, size.BarcodeH, size.MetaFontPx),
-		mrpCell, p.SalePrice)
+		name, mrpCell, p.SalePrice)
 }
 
 // BarcodeLabelItemJSON is one printable sticker for silent ESC/POS / client rendering.
 type BarcodeLabelItemJSON struct {
 	Name    string  `json:"name"`
+	Brand   string  `json:"brand,omitempty"`
 	Barcode string  `json:"barcode"`
 	SKU     string  `json:"sku,omitempty"`
 	Price   float64 `json:"price"`
@@ -206,10 +233,10 @@ func barcodeLabelPageCSS(size BarcodeLabelSize) string {
 			codePx = 5
 		}
 	}
-	barcodeMaxH := size.HeightMM * 0.42
-	if barcodeMaxH < 6 {
-		barcodeMaxH = 6
-	}
+	// The barcode image flex-fills the space left by the brand, digits, name,
+	// and price rows — same leftover height on every label, so barcodes print
+	// at one uniform height regardless of code length.
+
 	return fmt.Sprintf(`
 @page {
 	size: %.2fmm %.2fmm;
@@ -236,7 +263,7 @@ body {
 	flex-direction: column;
 	align-items: stretch;
 	justify-content: space-between;
-	gap: 0.4mm;
+	gap: 0.9mm;
 	overflow: hidden;
 	border: none;
 	page-break-after: always;
@@ -248,13 +275,27 @@ body {
 	page-break-after: auto;
 	break-after: auto;
 }
-.product-name {
+.label-brand {
 	font-size: %.1fpx;
-	font-weight: 400;
+	font-weight: 600;
 	line-height: 1.15;
 	width: 100%%;
 	text-align: center;
 	margin: 0;
+	text-transform: uppercase;
+	letter-spacing: 0.2px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.product-name {
+	font-size: %.1fpx;
+	font-weight: 600;
+	line-height: 1.15;
+	width: 100%%;
+	text-align: center;
+	margin: 0;
+	text-transform: uppercase;
 	display: -webkit-box;
 	-webkit-box-orient: vertical;
 	-webkit-line-clamp: 2;
@@ -267,19 +308,18 @@ body {
 	flex: 1 1 auto;
 	min-height: 0;
 	line-height: 1;
-	margin: 0;
+	margin: 0.5mm 0;
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	justify-content: center;
 }
 .product-barcode .barcode-img {
-	max-width: 100%%;
-	max-height: %.2fmm;
-	width: auto;
-	height: auto;
+	flex: 1 1 auto;
+	min-height: 0;
+	width: 100%%;
 	display: block;
-	object-fit: contain;
+	object-fit: fill;
 }
 .product-barcode .barcode-text,
 .product-barcode-fallback {
@@ -342,7 +382,7 @@ body {
 }
 `, size.WidthMM, size.HeightMM, size.WidthMM,
 		size.WidthMM, size.HeightMM, size.WidthMM, size.HeightMM, size.PaddingMM,
-		bodyPx, barcodeMaxH, codePx, bodyPx, bodyPx,
+		bodyPx, bodyPx, codePx, bodyPx, bodyPx,
 		size.WidthMM, size.WidthMM, size.HeightMM)
 }
 

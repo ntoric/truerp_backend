@@ -170,17 +170,17 @@ func loadProfitLossReport(userID uuid.UUID, period, anchorDate, startDate, endDa
 	report.ClosingStockQty, report.ClosingStock = computeStockValueAsOf(userID, end)
 
 	netSales := report.Sales.TotalAmount - report.SalesReturns.TotalAmount
-	netPurchases := report.Purchases.TotalAmount - report.PurchaseReturns.TotalAmount
-	report.GrossProfit = netSales + report.ClosingStock - report.OpeningStock - netPurchases
+	report.GrossProfit = netSales + report.ClosingStock - report.OpeningStock
 
 	report.OtherIncome, report.OtherIncomeLines = loadPLLedgerLines(
 		userID, "income", []string{acCodeSales}, nil, false, start, end)
+	// Expense-module and payroll postings are excluded because the Expenses
+	// section below already counts them from the expenses table.
 	report.IndirectExpenses, report.IndirectExpenseLines = loadPLLedgerLines(
 		userID, "expense", []string{acCodePurchase}, []string{"expense", "payroll"}, true, start, end)
 
 	report.NetProfit = report.GrossProfit +
 		report.OtherIncome.TotalAmount -
-		report.IndirectExpenses.TotalAmount -
 		report.Expenses.TotalAmount
 
 	report.ExpenseLines = loadExpenseLines(userID, start, end)
@@ -256,14 +256,6 @@ func profitLossStatementRows(r models.ProfitLossReport) []plStatementRow {
 		rows = append(rows, plStatementRow{
 			Label: line.Name, Amount: line.Amount, Count: line.Count,
 			Kind: "detail", CountLabel: "postings",
-		})
-	}
-	rows = append(rows,
-		plStatementRow{Label: "Indirect Expenses", Amount: r.IndirectExpenses.TotalAmount, Count: r.IndirectExpenses.Count, Kind: "item", Negative: true, CountLabel: "postings"})
-	for _, line := range r.IndirectExpenseLines {
-		rows = append(rows, plStatementRow{
-			Label: line.Name, Amount: line.Amount, Count: line.Count,
-			Kind: "detail", Negative: true, CountLabel: "postings",
 		})
 	}
 	rows = append(rows,
@@ -373,8 +365,8 @@ func ExportProfitLossReportExcel(c *gin.Context) {
 	}
 
 	writeRow("")
-	writeRow("Note", "Gross profit = net sales + closing stock − opening stock − net purchases.")
-	writeRow("Note", "Net profit = gross profit + other income − indirect expenses − expenses.")
+	writeRow("Note", "Gross profit = net sales + closing stock − opening stock.")
+	writeRow("Note", "Net profit = gross profit + other income − expenses.")
 
 	filename := fmt.Sprintf("profit_loss_%s_%s_%s.xlsx", report.Period, report.StartDate, report.EndDate)
 	c.Header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -526,7 +518,7 @@ func buildProfitLossReportPDF(report models.ProfitLossReport) ([]byte, error) {
 	pdf.Ln(8)
 	pdf.SetFont("Arial", "I", 8)
 	pdf.SetTextColor(140, 140, 140)
-	pdf.MultiCell(0, 4.5, sanitizePDFText("Gross profit = net sales + closing stock - opening stock - net purchases. Net profit = gross profit + other income - indirect expenses - expenses. Stock values use weighted average cost from the stock ledger. Generated from TruERP."), "", "L", false)
+	pdf.MultiCell(0, 4.5, sanitizePDFText("Gross profit = net sales + closing stock - opening stock. Net profit = gross profit + other income - expenses. Stock values use weighted average cost from the stock ledger. Generated from TruERP."), "", "L", false)
 
 	var buf bytes.Buffer
 	if err := pdf.Output(&buf); err != nil {

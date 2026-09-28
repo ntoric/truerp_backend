@@ -3,6 +3,7 @@ package controllers
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 	"truerp/models"
 	"truerp/utils"
@@ -23,8 +24,8 @@ func GetPartners(c *gin.Context) {
 		query = query.Where("is_active = ?", active == "true")
 	}
 	if search := c.Query("search"); search != "" {
-		like := "%" + search + "%"
-		query = query.Where("name ILIKE ? OR phone ILIKE ? OR email ILIKE ?", like, like, like)
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where("LOWER(name) LIKE ? OR LOWER(phone) LIKE ? OR LOWER(email) LIKE ?", like, like, like)
 	}
 
 	if err := query.Order("name ASC").Find(&partners).Error; err != nil {

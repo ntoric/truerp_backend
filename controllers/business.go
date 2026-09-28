@@ -101,6 +101,7 @@ func UpdateBusiness(c *gin.Context) {
 		"upi_id":                 input.UPIID,
 		"enable_aihsn_search":    input.EnableAIHSNSearch,
 		"enable_ai_bill_parsing": input.EnableAIBillParsing,
+		"allow_negative_stock":   input.AllowNegativeStock,
 	}
 	fmt.Println("DEBUG: Updates map created")
 

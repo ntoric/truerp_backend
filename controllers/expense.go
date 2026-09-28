@@ -3,6 +3,7 @@ package controllers
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 	"truerp/models"
 	"truerp/utils"
@@ -27,8 +28,9 @@ func GetExpenses(c *gin.Context) {
 		query = query.Where("date <= ?", to)
 	}
 	if search := c.Query("search"); search != "" {
-		query = query.Where("vendor ILIKE ? OR description ILIKE ? OR expense_number ILIKE ?",
-			"%"+search+"%", "%"+search+"%", "%"+search+"%")
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where("LOWER(vendor) LIKE ? OR LOWER(description) LIKE ? OR LOWER(expense_number) LIKE ?",
+			like, like, like)
 	}
 
 	if err := query.Order("date DESC").Find(&expenses).Error; err != nil {

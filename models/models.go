@@ -190,12 +190,14 @@ type Business struct {
 	LabelGapHMM       float64 `json:"label_gap_h_mm" gorm:"column:label_gap_h_mm;default:2"`
 	LabelGapVMM       float64 `json:"label_gap_v_mm" gorm:"column:label_gap_v_mm;default:0"`
 	// AI HSN search settings
-	EnableAIHSNSearch   bool           `json:"enable_ai_hsn_search" gorm:"column:enable_aihsn_search;default:false"`
-	EnableAIBillParsing bool           `json:"enable_ai_bill_parsing" gorm:"default:false"`
-	GeminiAPIKey        string         `json:"gemini_api_key"`
-	CreatedAt           time.Time      `json:"created_at"`
-	UpdatedAt           time.Time      `json:"updated_at"`
-	DeletedAt           gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+	EnableAIHSNSearch   bool   `json:"enable_ai_hsn_search" gorm:"column:enable_aihsn_search;default:false"`
+	EnableAIBillParsing bool   `json:"enable_ai_bill_parsing" gorm:"default:false"`
+	GeminiAPIKey        string `json:"gemini_api_key"`
+	// POS/billing: allow selling items even when stock reaches zero or below
+	AllowNegativeStock bool           `json:"allow_negative_stock" gorm:"default:false"`
+	CreatedAt          time.Time      `json:"created_at"`
+	UpdatedAt          time.Time      `json:"updated_at"`
+	DeletedAt          gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 // PaymentSplit is one tender on a sales invoice (cash, UPI, card, …).
@@ -411,17 +413,6 @@ type ExpenseLine struct {
 	SubTotal        float64    `json:"sub_total"`
 }
 
-// PayrollLine is a single salary payment shown in the daily/periodic report
-// payroll breakdown. One row is emitted per paid payroll in the period.
-type PayrollLine struct {
-	ID            uuid.UUID `json:"id"`
-	PaymentNumber string    `json:"payment_number"`
-	StaffName     string    `json:"staff_name"`
-	Date          string    `json:"date"`
-	PaymentMode   string    `json:"payment_mode"`
-	NetSalary     float64   `json:"net_salary"`
-}
-
 type DailyReport struct {
 	Date            string            `json:"date"`
 	BusinessName    string            `json:"business_name"`
@@ -437,12 +428,6 @@ type DailyReport struct {
 	// ProfitDistributions is profit paid out to partners in this period.
 	// Renderers should only show it when Count > 0.
 	ProfitDistributions DailyReportMetric `json:"profit_distributions"`
-	// Payrolls is salary paid to staff in this period (paid payroll records by
-	// payment date). Renderers should only show it when Count > 0.
-	Payrolls DailyReportMetric `json:"payrolls"`
-	// PayrollLines lists each paid payroll dated in this period with the staff
-	// name, for the per-payment payroll breakdown. Empty when none exist.
-	PayrollLines []PayrollLine `json:"payroll_lines"`
 	// ExpenseLines lists each individual expense dated in this period, for the
 	// per-expense breakdown table. Empty when no expenses exist for the range.
 	ExpenseLines []ExpenseLine `json:"expense_lines"`
@@ -492,8 +477,7 @@ type ProfitLossLine struct {
 }
 
 // ProfitLossReport is a trading & P&L style statement over an arbitrary period.
-// Gross profit follows the trading-account convention:
-// net sales + closing stock − opening stock − net purchases.
+// Gross profit = net sales + closing stock − opening stock.
 // Net profit = gross profit + other income − indirect expenses − expenses.
 type ProfitLossReport struct {
 	BusinessName string `json:"business_name"`
@@ -503,7 +487,7 @@ type ProfitLossReport struct {
 	Label        string `json:"label"`      // human-readable period label
 
 	Sales           DailyReportMetric `json:"sales"`
-	SalesReturns    DailyReportMetric `json:"sales_returns"`    // sales returns + credit notes
+	SalesReturns    DailyReportMetric `json:"sales_returns"` // sales returns + credit notes
 	Purchases       DailyReportMetric `json:"purchases"`
 	PurchaseReturns DailyReportMetric `json:"purchase_returns"` // purchase returns + debit notes
 
@@ -1214,31 +1198,64 @@ type AttendanceStats struct {
 }
 
 type Payroll struct {
+	ID            uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID        uuid.UUID `json:"user_id" gorm:"type:uuid;not null;index"`
+	StaffID       uuid.UUID `json:"staff_id" gorm:"type:uuid;not null;index"`
+	Staff         Staff     `json:"staff,omitempty" gorm:"foreignKey:StaffID"`
+	PaymentNumber string    `json:"payment_number" gorm:"not null;index"`
+	PaymentDate   time.Time `json:"payment_date" gorm:"not null"`
+	StartDate     time.Time `json:"start_date" gorm:"not null"`
+	EndDate       time.Time `json:"end_date" gorm:"not null"`
+	BasicSalary   float64   `json:"basic_salary" gorm:"default:0"`
+	WorkingDays   int       `json:"working_days" gorm:"default:0"`
+	PresentDays   int       `json:"present_days" gorm:"default:0"`
+	AbsentDays    int       `json:"absent_days" gorm:"default:0"`
+	HalfDays      int       `json:"half_days" gorm:"default:0"`
+	PaidLeaveDays int       `json:"paid_leave_days" gorm:"default:0"`
+	WeeklyOffDays int       `json:"weekly_off_days" gorm:"default:0"`
+	Deductions    float64   `json:"deductions" gorm:"default:0"`
+	Bonus         float64   `json:"bonus" gorm:"default:0"`
+	NetSalary     float64   `json:"net_salary" gorm:"default:0"`
+	// PaidAmount is the total actually paid out across Payments. Salary still
+	// owed = NetSalary - PaidAmount.
+	PaidAmount    float64      `json:"paid_amount" gorm:"default:0"`
+	PaymentMode   string       `json:"payment_mode"`                                     // cash, bank_transfer, upi, cheque
+	BankAccountID *uuid.UUID   `json:"bank_account_id,omitempty" gorm:"type:uuid;index"` // nil = cash in-hand
+	BankAccount   *BankAccount `json:"bank_account,omitempty" gorm:"foreignKey:BankAccountID"`
+	ExpenseID     *uuid.UUID   `json:"expense_id,omitempty" gorm:"type:uuid;index"`
+	Reference     string       `json:"reference"`
+	Notes         string       `json:"notes"`
+	Status        string       `json:"status" gorm:"default:'paid'"` // paid, partial, pending
+	// IsSettlement marks a payroll created by "pay all dues": it settles
+	// accumulated dues rather than a fixed attendance period. Its payable
+	// amount is computed over attendance days not covered by any other payroll,
+	// and pending deductions/advances fold into it.
+	IsSettlement bool             `json:"is_settlement" gorm:"default:false"`
+	Payments     []PayrollPayment `json:"payments,omitempty" gorm:"foreignKey:PayrollID"`
+	CreatedAt    time.Time        `json:"created_at"`
+	UpdatedAt    time.Time        `json:"updated_at"`
+	DeletedAt    gorm.DeletedAt   `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// PayrollPayment is one payout against a payroll. A payroll may be settled in
+// several partial payments; each creates its own expense, cash-bank
+// transaction and GL posting. PaymentNumber is "<payroll>/<n>" (e.g.
+// "PAY-001/2") and doubles as the cash transaction reference; backfilled rows
+// for payrolls paid before this table existed reuse the bare payroll number.
+type PayrollPayment struct {
 	ID            uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID        uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
-	StaffID       uuid.UUID      `json:"staff_id" gorm:"type:uuid;not null;index"`
-	Staff         Staff          `json:"staff,omitempty" gorm:"foreignKey:StaffID"`
+	PayrollID     uuid.UUID      `json:"payroll_id" gorm:"type:uuid;not null;index"`
+	Payroll       *Payroll       `json:"payroll,omitempty" gorm:"foreignKey:PayrollID"`
 	PaymentNumber string         `json:"payment_number" gorm:"not null;index"`
+	Amount        float64        `json:"amount" gorm:"default:0"`
 	PaymentDate   time.Time      `json:"payment_date" gorm:"not null"`
-	StartDate     time.Time      `json:"start_date" gorm:"not null"`
-	EndDate       time.Time      `json:"end_date" gorm:"not null"`
-	BasicSalary   float64        `json:"basic_salary" gorm:"default:0"`
-	WorkingDays   int            `json:"working_days" gorm:"default:0"`
-	PresentDays   int            `json:"present_days" gorm:"default:0"`
-	AbsentDays    int            `json:"absent_days" gorm:"default:0"`
-	HalfDays      int            `json:"half_days" gorm:"default:0"`
-	PaidLeaveDays int            `json:"paid_leave_days" gorm:"default:0"`
-	WeeklyOffDays int            `json:"weekly_off_days" gorm:"default:0"`
-	Deductions    float64        `json:"deductions" gorm:"default:0"`
-	Bonus         float64        `json:"bonus" gorm:"default:0"`
-	NetSalary     float64        `json:"net_salary" gorm:"default:0"`
 	PaymentMode   string         `json:"payment_mode"`                                     // cash, bank_transfer, upi, cheque
 	BankAccountID *uuid.UUID     `json:"bank_account_id,omitempty" gorm:"type:uuid;index"` // nil = cash in-hand
 	BankAccount   *BankAccount   `json:"bank_account,omitempty" gorm:"foreignKey:BankAccountID"`
 	ExpenseID     *uuid.UUID     `json:"expense_id,omitempty" gorm:"type:uuid;index"`
 	Reference     string         `json:"reference"`
 	Notes         string         `json:"notes"`
-	Status        string         `json:"status" gorm:"default:'paid'"` // paid, pending
 	CreatedAt     time.Time      `json:"created_at"`
 	UpdatedAt     time.Time      `json:"updated_at"`
 	DeletedAt     gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`

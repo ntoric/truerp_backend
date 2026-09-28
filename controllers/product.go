@@ -77,8 +77,13 @@ func GetProducts(c *gin.Context) {
 		query = query.Where("category = ?", category)
 	}
 
+	if unit := c.Query("unit"); unit != "" && unit != "all" {
+		query = query.Where("unit = ?", unit)
+	}
+
 	if search := c.Query("search"); search != "" {
-		query = query.Where("name LIKE ? OR sku LIKE ? OR item_code LIKE ? OR plu LIKE ?", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where("LOWER(name) LIKE ? OR LOWER(sku) LIKE ? OR LOWER(item_code) LIKE ? OR LOWER(plu) LIKE ?", like, like, like, like)
 	}
 
 	// Paginated mode (opt-in via page/per_page); per_page <= 0 returns every
@@ -148,6 +153,22 @@ func GetProducts(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, out)
+}
+
+func GetProductUnits(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	var units []string
+	if err := utils.DB.Model(&models.Product{}).
+		Where("user_id = ?", userID).
+		Where("unit <> ''").
+		Distinct().
+		Order("unit").
+		Pluck("unit", &units).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch product units"})
+		return
+	}
+	c.JSON(http.StatusOK, units)
 }
 
 func GetProduct(c *gin.Context) {
@@ -630,8 +651,13 @@ func ExportProductsCSV(c *gin.Context) {
 		query = query.Where("category = ?", category)
 	}
 
+	if unit := c.Query("unit"); unit != "" && unit != "all" {
+		query = query.Where("unit = ?", unit)
+	}
+
 	if search := c.Query("search"); search != "" {
-		query = query.Where("name LIKE ? OR sku LIKE ? OR item_code LIKE ? OR plu LIKE ?", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where("LOWER(name) LIKE ? OR LOWER(sku) LIKE ? OR LOWER(item_code) LIKE ? OR LOWER(plu) LIKE ?", like, like, like, like)
 	}
 
 	if err := query.Order("created_at DESC").Find(&products).Error; err != nil {
@@ -696,8 +722,13 @@ func ExportProductsExcel(c *gin.Context) {
 		query = query.Where("category = ?", category)
 	}
 
+	if unit := c.Query("unit"); unit != "" && unit != "all" {
+		query = query.Where("unit = ?", unit)
+	}
+
 	if search := c.Query("search"); search != "" {
-		query = query.Where("name LIKE ? OR sku LIKE ? OR item_code LIKE ? OR plu LIKE ?", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where("LOWER(name) LIKE ? OR LOWER(sku) LIKE ? OR LOWER(item_code) LIKE ? OR LOWER(plu) LIKE ?", like, like, like, like)
 	}
 
 	if err := query.Order("created_at DESC").Find(&products).Error; err != nil {
@@ -837,6 +868,7 @@ func PrintProductLabel(c *gin.Context) {
 
 	labelData := productLabelData{
 		Name:      product.Name,
+		Brand:     business.Name,
 		SKU:       product.SKU,
 		ItemCode:  product.ItemCode,
 		Category:  product.Category,
@@ -851,6 +883,7 @@ func PrintProductLabel(c *gin.Context) {
 		code := barcodeValueForProduct(labelData)
 		entry := BarcodeLabelItemJSON{
 			Name:    labelData.Name,
+			Brand:   labelData.Brand,
 			Barcode: code,
 			SKU:     labelData.SKU,
 			Price:   labelData.SalePrice,

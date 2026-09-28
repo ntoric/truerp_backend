@@ -413,9 +413,13 @@ func buildBarcodePreviewHTML(userID uuid.UUID, mode string, labelSizeKey string)
 			LabelMarginMM:  10,
 		}
 	}
+	if strings.TrimSpace(business.Name) == "" {
+		business.Name = "Your Business Name"
+	}
 
 	sample := productLabelData{
 		Name:      "Sample Product",
+		Brand:     business.Name,
 		SKU:       "DEMO-001",
 		ItemCode:  "8901234567890",
 		Category:  "General",

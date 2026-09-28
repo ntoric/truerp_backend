@@ -3,6 +3,7 @@ package controllers
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 	"truerp/models"
 	"truerp/utils"
@@ -35,7 +36,8 @@ func GetStaffAdvancePayments(c *gin.Context) {
 	}
 
 	if search := c.Query("search"); search != "" {
-		query = query.Where("reason ILIKE ? OR advance_number ILIKE ?", "%"+search+"%", "%"+search+"%")
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where("LOWER(reason) LIKE ? OR LOWER(advance_number) LIKE ?", like, like)
 	}
 
 	if err := query.Order("advance_date DESC, created_at DESC").Find(&advances).Error; err != nil {

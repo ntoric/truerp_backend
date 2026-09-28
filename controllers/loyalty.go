@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"net/http"
+	"strings"
 	"time"
 	"truerp/models"
 	"truerp/utils"
@@ -111,7 +112,8 @@ func GetLoyaltyCustomers(c *gin.Context) {
 
 	query := utils.DB.Where("user_id = ? AND party_type = ?", userID, "customer")
 	if search != "" {
-		query = query.Where("name LIKE ? OR phone LIKE ?", "%"+search+"%", "%"+search+"%")
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where("LOWER(name) LIKE ? OR LOWER(phone) LIKE ?", like, like)
 	}
 
 	var parties []models.Party

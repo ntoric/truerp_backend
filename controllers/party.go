@@ -3,6 +3,7 @@ package controllers
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"truerp/models"
 	"truerp/utils"
 
@@ -26,7 +27,8 @@ func GetParties(c *gin.Context) {
 	query := utils.DB.Where("user_id = ?", userID)
 
 	if search != "" {
-		query = query.Where("name LIKE ? OR phone LIKE ? OR email LIKE ? OR category LIKE ?", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where("LOWER(name) LIKE ? OR LOWER(phone) LIKE ? OR LOWER(email) LIKE ? OR LOWER(category) LIKE ?", like, like, like, like)
 	}
 
 	if category != "" {

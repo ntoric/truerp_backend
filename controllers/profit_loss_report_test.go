@@ -145,9 +145,10 @@ func TestLoadProfitLossReport(t *testing.T) {
 	salesAcc := models.Account{ID: uuid.New(), UserID: userID, Code: acCodeSales, Name: "Sales", AccountType: "income", IsActive: true}
 	purchAcc := models.Account{ID: uuid.New(), UserID: userID, Code: acCodePurchase, Name: "Purchases", AccountType: "expense", IsActive: true}
 	genExpAcc := models.Account{ID: uuid.New(), UserID: userID, Code: acCodeExpense, Name: "General Expenses", AccountType: "expense", IsActive: true}
+	payrollAcc := models.Account{ID: uuid.New(), UserID: userID, Code: acCodePayroll, Name: "Payroll", AccountType: "expense", IsActive: true}
 	interestAcc := models.Account{ID: uuid.New(), UserID: userID, Code: "4200", Name: "Interest Income", AccountType: "income", IsActive: true}
 	rentAcc := models.Account{ID: uuid.New(), UserID: userID, Code: "5500", Name: "Rent", AccountType: "expense", IsActive: true}
-	for _, a := range []models.Account{salesAcc, purchAcc, genExpAcc, interestAcc, rentAcc} {
+	for _, a := range []models.Account{salesAcc, purchAcc, genExpAcc, payrollAcc, interestAcc, rentAcc} {
 		if err := db.Create(&a).Error; err != nil {
 			t.Fatalf("account %s: %v", a.Name, err)
 		}
@@ -168,6 +169,7 @@ func TestLoadProfitLossReport(t *testing.T) {
 	mkLedger(genExpAcc.ID, "cash_reduce", 150, 0, day(2026, 1, 22))       // indirect expense
 	mkLedger(interestAcc.ID, "journal_entry", 0, 2000, day(2026, 1, 25))  // other income
 	mkLedger(rentAcc.ID, "journal_entry", 700, 0, day(2026, 1, 26))       // indirect expense
+	mkLedger(payrollAcc.ID, "payroll", 3000, 0, day(2026, 1, 28))         // payroll → indirect expense
 
 	report, err := loadProfitLossReport(userID, "custom", "", "2026-01-01", "2026-01-31")
 	if err != nil {
@@ -195,23 +197,24 @@ func TestLoadProfitLossReport(t *testing.T) {
 	if got := report.ClosingStock; got != 2500 {
 		t.Fatalf("closing stock = %v, want 2500", got)
 	}
-	// Gross = netSales + closing − opening − netPurchases = 8500+2500−1000−3500
-	if got := report.GrossProfit; got != 6500 {
-		t.Fatalf("gross profit = %v, want 6500", got)
+	// Gross = netSales + closing − opening = 8500+2500−1000
+	if got := report.GrossProfit; got != 10000 {
+		t.Fatalf("gross profit = %v, want 10000", got)
 	}
 	if got := report.OtherIncome.TotalAmount; got != 2000 {
 		t.Fatalf("other income = %v, want 2000", got)
 	}
-	// Indirect = cash_reduce 150 + journal rent 700; the 'expense' posting excluded.
+	// Indirect = cash_reduce 150 + journal rent 700; 'expense' and 'payroll'
+	// postings are excluded because the Expenses section counts them.
 	if got := report.IndirectExpenses.TotalAmount; got != 850 {
 		t.Fatalf("indirect expenses = %v, want 850", got)
 	}
 	if got := report.Expenses.TotalAmount; got != 800 {
 		t.Fatalf("expenses = %v, want 800", got)
 	}
-	// Net = 6500 + 2000 − 850 − 800
-	if got := report.NetProfit; got != 6850 {
-		t.Fatalf("net profit = %v, want 6850", got)
+	// Net = 10000 + 2000 − 800 (indirect expenses are no longer deducted)
+	if got := report.NetProfit; got != 11200 {
+		t.Fatalf("net profit = %v, want 11200", got)
 	}
 	if len(report.IndirectExpenseLines) != 2 {
 		t.Fatalf("indirect expense lines = %d, want 2", len(report.IndirectExpenseLines))

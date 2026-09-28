@@ -3,6 +3,7 @@ package controllers
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 	"truerp/models"
 	"truerp/utils"
@@ -35,12 +36,12 @@ func GetAuditLogs(c *gin.Context) {
 
 	// Filter by user name
 	if userName := c.Query("user_name"); userName != "" {
-		query = query.Where("user_name ILIKE ?", "%"+userName+"%")
+		query = query.Where("LOWER(user_name) LIKE ?", "%"+strings.ToLower(userName)+"%")
 	}
 
 	// Filter by IP address
 	if ipAddress := c.Query("ip_address"); ipAddress != "" {
-		query = query.Where("ip_address ILIKE ?", "%"+ipAddress+"%")
+		query = query.Where("LOWER(ip_address) LIKE ?", "%"+strings.ToLower(ipAddress)+"%")
 	}
 
 	// Filter by date range
@@ -74,8 +75,9 @@ func GetAuditLogs(c *gin.Context) {
 
 	// Search in description and entity name
 	if search := c.Query("search"); search != "" {
-		query = query.Where("description ILIKE ? OR entity_name ILIKE ? OR user_name ILIKE ? OR ip_address ILIKE ?",
-			"%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where("LOWER(description) LIKE ? OR LOWER(entity_name) LIKE ? OR LOWER(user_name) LIKE ? OR LOWER(ip_address) LIKE ?",
+			like, like, like, like)
 	}
 
 	// Sort options

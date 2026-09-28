@@ -357,23 +357,24 @@ func postExpenseAccounting(tx *gorm.DB, userID uuid.UUID, expense *models.Expens
 	})
 }
 
-// postPayrollSalaryAccounting posts payroll expense against cash/bank, keyed by payroll ID
-// so reverse/re-apply is idempotent for the general ledger.
-func postPayrollSalaryAccounting(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll, expense *models.Expense) error {
-	if payroll.NetSalary <= 0 {
+// postPayrollPaymentAccounting posts one payroll payment against cash/bank,
+// keyed by the payment ID so each partial payment posts once and can be
+// reversed independently. The debit lands on the Payroll expense account,
+// which the Profit & Loss report surfaces under Indirect Expenses.
+func postPayrollPaymentAccounting(tx *gorm.DB, userID uuid.UUID, payment *models.PayrollPayment, desc string) error {
+	if payment.Amount <= 0 {
 		return nil
 	}
-	desc := expense.Description
 	if desc == "" {
-		desc = fmt.Sprintf("Payroll %s", payroll.PaymentNumber)
+		desc = fmt.Sprintf("Payroll %s", payment.PaymentNumber)
 	}
 	assetCode := acCodeCash
-	if payroll.BankAccountID != nil {
+	if payment.BankAccountID != nil {
 		assetCode = acCodeBank
 	}
-	return postAutoJournal(tx, userID, payroll.PaymentDate, desc, "payroll", payroll.ID, payroll.PaymentNumber, []glLine{
-		{AccountCode: acCodePayroll, Debit: payroll.NetSalary, Description: desc},
-		{AccountCode: assetCode, Credit: payroll.NetSalary, Description: desc},
+	return postAutoJournal(tx, userID, payment.PaymentDate, desc, "payroll", payment.ID, payment.PaymentNumber, []glLine{
+		{AccountCode: acCodePayroll, Debit: payment.Amount, Description: desc},
+		{AccountCode: assetCode, Credit: payment.Amount, Description: desc},
 	})
 }
 

@@ -62,9 +62,10 @@ func payableDaysInRange(attendances []models.Attendance, startStr, endStr string
 //
 // The balance is built from four parts:
 //   - every payroll's unsettled remainder: payable + bonus - deductions for the
-//     period, minus net_salary actually paid. Paid payrolls leave 0 unless the
-//     recorded net was clamped at 0 (excess deductions become staff payback).
-//     Pending payrolls contribute their full unsettled remainder.
+//     period, minus paid_amount actually paid out. Fully paid payrolls leave 0
+//     unless the recorded net was clamped at 0 (excess deductions become staff
+//     payback). Pending and partially paid payrolls contribute their unsettled
+//     remainder.
 //   - payable salary for attendance days not covered by any payroll period.
 //   - minus advance amounts still pending recovery.
 //   - minus active deductions not yet folded into a payroll period.
@@ -72,18 +73,54 @@ func computeStaffBalance(staff models.Staff, payrolls []models.Payroll, attendan
 	var result staffBalance
 
 	coveredDates := map[string]bool{}
+	markCovered := func(p models.Payroll) {
+		for d := p.StartDate; !d.After(p.EndDate); d = d.AddDate(0, 0, 1) {
+			coveredDates[d.Format("2006-01-02")] = true
+		}
+	}
+	paidShare := func(p models.Payroll) float64 {
+		paid := p.PaidAmount
+		if p.Status == "paid" && paid <= 0 {
+			paid = p.NetSalary // legacy row paid before paid_amount existed
+		}
+		return paid
+	}
+
+	// Pass 1: period payrolls earn payable salary for all attendance in their
+	// range and cover those dates.
 	for _, p := range payrolls {
+		if p.IsSettlement {
+			continue
+		}
 		startStr := p.StartDate.Format("2006-01-02")
 		endStr := p.EndDate.Format("2006-01-02")
 		workingDays, payableDays := payableDaysInRange(attendances, startStr, endStr)
 		data := payrollPeriodData{WorkingDays: workingDays, PayableDays: payableDays}
 		result.PayableFromPayrolls += payableSalary(p.BasicSalary, staff.SalaryType, data) + p.Bonus - p.Deductions
-		if p.Status == "paid" {
-			result.SalaryPaid += p.NetSalary
+		result.SalaryPaid += paidShare(p)
+		markCovered(p)
+	}
+
+	// Pass 2: settlement payrolls earn payable only for attendance days still
+	// uncovered by any period payroll (or an earlier settlement) in their
+	// range, then cover those dates too.
+	for _, p := range payrolls {
+		if !p.IsSettlement {
+			continue
 		}
-		for d := p.StartDate; !d.After(p.EndDate); d = d.AddDate(0, 0, 1) {
-			coveredDates[d.Format("2006-01-02")] = true
+		startStr := p.StartDate.Format("2006-01-02")
+		endStr := p.EndDate.Format("2006-01-02")
+		var payableDays float64
+		for _, a := range attendances {
+			ds := a.Date.Format("2006-01-02")
+			if coveredDates[ds] || ds < startStr || ds > endStr {
+				continue
+			}
+			payableDays += payableWeight(a.Status)
 		}
+		result.PayableFromPayrolls += payableDays*staffDailyRate(staff) + p.Bonus - p.Deductions
+		result.SalaryPaid += paidShare(p)
+		markCovered(p)
 	}
 
 	for _, a := range attendances {

@@ -39,12 +39,17 @@ func setupProductListTestDB(t *testing.T) *gorm.DB {
 func seedProducts(t *testing.T, db *gorm.DB, userID uuid.UUID) {
 	t.Helper()
 	for i := 1; i <= 5; i++ {
+		unit := "PCS"
+		if i%2 == 0 {
+			unit = "KG"
+		}
 		product := models.Product{
 			ID:       uuid.New(),
 			UserID:   userID,
 			Name:     fmt.Sprintf("Widget %d", i),
 			SKU:      fmt.Sprintf("SKU-%d", i),
 			Category: "Hardware",
+			Unit:     unit,
 		}
 		if err := db.Create(&product).Error; err != nil {
 			t.Fatalf("create product %d: %v", i, err)
@@ -108,6 +113,17 @@ func TestGetProductsPaginatedFiltersAndLegacy(t *testing.T) {
 	}
 	if body.Total != 0 || len(body.Products) != 0 {
 		t.Fatalf("category filter: total=%d rows=%d, want 0/0", body.Total, len(body.Products))
+	}
+
+	// Unit filter applies before pagination (2 of 5 seeded rows use KG).
+	c, rec = newListContext("/products", "?page=1&per_page=10&unit=KG")
+	c.Set("user_id", userID)
+	GetProducts(c)
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Total != 2 || len(body.Products) != 2 {
+		t.Fatalf("unit filter: total=%d rows=%d, want 2/2", body.Total, len(body.Products))
 	}
 
 	// Legacy callers (e.g. POS catalog) still get a plain array.
