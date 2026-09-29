@@ -216,14 +216,18 @@ func UpdateExpense(c *gin.Context) {
 	id := c.Param("id")
 
 	var input struct {
-		Category      string     `json:"category"`
-		Description   string     `json:"description"`
-		Amount        float64    `json:"amount"`
-		Date          time.Time  `json:"date"`
-		Vendor        string     `json:"vendor"`
-		PaymentMode   string     `json:"payment_mode"`
-		BankAccountID *uuid.UUID `json:"bank_account_id"`
-		Notes         string     `json:"notes"`
+		Category           string               `json:"category"`
+		Description        string               `json:"description"`
+		OriginalInvoiceNum string               `json:"original_invoice_num"`
+		Amount             float64              `json:"amount"`
+		Date               time.Time            `json:"date"`
+		Vendor             string               `json:"vendor"`
+		PaymentMode        string               `json:"payment_mode"`
+		BankAccountID      *uuid.UUID           `json:"bank_account_id"`
+		Notes              string               `json:"notes"`
+		WithGST            bool                 `json:"with_gst"`
+		TaxRate            float64              `json:"tax_rate"`
+		Items              []models.ExpenseItem `json:"items"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -250,10 +254,37 @@ func UpdateExpense(c *gin.Context) {
 	input.Category = utils.ResolveCategoryName(input.Category)
 	_ = utils.EnsureDefaultCategories(utils.DB, userID)
 
-	paymentChanged := expense.Amount != input.Amount ||
+	// Recalculate totals from items (same rules as CreateExpense); fall back to
+	// the flat amount when no items are supplied.
+	var subTotal, taxTotal, totalAmount float64
+	if len(input.Items) > 0 {
+		for i := range input.Items {
+			item := &input.Items[i]
+			itemTotal := item.Quantity * item.UnitPrice
+			item.Total = itemTotal
+			if input.WithGST {
+				item.TaxRate = input.TaxRate
+				item.TaxAmount = itemTotal * (input.TaxRate / 100)
+				item.Total = itemTotal + item.TaxAmount
+			}
+			subTotal += itemTotal
+			taxTotal += item.TaxAmount
+			totalAmount += item.Total
+		}
+	} else {
+		totalAmount = input.Amount
+		subTotal = totalAmount
+		if input.WithGST && input.TaxRate > 0 {
+			taxTotal = totalAmount * input.TaxRate / (100 + input.TaxRate)
+			subTotal = totalAmount - taxTotal
+		}
+	}
+
+	paymentChanged := expense.Amount != totalAmount ||
 		expense.PaymentMode != input.PaymentMode ||
 		!bankAccountIDsEqual(expense.BankAccountID, resolvedBankAccount) ||
 		!expense.Date.Equal(input.Date)
+	accountingChanged := paymentChanged || expense.Category != input.Category
 
 	tx := utils.DB.Begin()
 	if paymentChanged {
@@ -265,14 +296,19 @@ func UpdateExpense(c *gin.Context) {
 	}
 
 	if err := tx.Model(&expense).Updates(map[string]interface{}{
-		"category":        input.Category,
-		"description":     input.Description,
-		"amount":          input.Amount,
-		"date":            input.Date,
-		"vendor":          input.Vendor,
-		"payment_mode":    input.PaymentMode,
-		"bank_account_id": resolvedBankAccount,
-		"notes":           input.Notes,
+		"category":             input.Category,
+		"description":          input.Description,
+		"original_invoice_num": input.OriginalInvoiceNum,
+		"amount":               totalAmount,
+		"sub_total":            subTotal,
+		"tax_total":            taxTotal,
+		"with_gst":             input.WithGST,
+		"tax_rate":             input.TaxRate,
+		"date":                 input.Date,
+		"vendor":               input.Vendor,
+		"payment_mode":         input.PaymentMode,
+		"bank_account_id":      resolvedBankAccount,
+		"notes":                input.Notes,
 	}).Error; err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update expense"})
@@ -281,21 +317,60 @@ func UpdateExpense(c *gin.Context) {
 
 	expense.Category = input.Category
 	expense.Description = input.Description
-	expense.Amount = input.Amount
+	expense.OriginalInvoiceNum = input.OriginalInvoiceNum
+	expense.Amount = totalAmount
+	expense.SubTotal = subTotal
+	expense.TaxTotal = taxTotal
+	expense.WithGST = input.WithGST
+	expense.TaxRate = input.TaxRate
 	expense.Date = input.Date
 	expense.Vendor = input.Vendor
 	expense.PaymentMode = input.PaymentMode
 	expense.BankAccountID = resolvedBankAccount
 	expense.Notes = input.Notes
 
-	if paymentChanged && input.Amount > 0 {
+	// Replace line items when the request carries them.
+	if len(input.Items) > 0 {
+		if err := tx.Where("expense_id = ?", expense.ID).Delete(&models.ExpenseItem{}).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update expense items"})
+			return
+		}
+		for _, item := range input.Items {
+			item.ID = uuid.New()
+			item.ExpenseID = expense.ID
+			if err := tx.Create(&item).Error; err != nil {
+				tx.Rollback()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update expense items"})
+				return
+			}
+		}
+		expense.Items = input.Items
+	}
+
+	if paymentChanged && totalAmount > 0 {
 		desc := fmt.Sprintf("Expense %s", expense.ExpenseNumber)
 		if input.Description != "" {
 			desc = input.Description
 		}
-		if err := recordExpenseCashOut(tx, userID, resolvedBankAccount, input.Amount, input.Date, expense.ExpenseNumber, desc); err != nil {
+		if err := recordExpenseCashOut(tx, userID, resolvedBankAccount, totalAmount, input.Date, expense.ExpenseNumber, desc); err != nil {
 			tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to deduct from account"})
+			return
+		}
+	}
+
+	// Keep GL postings in sync so ledgers, account balances and reports built
+	// on them reflect the edited expense.
+	if accountingChanged {
+		if err := reverseAccountingByRef(tx, userID, "expense", expense.ID); err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse expense accounting"})
+			return
+		}
+		if err := postExpenseAccounting(tx, userID, &expense); err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Expense saved but failed to post to accounting"})
 			return
 		}
 	}
@@ -304,6 +379,8 @@ func UpdateExpense(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update expense"})
 		return
 	}
+
+	utils.DB.Preload("Items").First(&expense, expense.ID)
 
 	// Log expense update
 	CreateAuditLog(
@@ -318,7 +395,7 @@ func UpdateExpense(c *gin.Context) {
 		c.GetHeader("User-Agent"),
 		map[string]interface{}{
 			"category":     input.Category,
-			"amount":       input.Amount,
+			"amount":       totalAmount,
 			"vendor":       input.Vendor,
 			"payment_mode": input.PaymentMode,
 		},
@@ -347,6 +424,11 @@ func DeleteExpense(c *gin.Context) {
 	if err := reverseExpenseCashOut(tx, userID, expense.ExpenseNumber); err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse account deduction"})
+		return
+	}
+	if err := reverseAccountingByRef(tx, userID, "expense", expense.ID); err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse expense accounting"})
 		return
 	}
 	if err := tx.Delete(&expense).Error; err != nil {

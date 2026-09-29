@@ -48,6 +48,13 @@ func resolveDatabaseURL() string {
 	return u.String()
 }
 
+// ResolvedDatabaseURL returns the PostgreSQL connection URL derived from
+// DATABASE_URL / POSTGRES_* env vars, or "" when running on SQLite. Used by
+// the database-backup job to build a pg_dump command.
+func ResolvedDatabaseURL() string {
+	return resolveDatabaseURL()
+}
+
 func openPostgres(databaseURL string) (*gorm.DB, error) {
 	log.Printf("Connecting to PostgreSQL")
 

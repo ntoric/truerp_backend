@@ -900,6 +900,14 @@ func SetupRoutes(r *gin.Engine) {
 		developerSettings.GET("/db-maintenance", controllers.GetDBMaintenanceSettingsHandler)
 		developerSettings.PUT("/db-maintenance", controllers.UpdateDBMaintenanceSettingsHandler)
 		developerSettings.POST("/db-maintenance/run-now", controllers.RunDBMaintenanceNowHandler)
+
+		// Database backups (scheduled dumps + optional cloud upload)
+		developerSettings.GET("/db-backup", controllers.GetDBBackupSettingsHandler)
+		developerSettings.PUT("/db-backup", controllers.UpdateDBBackupSettingsHandler)
+		developerSettings.POST("/db-backup/run-now", controllers.RunDBBackupNowHandler)
+		developerSettings.POST("/db-backup/test-destination", controllers.TestDBBackupDestinationHandler)
+		developerSettings.GET("/db-backup/records/:id/download", controllers.DownloadDBBackupRecordHandler)
+		developerSettings.DELETE("/db-backup/records/:id", controllers.DeleteDBBackupRecordHandler)
 	}
 
 	// Page / menu feature flags (read: any auth user; write: super admin)

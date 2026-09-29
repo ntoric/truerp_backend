@@ -2436,6 +2436,83 @@ type DBMaintenanceSettings struct {
 	DeletedAt         gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
+// DBBackupSettings is a system-wide singleton controlling scheduled database
+// backups and the optional upload of each produced dump to a cloud
+// destination. A single row is created lazily; the scheduler reloads it every
+// minute and runs a backup once the configured schedule (interpreted in
+// Asia/Kolkata, i.e. IST) is due. Secret fields are stored encrypted via
+// utils.Encrypt and are never serialized to the API (json:"-"); the Has* flags
+// are computed per response so the UI can show "configured" placeholders.
+type DBBackupSettings struct {
+	ID              uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	IsEnabled       bool      `json:"is_enabled" gorm:"default:false"`
+	Frequency       string    `json:"frequency" gorm:"default:'daily'"`        // daily | weekly | monthly
+	RunTime         string    `json:"run_time" gorm:"default:'02:00'"`         // HH:MM (24h) in Asia/Kolkata
+	Weekday         int       `json:"weekday" gorm:"default:1"`                // 0=Sun..6=Sat, weekly only
+	MonthDay        int       `json:"month_day" gorm:"default:1"`              // 1-28, monthly only
+	RetentionCount  int       `json:"retention_count" gorm:"default:10"`       // local backups to keep, 0 = keep all
+	DestinationType string    `json:"destination_type" gorm:"default:'local'"` // local | s3 | gdrive | mega | telegram | custom
+
+	// S3-compatible object storage (AWS S3, Cloudflare R2, MinIO, Spaces).
+	S3Endpoint  string `json:"s3_endpoint"` // optional custom endpoint for S3-compatible services
+	S3Region    string `json:"s3_region"`
+	S3Bucket    string `json:"s3_bucket"`
+	S3AccessKey string `json:"s3_access_key"`
+	S3SecretKey string `json:"-" gorm:"column:s3_secret_key;type:text"` // encrypted
+	S3Prefix    string `json:"s3_prefix"`                               // optional key prefix
+
+	// Google Drive via a service-account JSON key.
+	GDriveServiceAccountJSON string `json:"-" gorm:"column:gdrive_service_account_json;type:text"` // encrypted
+	GDriveFolderID           string `json:"gdrive_folder_id"`                                      // optional target folder
+
+	// Mega account credentials.
+	MegaEmail    string `json:"mega_email"`
+	MegaPassword string `json:"-" gorm:"column:mega_password;type:text"` // encrypted
+
+	// Telegram bot delivery (sendDocument API).
+	TelegramBotToken string `json:"-" gorm:"column:telegram_bot_token;type:text"` // encrypted
+	TelegramChatID   string `json:"telegram_chat_id"`
+
+	// Custom application endpoint: the dump is POSTed as multipart "file".
+	CustomURL        string `json:"custom_url"`
+	CustomHeaders    string `json:"custom_headers" gorm:"type:text"`              // JSON object of extra headers
+	CustomAuthHeader string `json:"-" gorm:"column:custom_auth_header;type:text"` // encrypted Authorization value
+
+	// Read-only flags computed in handlers (not persisted).
+	HasS3Secret          bool `json:"has_s3_secret" gorm:"-"`
+	HasGDriveCredentials bool `json:"has_gdrive_credentials" gorm:"-"`
+	HasMegaPassword      bool `json:"has_mega_password" gorm:"-"`
+	HasTelegramBotToken  bool `json:"has_telegram_bot_token" gorm:"-"`
+	HasCustomAuthHeader  bool `json:"has_custom_auth_header" gorm:"-"`
+
+	LastRunAt         *time.Time     `json:"last_run_at,omitempty" gorm:"index"`
+	LastRunStatus     string         `json:"last_run_status"` // success, partial, failed
+	LastRunError      string         `json:"last_run_error,omitempty"`
+	LastRunFile       string         `json:"last_run_file,omitempty"`
+	LastRunSizeBytes  int64          `json:"last_run_size_bytes" gorm:"default:0"`
+	LastRunDurationMs int64          `json:"last_run_duration_ms" gorm:"default:0"`
+	CreatedAt         time.Time      `json:"created_at"`
+	UpdatedAt         time.Time      `json:"updated_at"`
+	DeletedAt         gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// DBBackupRecord tracks one produced database backup: the local dump file,
+// where it was uploaded, and the outcome. History is surfaced in the
+// Developer Settings UI.
+type DBBackupRecord struct {
+	ID             uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	FileName       string    `json:"file_name"`
+	FilePath       string    `json:"-" gorm:"type:text"` // local absolute path — never exposed
+	SizeBytes      int64     `json:"size_bytes"`
+	Trigger        string    `json:"trigger"`     // manual | scheduled
+	Destination    string    `json:"destination"` // local | s3 | gdrive | mega | telegram | custom
+	Status         string    `json:"status"`      // success | partial | failed
+	Error          string    `json:"error,omitempty"`
+	UploadDetail   string    `json:"upload_detail,omitempty" gorm:"type:text"` // human-readable upload result
+	LocalAvailable bool      `json:"local_available" gorm:"-"`                 // computed: file still on disk
+	CreatedAt      time.Time `json:"created_at"`
+}
+
 // MigrationJob tracks an asynchronous data-migration import (CSV or myBillBook
 // ZIP). The frontend enqueues a job, then polls GET /migration/jobs/:id for
 // per-row progress until the status reaches "completed" or "failed".

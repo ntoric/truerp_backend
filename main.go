@@ -44,6 +44,10 @@ func main() {
 	// when enabled in Developer Settings.
 	controllers.StartDBMaintenanceScheduler()
 
+	// Start the background scheduler that produces database backups on the
+	// configured schedule and uploads them to the configured destination.
+	controllers.StartDBBackupScheduler()
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 
