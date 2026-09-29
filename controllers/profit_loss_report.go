@@ -27,12 +27,20 @@ func plSumMetric(model interface{}, userID uuid.UUID, dateColumn, amountColumn, 
 	return m
 }
 
-// computeStockValueAsOf replays the approved stock_entries ledger to estimate
-// inventory quantity and value at the end of the given date. Per-product value
-// uses the weighted average cost of costed inflow entries (purchase, opening,
-// adjustment); products without costed inflows fall back to the product's
-// purchase price.
-func computeStockValueAsOf(userID uuid.UUID, date string) (qty, value float64) {
+// stockPosition is a product's replayed on-hand quantity and weighted average
+// cost at a point in time.
+type stockPosition struct {
+	Qty  float64
+	Cost float64
+}
+
+// stockPositionsAsOf replays the approved stock_entries ledger to estimate
+// per-product inventory quantity and weighted average cost at the end of the
+// given date. Cost uses costed inflow entries (purchase, opening, adjustment);
+// products without costed inflows fall back to the product's purchase price.
+func stockPositionsAsOf(userID uuid.UUID, date string) map[uuid.UUID]stockPosition {
+	positions := make(map[uuid.UUID]stockPosition)
+
 	type qtyRow struct {
 		ProductID uuid.UUID
 		Qty       float64
@@ -46,7 +54,10 @@ func computeStockValueAsOf(userID uuid.UUID, date string) (qty, value float64) {
 			AND DATE(entry_date) <= ?
 		GROUP BY product_id`, userID, date).Scan(&qtyRows)
 	if len(qtyRows) == 0 {
-		return 0, 0
+		return positions
+	}
+	for _, r := range qtyRows {
+		positions[r.ProductID] = stockPosition{Qty: r.Qty}
 	}
 
 	type costRow struct {
@@ -64,9 +75,10 @@ func computeStockValueAsOf(userID uuid.UUID, date string) (qty, value float64) {
 			AND quantity > 0 AND cost_price > 0
 			AND entry_type IN ('purchase', 'opening', 'adjustment')
 		GROUP BY product_id`, userID, date).Scan(&costRows)
-	costByProduct := make(map[uuid.UUID]float64, len(costRows))
 	for _, r := range costRows {
-		costByProduct[r.ProductID] = r.Cost
+		pos := positions[r.ProductID]
+		pos.Cost = r.Cost
+		positions[r.ProductID] = pos
 	}
 
 	var products []models.Product
@@ -75,14 +87,21 @@ func computeStockValueAsOf(userID uuid.UUID, date string) (qty, value float64) {
 	for _, p := range products {
 		purchasePrice[p.ID] = p.PurchasePrice
 	}
-
-	for _, r := range qtyRows {
-		cost := costByProduct[r.ProductID]
-		if cost <= 0 {
-			cost = purchasePrice[r.ProductID]
+	for id, pos := range positions {
+		if pos.Cost <= 0 {
+			pos.Cost = purchasePrice[id]
+			positions[id] = pos
 		}
-		value += r.Qty * cost
-		qty += r.Qty
+	}
+	return positions
+}
+
+// computeStockValueAsOf replays the approved stock_entries ledger to estimate
+// inventory quantity and value at the end of the given date.
+func computeStockValueAsOf(userID uuid.UUID, date string) (qty, value float64) {
+	for _, pos := range stockPositionsAsOf(userID, date) {
+		qty += pos.Qty
+		value += pos.Qty * pos.Cost
 	}
 	return qty, value
 }
@@ -170,7 +189,8 @@ func loadProfitLossReport(userID uuid.UUID, period, anchorDate, startDate, endDa
 	report.ClosingStockQty, report.ClosingStock = computeStockValueAsOf(userID, end)
 
 	netSales := report.Sales.TotalAmount - report.SalesReturns.TotalAmount
-	report.GrossProfit = netSales + report.ClosingStock - report.OpeningStock
+	netPurchases := report.Purchases.TotalAmount - report.PurchaseReturns.TotalAmount
+	report.GrossProfit = netSales - netPurchases + report.ClosingStock - report.OpeningStock
 
 	report.OtherIncome, report.OtherIncomeLines = loadPLLedgerLines(
 		userID, "income", []string{acCodeSales}, nil, false, start, end)
@@ -365,7 +385,7 @@ func ExportProfitLossReportExcel(c *gin.Context) {
 	}
 
 	writeRow("")
-	writeRow("Note", "Gross profit = net sales + closing stock − opening stock.")
+	writeRow("Note", "Gross profit = net sales − net purchases + closing stock − opening stock.")
 	writeRow("Note", "Net profit = gross profit + other income − expenses.")
 
 	filename := fmt.Sprintf("profit_loss_%s_%s_%s.xlsx", report.Period, report.StartDate, report.EndDate)
@@ -518,7 +538,7 @@ func buildProfitLossReportPDF(report models.ProfitLossReport) ([]byte, error) {
 	pdf.Ln(8)
 	pdf.SetFont("Arial", "I", 8)
 	pdf.SetTextColor(140, 140, 140)
-	pdf.MultiCell(0, 4.5, sanitizePDFText("Gross profit = net sales + closing stock - opening stock. Net profit = gross profit + other income - expenses. Stock values use weighted average cost from the stock ledger. Generated from TruERP."), "", "L", false)
+	pdf.MultiCell(0, 4.5, sanitizePDFText("Gross profit = net sales - net purchases + closing stock - opening stock. Net profit = gross profit + other income - expenses. Stock values use weighted average cost from the stock ledger. Generated from TruERP."), "", "L", false)
 
 	var buf bytes.Buffer
 	if err := pdf.Output(&buf); err != nil {

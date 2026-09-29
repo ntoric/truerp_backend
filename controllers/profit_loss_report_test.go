@@ -197,9 +197,9 @@ func TestLoadProfitLossReport(t *testing.T) {
 	if got := report.ClosingStock; got != 2500 {
 		t.Fatalf("closing stock = %v, want 2500", got)
 	}
-	// Gross = netSales + closing − opening = 8500+2500−1000
-	if got := report.GrossProfit; got != 10000 {
-		t.Fatalf("gross profit = %v, want 10000", got)
+	// Gross = netSales − netPurchases + closing − opening = 8500−3500+2500−1000
+	if got := report.GrossProfit; got != 6500 {
+		t.Fatalf("gross profit = %v, want 6500", got)
 	}
 	if got := report.OtherIncome.TotalAmount; got != 2000 {
 		t.Fatalf("other income = %v, want 2000", got)
@@ -212,9 +212,9 @@ func TestLoadProfitLossReport(t *testing.T) {
 	if got := report.Expenses.TotalAmount; got != 800 {
 		t.Fatalf("expenses = %v, want 800", got)
 	}
-	// Net = 10000 + 2000 − 800 (indirect expenses are no longer deducted)
-	if got := report.NetProfit; got != 11200 {
-		t.Fatalf("net profit = %v, want 11200", got)
+	// Net = 6500 + 2000 − 800 (indirect expenses are no longer deducted)
+	if got := report.NetProfit; got != 7700 {
+		t.Fatalf("net profit = %v, want 7700", got)
 	}
 	if len(report.IndirectExpenseLines) != 2 {
 		t.Fatalf("indirect expense lines = %d, want 2", len(report.IndirectExpenseLines))

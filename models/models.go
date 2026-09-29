@@ -477,7 +477,7 @@ type ProfitLossLine struct {
 }
 
 // ProfitLossReport is a trading & P&L style statement over an arbitrary period.
-// Gross profit = net sales + closing stock − opening stock.
+// Gross profit = net sales − net purchases + closing stock − opening stock.
 // Net profit = gross profit + other income − indirect expenses − expenses.
 type ProfitLossReport struct {
 	BusinessName string `json:"business_name"`
@@ -518,6 +518,48 @@ type ProfitLossReport struct {
 	// ExpenseLines lists each individual expense dated in this period, for the
 	// per-expense breakdown table. Empty when no expenses exist for the range.
 	ExpenseLines []ExpenseLine `json:"expense_lines"`
+}
+
+// StockReportLine is a per-product opening → movement → closing breakdown for
+// a period, valued at weighted average cost replayed from the stock ledger.
+type StockReportLine struct {
+	ProductID    uuid.UUID `json:"product_id"`
+	ProductName  string    `json:"product_name"`
+	SKU          string    `json:"sku"`
+	Category     string    `json:"category"`
+	Unit         string    `json:"unit"`
+	OpeningQty   float64   `json:"opening_qty"`
+	OpeningValue float64   `json:"opening_value"`
+	InQty        float64   `json:"in_qty"`
+	OutQty       float64   `json:"out_qty"`
+	ClosingQty   float64   `json:"closing_qty"`
+	ClosingValue float64   `json:"closing_value"`
+	ChangeQty    float64   `json:"change_qty"`
+	ChangeValue  float64   `json:"change_value"`
+}
+
+// StockReport summarizes opening and closing stock for an inclusive period,
+// with a per-product movement breakdown in Lines.
+type StockReport struct {
+	BusinessName string `json:"business_name"`
+	Period       string `json:"period"`     // daily | weekly | monthly | yearly | custom
+	StartDate    string `json:"start_date"` // YYYY-MM-DD inclusive
+	EndDate      string `json:"end_date"`   // YYYY-MM-DD inclusive
+	Label        string `json:"label"`      // human-readable period label
+
+	// OpeningStock is inventory value at the end of the day before StartDate;
+	// ClosingStock is inventory value at the end of EndDate. InQty/OutQty are
+	// total units moved into/out of stock within the period.
+	OpeningStockQty float64 `json:"opening_stock_qty"`
+	OpeningStock    float64 `json:"opening_stock"`
+	InQty           float64 `json:"in_qty"`
+	OutQty          float64 `json:"out_qty"`
+	ClosingStockQty float64 `json:"closing_stock_qty"`
+	ClosingStock    float64 `json:"closing_stock"`
+	StockChangeQty  float64 `json:"stock_change_qty"`
+	StockChange     float64 `json:"stock_change"`
+
+	Lines []StockReportLine `json:"lines"`
 }
 
 type GSTReport struct {
