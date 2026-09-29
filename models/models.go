@@ -1021,19 +1021,26 @@ type PartyStats struct {
 }
 
 type SalesReturn struct {
-	ID           uuid.UUID         `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID       uuid.UUID         `json:"user_id" gorm:"type:uuid;not null;index"`
-	PartyID      uuid.UUID         `json:"party_id" gorm:"type:uuid;not null"`
-	Party        Party             `json:"party,omitempty" gorm:"foreignKey:PartyID"`
-	InvoiceID    uuid.UUID         `json:"invoice_id" gorm:"type:uuid"`
-	Invoice      Invoice           `json:"invoice,omitempty" gorm:"foreignKey:InvoiceID"`
-	ReturnNumber string            `json:"return_number" gorm:"not null;index"`
-	Date         time.Time         `json:"date" gorm:"not null"`
-	Amount       float64           `json:"amount" gorm:"default:0"`
-	Status       string            `json:"status" gorm:"default:'draft'"` // draft, processed, cancelled
-	Reason       string            `json:"reason"`
-	RefundMode   string            `json:"refund_mode"` // cash, original_payment, credit_note
-	Notes        string            `json:"notes"`
+	ID           uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID       uuid.UUID `json:"user_id" gorm:"type:uuid;not null;index"`
+	PartyID      uuid.UUID `json:"party_id" gorm:"type:uuid;not null"`
+	Party        Party     `json:"party,omitempty" gorm:"foreignKey:PartyID"`
+	InvoiceID    uuid.UUID `json:"invoice_id" gorm:"type:uuid"`
+	Invoice      Invoice   `json:"invoice,omitempty" gorm:"foreignKey:InvoiceID"`
+	ReturnNumber string    `json:"return_number" gorm:"not null;index"`
+	Date         time.Time `json:"date" gorm:"not null"`
+	Amount       float64   `json:"amount" gorm:"default:0"`
+	Status       string    `json:"status" gorm:"default:'draft'"` // draft, processed, cancelled
+	Reason       string    `json:"reason"`
+	RefundMode   string    `json:"refund_mode"` // cash, original_payment, credit_note
+	Notes        string    `json:"notes"`
+	// DeductionItems are labelled amounts (restocking fee, damage charges,
+	// etc.) withheld from the refund; DeductionTotal is their aggregate.
+	DeductionItems []AdditionalCharge `json:"deduction_items,omitempty" gorm:"type:text;serializer:json"`
+	DeductionTotal float64            `json:"deduction_total" gorm:"default:0"`
+	// RefundAmount is the net amount returned to the party
+	// (Amount - DeductionTotal); computed on read, not persisted.
+	RefundAmount float64           `json:"refund_amount" gorm:"-"`
 	Items        []SalesReturnItem `json:"items" gorm:"foreignKey:ReturnID;constraint:OnDelete:CASCADE;"`
 	CreatedAt    time.Time         `json:"created_at"`
 	UpdatedAt    time.Time         `json:"updated_at"`

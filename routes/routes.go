@@ -9,9 +9,7 @@ import (
 
 func SetupRoutes(r *gin.Engine) {
 	// Health check
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
-	})
+	r.GET("/health", controllers.HealthCheck)
 
 	// Auth routes
 	auth := r.Group("/api/v1/auth")

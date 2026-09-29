@@ -12,6 +12,34 @@ import (
 	"github.com/google/uuid"
 )
 
+// normalizeDeductionItems trims labels, defaults blank labels, drops
+// zero-amount rows and rejects negative amounts.
+func normalizeDeductionItems(items []models.AdditionalCharge) ([]models.AdditionalCharge, error) {
+	out := make([]models.AdditionalCharge, 0, len(items))
+	for _, item := range items {
+		label := strings.TrimSpace(item.Label)
+		if item.Amount < 0 {
+			return nil, fmt.Errorf("deduction amount cannot be negative")
+		}
+		if item.Amount == 0 {
+			continue
+		}
+		if label == "" {
+			label = "Deduction"
+		}
+		out = append(out, models.AdditionalCharge{Label: label, Amount: item.Amount})
+	}
+	return out, nil
+}
+
+// setSalesReturnRefund fills the computed (non-persisted) RefundAmount.
+func setSalesReturnRefund(sr *models.SalesReturn) {
+	sr.RefundAmount = sr.Amount - sr.DeductionTotal
+	if sr.RefundAmount < 0 {
+		sr.RefundAmount = 0
+	}
+}
+
 func GetSalesReturns(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
@@ -36,6 +64,9 @@ func GetSalesReturns(c *gin.Context) {
 		return
 	}
 
+	for i := range returns {
+		setSalesReturnRefund(&returns[i])
+	}
 	c.JSON(http.StatusOK, gin.H{"data": returns})
 }
 
@@ -49,6 +80,7 @@ func GetSalesReturn(c *gin.Context) {
 		return
 	}
 
+	setSalesReturnRefund(&salesReturn)
 	c.JSON(http.StatusOK, salesReturn)
 }
 
@@ -56,13 +88,14 @@ func CreateSalesReturn(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		PartyID    uuid.UUID `json:"party_id" binding:"required"`
-		InvoiceID  uuid.UUID `json:"invoice_id"`
-		Date       time.Time `json:"date" binding:"required"`
-		Reason     string    `json:"reason"`
-		RefundMode string    `json:"refund_mode"`
-		Notes      string    `json:"notes"`
-		Items      []struct {
+		PartyID        uuid.UUID                 `json:"party_id" binding:"required"`
+		InvoiceID      uuid.UUID                 `json:"invoice_id"`
+		Date           time.Time                 `json:"date" binding:"required"`
+		Reason         string                    `json:"reason"`
+		RefundMode     string                    `json:"refund_mode"`
+		Notes          string                    `json:"notes"`
+		DeductionItems []models.AdditionalCharge `json:"deduction_items"`
+		Items          []struct {
 			InvoiceItemID uuid.UUID  `json:"invoice_item_id"`
 			ProductID     *uuid.UUID `json:"product_id"`
 			Description   string     `json:"description"`
@@ -146,11 +179,25 @@ func CreateSalesReturn(c *gin.Context) {
 
 	salesReturn.Amount = totalAmount
 
+	deductionItems, err := normalizeDeductionItems(input.DeductionItems)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	deductionTotal := models.SumAdditionalCharges(deductionItems)
+	if deductionTotal > totalAmount {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Deductions cannot exceed the return amount"})
+		return
+	}
+	salesReturn.DeductionItems = deductionItems
+	salesReturn.DeductionTotal = deductionTotal
+
 	if err := utils.DB.Create(&salesReturn).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create sales return"})
 		return
 	}
 
+	setSalesReturnRefund(&salesReturn)
 	c.JSON(http.StatusCreated, salesReturn)
 }
 
@@ -170,10 +217,11 @@ func UpdateSalesReturn(c *gin.Context) {
 	}
 
 	var input struct {
-		Date       time.Time `json:"date"`
-		Reason     string    `json:"reason"`
-		RefundMode string    `json:"refund_mode"`
-		Notes      string    `json:"notes"`
+		Date           time.Time                 `json:"date"`
+		Reason         string                    `json:"reason"`
+		RefundMode     string                    `json:"refund_mode"`
+		Notes          string                    `json:"notes"`
+		DeductionItems []models.AdditionalCharge `json:"deduction_items"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -181,18 +229,32 @@ func UpdateSalesReturn(c *gin.Context) {
 		return
 	}
 
-	updates := map[string]interface{}{
-		"date":        input.Date,
-		"reason":      input.Reason,
-		"refund_mode": input.RefundMode,
-		"notes":       input.Notes,
+	deductionItems, err := normalizeDeductionItems(input.DeductionItems)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	deductionTotal := models.SumAdditionalCharges(deductionItems)
+	if deductionTotal > salesReturn.Amount {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Deductions cannot exceed the return amount"})
+		return
 	}
 
-	if err := utils.DB.Model(&salesReturn).Updates(updates).Error; err != nil {
+	salesReturn.Date = input.Date
+	salesReturn.Reason = input.Reason
+	salesReturn.RefundMode = input.RefundMode
+	salesReturn.Notes = input.Notes
+	salesReturn.DeductionItems = deductionItems
+	salesReturn.DeductionTotal = deductionTotal
+
+	if err := utils.DB.Model(&salesReturn).
+		Select("date", "reason", "refund_mode", "notes", "deduction_items", "deduction_total").
+		Updates(&salesReturn).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update sales return"})
 		return
 	}
 
+	setSalesReturnRefund(&salesReturn)
 	c.JSON(http.StatusOK, salesReturn)
 }
 
@@ -276,6 +338,7 @@ func ProcessSalesReturn(c *gin.Context) {
 	salesReturn.Status = "processed"
 	utils.DB.Save(&salesReturn)
 
+	setSalesReturnRefund(&salesReturn)
 	c.JSON(http.StatusOK, salesReturn)
 }
 
