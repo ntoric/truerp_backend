@@ -48,6 +48,10 @@ func main() {
 	// configured schedule and uploads them to the configured destination.
 	controllers.StartDBBackupScheduler()
 
+	// Start the background scheduler that rolls the daily closing-stock
+	// snapshots forward (and catches up days missed while the server was down).
+	controllers.StartStockSnapshotScheduler()
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 

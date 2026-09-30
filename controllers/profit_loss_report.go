@@ -27,83 +27,27 @@ func plSumMetric(model interface{}, userID uuid.UUID, dateColumn, amountColumn, 
 	return m
 }
 
-// stockPosition is a product's replayed on-hand quantity and weighted average
-// cost at a point in time.
+// stockPosition is a product's on-hand quantity and inventory value (at
+// weighted average cost) at a point in time.
 type stockPosition struct {
-	Qty  float64
-	Cost float64
+	Qty   float64
+	Value float64
 }
 
-// stockPositionsAsOf replays the approved stock_entries ledger to estimate
-// per-product inventory quantity and weighted average cost at the end of the
-// given date. Cost uses costed inflow entries (purchase, opening, adjustment);
-// products without costed inflows fall back to the product's purchase price.
+// stockPositionsAsOf reads the materialized stock_daily_snapshots table to get
+// per-product inventory quantity and value at the end of the given date.
+// Snapshots reconcile the stock_entries ledger against live inventory_stocks,
+// so stock that entered without ledger entries (e.g. migrated opening stock)
+// is included. Callers must run ensureStockSnapshots first.
 func stockPositionsAsOf(userID uuid.UUID, date string) map[uuid.UUID]stockPosition {
-	positions := make(map[uuid.UUID]stockPosition)
-
-	type qtyRow struct {
-		ProductID uuid.UUID
-		Qty       float64
-	}
-	var qtyRows []qtyRow
-	utils.DB.Raw(`
-		SELECT product_id, COALESCE(SUM(quantity), 0) AS qty
-		FROM stock_entries
-		WHERE user_id = ? AND product_id IS NOT NULL AND deleted_at IS NULL
-			AND (approval_status = 'approved' OR approval_status = '' OR approval_status IS NULL)
-			AND DATE(entry_date) <= ?
-		GROUP BY product_id`, userID, date).Scan(&qtyRows)
-	if len(qtyRows) == 0 {
-		return positions
-	}
-	for _, r := range qtyRows {
-		positions[r.ProductID] = stockPosition{Qty: r.Qty}
-	}
-
-	type costRow struct {
-		ProductID uuid.UUID
-		Cost      float64
-	}
-	var costRows []costRow
-	utils.DB.Raw(`
-		SELECT product_id,
-			COALESCE(SUM(quantity * cost_price) / NULLIF(SUM(quantity), 0), 0) AS cost
-		FROM stock_entries
-		WHERE user_id = ? AND product_id IS NOT NULL AND deleted_at IS NULL
-			AND (approval_status = 'approved' OR approval_status = '' OR approval_status IS NULL)
-			AND DATE(entry_date) <= ?
-			AND quantity > 0 AND cost_price > 0
-			AND entry_type IN ('purchase', 'opening', 'adjustment')
-		GROUP BY product_id`, userID, date).Scan(&costRows)
-	for _, r := range costRows {
-		pos := positions[r.ProductID]
-		pos.Cost = r.Cost
-		positions[r.ProductID] = pos
-	}
-
-	var products []models.Product
-	utils.DB.Where("user_id = ?", userID).Select("id", "purchase_price").Find(&products)
-	purchasePrice := make(map[uuid.UUID]float64, len(products))
-	for _, p := range products {
-		purchasePrice[p.ID] = p.PurchasePrice
-	}
-	for id, pos := range positions {
-		if pos.Cost <= 0 {
-			pos.Cost = purchasePrice[id]
-			positions[id] = pos
-		}
-	}
-	return positions
+	return snapshotPositionsAsOf(userID, date)
 }
 
-// computeStockValueAsOf replays the approved stock_entries ledger to estimate
-// inventory quantity and value at the end of the given date.
+// computeStockValueAsOf returns inventory quantity and value at the end of the
+// given date — the materialized stock snapshots adjusted by the latest overall
+// opening-stock override.
 func computeStockValueAsOf(userID uuid.UUID, date string) (qty, value float64) {
-	for _, pos := range stockPositionsAsOf(userID, date) {
-		qty += pos.Qty
-		value += pos.Qty * pos.Cost
-	}
-	return qty, value
+	return overallPositionAsOf(userID, date)
 }
 
 // loadPLLedgerLines aggregates posted ledger movements on income/expense GL
@@ -182,7 +126,10 @@ func loadProfitLossReport(userID uuid.UUID, period, anchorDate, startDate, endDa
 	}
 
 	// Opening stock is the inventory value at the close of the day before the
-	// period starts; closing stock is the value at the period end.
+	// period starts; closing stock is the value at the period end. Positions
+	// come from the materialized daily snapshot table, refreshed if the stock
+	// source data changed since the last rebuild.
+	ensureStockSnapshots(userID)
 	startT, _ := time.Parse("2006-01-02", start)
 	openingDate := startT.AddDate(0, 0, -1).Format("2006-01-02")
 	report.OpeningStockQty, report.OpeningStock = computeStockValueAsOf(userID, openingDate)

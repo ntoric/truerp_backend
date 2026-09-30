@@ -884,6 +884,7 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 		for _, model := range []interface{}{
 			&models.StockEntry{},
 			&models.InventoryStock{},
+			&models.StockDailySnapshot{},
 			&models.ProductImage{},
 			&models.ProductVariant{},
 			&models.SerialNumber{},
@@ -894,6 +895,14 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 			if err := hardDeleteByFK(tx, model, "product_id", productIDs); err != nil {
 				return err
 			}
+		}
+		// Snapshot meta and opening overrides are keyed by user only, so they
+		// can't join the product_id loop.
+		if err := hardDeleteByUser(tx, &models.StockSnapshotMeta{}, ownerID); err != nil {
+			return err
+		}
+		if err := hardDeleteByUser(tx, &models.StockOpeningOverride{}, ownerID); err != nil {
+			return err
 		}
 		// Detach the product link on line items instead of failing — documents keep
 		// their description/qty/price even after the catalog entry is gone.

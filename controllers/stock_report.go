@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -35,33 +36,24 @@ func loadStockReport(userID uuid.UUID, period, anchorDate, startDate, endDate st
 
 	// Opening positions are taken at the close of the day before the period
 	// starts; closing positions at the period end — same as the P&L report.
+	// Positions and movements come from the materialized daily snapshot table,
+	// refreshed if the stock source data changed since the last rebuild.
+	ensureStockSnapshots(userID)
 	startT, _ := time.Parse("2006-01-02", start)
 	openingDate := startT.AddDate(0, 0, -1).Format("2006-01-02")
 	opening := stockPositionsAsOf(userID, openingDate)
 	closing := stockPositionsAsOf(userID, end)
+	// Report totals honor the latest overall opening-stock override — the
+	// aggregate position can't be decomposed per product, so any residual vs
+	// the per-product lines is surfaced as its own line below.
+	openingQtyTotal, openingValTotal := overallPositionAsOf(userID, openingDate)
+	closingQtyTotal, closingValTotal := overallPositionAsOf(userID, end)
 
 	// Units moved into/out of stock within the period.
-	type movementRow struct {
-		ProductID uuid.UUID
-		InQty     float64
-		OutQty    float64
-	}
-	var movements []movementRow
-	utils.DB.Raw(`
-		SELECT product_id,
-			COALESCE(SUM(CASE WHEN quantity > 0 THEN quantity ELSE 0 END), 0) AS in_qty,
-			COALESCE(SUM(CASE WHEN quantity < 0 THEN -quantity ELSE 0 END), 0) AS out_qty
-		FROM stock_entries
-		WHERE user_id = ? AND product_id IS NOT NULL AND deleted_at IS NULL
-			AND (approval_status = 'approved' OR approval_status = '' OR approval_status IS NULL)
-			AND DATE(entry_date) >= ? AND DATE(entry_date) <= ?
-		GROUP BY product_id`, userID, start, end).Scan(&movements)
-
-	inOut := make(map[uuid.UUID]movementRow, len(movements))
-	for _, m := range movements {
-		inOut[m.ProductID] = m
-		report.InQty += m.InQty
-		report.OutQty += m.OutQty
+	inOut := snapshotMovements(userID, start, end)
+	for _, m := range inOut {
+		report.InQty += m[0]
+		report.OutQty += m[1]
 	}
 
 	// Every product that has an opening position, closing position, or
@@ -108,11 +100,11 @@ func loadStockReport(userID uuid.UUID, period, anchorDate, startDate, endDate st
 			Category:     p.Category,
 			Unit:         p.Unit,
 			OpeningQty:   o.Qty,
-			OpeningValue: o.Qty * o.Cost,
-			InQty:        m.InQty,
-			OutQty:       m.OutQty,
+			OpeningValue: o.Value,
+			InQty:        m[0],
+			OutQty:       m[1],
 			ClosingQty:   cl.Qty,
-			ClosingValue: cl.Qty * cl.Cost,
+			ClosingValue: cl.Value,
 		}
 		line.ChangeQty = line.ClosingQty - line.OpeningQty
 		line.ChangeValue = line.ClosingValue - line.OpeningValue
@@ -127,6 +119,29 @@ func loadStockReport(userID uuid.UUID, period, anchorDate, startDate, endDate st
 		return strings.ToLower(lines[i].ProductName) < strings.ToLower(lines[j].ProductName)
 	})
 
+	// An overall opening-stock override shifts the aggregate position without a
+	// per-product breakdown — surface the residual as its own line so the
+	// report's line items still reconcile with the totals.
+	dOpenQty := openingQtyTotal - report.OpeningStockQty
+	dOpenVal := openingValTotal - report.OpeningStock
+	dCloseQty := closingQtyTotal - report.ClosingStockQty
+	dCloseVal := closingValTotal - report.ClosingStock
+	if math.Abs(dOpenQty)+math.Abs(dOpenVal)+math.Abs(dCloseQty)+math.Abs(dCloseVal) > 1e-6 {
+		lines = append(lines, models.StockReportLine{
+			ProductName:  "(Opening stock override)",
+			OpeningQty:   dOpenQty,
+			OpeningValue: dOpenVal,
+			ClosingQty:   dCloseQty,
+			ClosingValue: dCloseVal,
+			ChangeQty:    dCloseQty - dOpenQty,
+			ChangeValue:  dCloseVal - dOpenVal,
+		})
+	}
+
+	report.OpeningStockQty = openingQtyTotal
+	report.OpeningStock = openingValTotal
+	report.ClosingStockQty = closingQtyTotal
+	report.ClosingStock = closingValTotal
 	report.StockChangeQty = report.ClosingStockQty - report.OpeningStockQty
 	report.StockChange = report.ClosingStock - report.OpeningStock
 	report.Lines = lines

@@ -673,6 +673,59 @@ type InventoryStock struct {
 	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
+// StockDailySnapshot records the opening and closing stock position for a
+// product at an outlet on a calendar day that had stock activity. Rows are
+// materialized by rebuildStockSnapshots — reconciling the stock_entries ledger
+// against live inventory_stocks — and read by the stock and P&L reports.
+// Positions for quiet days are the latest snapshot on or before that day.
+type StockDailySnapshot struct {
+	ID           uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID       uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex:idx_stock_daily_snapshot"`
+	ProductID    uuid.UUID `json:"product_id" gorm:"type:uuid;not null;uniqueIndex:idx_stock_daily_snapshot"`
+	OutletID     uuid.UUID `json:"outlet_id" gorm:"type:uuid;not null;uniqueIndex:idx_stock_daily_snapshot"`
+	SnapshotDate time.Time `json:"snapshot_date" gorm:"not null;uniqueIndex:idx_stock_daily_snapshot"`
+	OpeningQty   float64   `json:"opening_qty" gorm:"default:0"`
+	OpeningValue float64   `json:"opening_value" gorm:"default:0"`
+	InQty        float64   `json:"in_qty" gorm:"default:0"`
+	OutQty       float64   `json:"out_qty" gorm:"default:0"`
+	ClosingQty   float64   `json:"closing_qty" gorm:"default:0"`
+	ClosingValue float64   `json:"closing_value" gorm:"default:0"`
+	AvgCost      float64   `json:"avg_cost" gorm:"default:0"` // weighted average cost at close of day
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// StockOpeningOverride is a superadmin-declared overall opening stock
+// position: at the start of EffectiveDate the business-wide stock is Quantity
+// units worth Value, and computed movements on/after that day apply on top.
+// Applied at report level — the daily snapshots stay product-scoped. Used to
+// correct opening stock when the ledger/baseline reconstruction is wrong
+// (e.g. stock imported without a true opening entry).
+type StockOpeningOverride struct {
+	ID            uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID        uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	EffectiveDate time.Time      `json:"effective_date" gorm:"not null;index:idx_stock_opening_override_key"`
+	Quantity      float64        `json:"quantity" gorm:"default:0"`
+	Value         float64        `json:"value" gorm:"default:0"` // total stock value at cost
+	Notes         string         `json:"notes"`
+	CreatedBy     uuid.UUID      `json:"created_by" gorm:"type:uuid"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// StockSnapshotMeta stores the fingerprint of the stock source data used by
+// the last snapshot rebuild for a user, so reports rebuild only when the
+// underlying entries or inventory stocks have changed. ThroughDate is the
+// latest calendar day the snapshots cover — a new day rolls the coverage
+// forward even when no stock moved.
+type StockSnapshotMeta struct {
+	UserID      uuid.UUID `json:"user_id" gorm:"type:uuid;primaryKey"`
+	Fingerprint string    `json:"fingerprint"`
+	ThroughDate time.Time `json:"through_date"`
+	RebuiltAt   time.Time `json:"rebuilt_at"`
+}
+
 type StockTransfer struct {
 	ID            uuid.UUID           `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID        uuid.UUID           `json:"user_id" gorm:"type:uuid;not null;index;index:idx_stock_transfers_user_created,priority:1"`

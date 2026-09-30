@@ -71,6 +71,7 @@ func resolveDatabasePath() string {
 // Used by the SQLite → PostgreSQL migration tool to prepare an empty Postgres database.
 func MigrateSchema(db *gorm.DB) error {
 	migrateLabelGapColumns(db)
+	migrateOpeningOverrideShape(db)
 	return db.AutoMigrate(allApplicationModels()...)
 }
 
@@ -152,6 +153,9 @@ func allApplicationModels() []interface{} {
 		&models.UserRole{},
 		&models.Warehouse{},
 		&models.InventoryStock{},
+		&models.StockDailySnapshot{},
+		&models.StockSnapshotMeta{},
+		&models.StockOpeningOverride{},
 		&models.TaxPeriod{},
 		&models.InputTaxCredit{},
 		&models.GSTFilingStatus{},
@@ -701,6 +705,21 @@ func backfillExpenseCategories(db *gorm.DB) {
 		}
 		if err := db.Create(&cat).Error; err != nil {
 			log.Printf("backfillExpenseCategories: create failed for %s/%s: %v", r.UserID, r.Category, err)
+		}
+	}
+}
+
+// migrateOpeningOverrideShape drops the original per-product
+// stock_opening_overrides table (product_id/outlet_id/unit_cost columns) — the
+// model is now a single business-wide position, and AutoMigrate won't remove
+// the old NOT NULL columns. The table is recreated empty by AutoMigrate.
+func migrateOpeningOverrideShape(db *gorm.DB) {
+	if !db.Migrator().HasTable(&models.StockOpeningOverride{}) {
+		return
+	}
+	if db.Migrator().HasColumn(&models.StockOpeningOverride{}, "product_id") {
+		if err := db.Migrator().DropTable(&models.StockOpeningOverride{}); err != nil {
+			log.Printf("migrateOpeningOverrideShape: drop legacy table failed: %v", err)
 		}
 	}
 }
