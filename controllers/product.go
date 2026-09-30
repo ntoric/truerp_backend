@@ -115,7 +115,10 @@ func GetProducts(c *gin.Context) {
 
 	stockByProduct := map[uuid.UUID]float64{}
 	if len(products) > 0 {
-		stockQuery := utils.DB.Where("user_id = ?", userID)
+		stockQuery := utils.DB.Model(&models.InventoryStock{}).
+			Select("product_id, COALESCE(SUM(available_qty), 0) AS stock_qty").
+			Where("user_id = ?", userID).
+			Group("product_id")
 		if paginated {
 			productIDs := make([]uuid.UUID, 0, len(products))
 			for _, p := range products {
@@ -123,10 +126,13 @@ func GetProducts(c *gin.Context) {
 			}
 			stockQuery = stockQuery.Where("product_id IN ?", productIDs)
 		}
-		var stocks []models.InventoryStock
-		if err := stockQuery.Find(&stocks).Error; err == nil {
-			for _, stock := range stocks {
-				stockByProduct[stock.ProductID] += stock.AvailableQty
+		var stockRows []struct {
+			ProductID uuid.UUID
+			StockQty  float64
+		}
+		if err := stockQuery.Scan(&stockRows).Error; err == nil {
+			for _, row := range stockRows {
+				stockByProduct[row.ProductID] = row.StockQty
 			}
 		}
 	}

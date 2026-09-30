@@ -53,6 +53,7 @@ func GetQuotation(c *gin.Context) {
 	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).
 		Preload("Party").
 		Preload("Items").
+		Preload("Items.Product").
 		Preload("Versions").
 		First(&quotation).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Quotation not found"})

@@ -127,6 +127,7 @@ func GetInvoice(c *gin.Context) {
 	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).
 		Preload("Party").
 		Preload("Items").
+		Preload("Items.Product").
 		First(&invoice).Error; err != nil {
 		fmt.Printf("[DEBUG] GetInvoice - Invoice not found: %v\n", err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Invoice not found"})
