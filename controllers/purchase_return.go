@@ -211,6 +211,12 @@ func ProcessPurchaseReturn(c *gin.Context) {
 	purchaseReturn.Status = "processed"
 	utils.DB.Save(&purchaseReturn)
 
+	// Returning stock to the vendor reduces what we owe them (vendor balances
+	// are negative while payable).
+	if purchaseReturn.Amount > 0 {
+		adjustPartyBalance(utils.DB, userID, purchaseReturn.PartyID, purchaseReturn.Amount)
+	}
+
 	c.JSON(http.StatusOK, purchaseReturn)
 }
 

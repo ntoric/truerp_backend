@@ -338,7 +338,13 @@ func ProcessSalesReturn(c *gin.Context) {
 	salesReturn.Status = "processed"
 	utils.DB.Save(&salesReturn)
 
+	// The return credits the customer: reduce their outstanding balance by the
+	// net refund (return amount minus deductions).
 	setSalesReturnRefund(&salesReturn)
+	if salesReturn.RefundAmount > 0 {
+		adjustPartyBalance(utils.DB, userID, salesReturn.PartyID, -salesReturn.RefundAmount)
+	}
+
 	c.JSON(http.StatusOK, salesReturn)
 }
 

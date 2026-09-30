@@ -76,6 +76,70 @@ func recordPurchasePaymentOut(tx *gorm.DB, userID uuid.UUID, accountID *uuid.UUI
 	return postPurchasePaymentAccounting(tx, userID, transaction.ID, accountID, amount, date, reference, description)
 }
 
+// recordPaymentCashTxn writes the linked cash/bank ledger row for a standalone
+// payment-in (direction "in", transaction type "add") or payment-out
+// (direction "out", type "reduce") and adjusts the bank account balance. No
+// journal is posted on the transaction — the GL entry lives on the payment's
+// *_record reference (postStandalonePaymentInAccounting /
+// postStandalonePaymentOutAccounting).
+func recordPaymentCashTxn(tx *gorm.DB, userID uuid.UUID, accountID *uuid.UUID, direction string, amount float64, date time.Time, reference, description string) error {
+	if amount <= 0 {
+		return nil
+	}
+	txnType := "add"
+	delta := amount
+	if direction == "out" {
+		txnType = "reduce"
+		delta = -amount
+	}
+	if err := adjustBankAccountBalance(tx, userID, accountID, delta, false); err != nil {
+		return err
+	}
+	return tx.Create(&models.CashTransaction{
+		ID:              uuid.New(),
+		UserID:          userID,
+		AccountID:       accountID,
+		TransactionType: txnType,
+		Amount:          amount,
+		Date:            date,
+		Description:     description,
+		Reference:       reference,
+		IsLinked:        true,
+	}).Error
+}
+
+// paymentOutCashRef is the reference written on the linked cash reduce
+// transaction for a standalone payment out — its payment-out number, or a
+// deterministic fallback so the row can still be located when no number was
+// supplied.
+func paymentOutCashRef(paymentOut *models.PaymentOut) string {
+	if n := strings.TrimSpace(paymentOut.PaymentOutNumber); n != "" {
+		return n
+	}
+	return "POUT-" + paymentOut.ID.String()
+}
+
+// findPaymentCashTransactions locates the linked cash ledger rows written for
+// a payment by its reference or by the "Payment <dir> <num> [for …]"
+// description convention. direction is "in" (add) or "out" (reduce).
+func findPaymentCashTransactions(tx *gorm.DB, userID uuid.UUID, direction, ref string) ([]models.CashTransaction, error) {
+	var txns []models.CashTransaction
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return txns, nil
+	}
+	txnType := "add"
+	if direction == "out" {
+		txnType = "reduce"
+	}
+	desc := fmt.Sprintf("Payment %s %s", direction, ref)
+	err := tx.Where(
+		"user_id = ? AND transaction_type = ? AND is_linked = ? AND (reference = ? OR description = ? OR description LIKE ?)",
+		userID, txnType, true, ref, desc, desc+" for %",
+	).Order("created_at ASC").Find(&txns).Error
+	return txns, err
+}
+
 // createLinkedSalePaymentIn records Payment row(s) for a sales invoice payment
 // and posts cash/bank + AR reduction. Invoice amount_paid/status must already be set.
 // When invoice.PaymentSplits is set, one Payment + cash transaction is created per split.

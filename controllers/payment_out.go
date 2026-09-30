@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -119,6 +120,7 @@ func CreatePaymentOut(c *gin.Context) {
 
 	// Calculate net amount (amount paid minus discount)
 	netAmount := input.AmountPaid - input.PaymentOutDiscount
+	mode := normalizePaymentMethod(input.Mode)
 
 	paymentOut := models.PaymentOut{
 		ID:                 uuid.New(),
@@ -128,45 +130,84 @@ func CreatePaymentOut(c *gin.Context) {
 		AmountPaid:         input.AmountPaid,
 		PaymentOutDiscount: input.PaymentOutDiscount,
 		PaymentOutNumber:   input.PaymentOutNumber,
-		Mode:               input.Mode,
+		Mode:               mode,
 		Date:               input.Date,
 		Reference:          input.Reference,
 		Notes:              input.Notes,
 	}
 
-	if err := utils.DB.Create(&paymentOut).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create payment out"})
-		return
-	}
-
-	if err := postStandalonePaymentOutAccounting(utils.DB, userID, &paymentOut, netAmount); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Payment out saved but failed to post to accounting"})
-		return
-	}
-
-	// Update purchase bill if provided
+	// Load the linked bill up front — bill edits locate payment-out cash
+	// transactions by the bill number, so the cash row must carry it.
+	var linkedBill models.PurchaseBill
 	if input.PurchaseBillID != nil {
-		var bill models.PurchaseBill
-		if err := utils.DB.Where("user_id = ? AND id = ?", userID, *input.PurchaseBillID).First(&bill).Error; err == nil {
-			newPaid := bill.PaidAmount + netAmount
-			status := bill.Status
-			if newPaid >= bill.TotalAmount {
+		utils.DB.Where("user_id = ? AND id = ?", userID, *input.PurchaseBillID).First(&linkedBill)
+	}
+
+	// Resolve the destination account up front. Initial-investment payments
+	// settle against owner's equity and never touch cash or bank.
+	var accountID *uuid.UUID
+	if !isInitialInvestmentPayment(mode) && netAmount > 0 {
+		resolved, err := resolveBankAccountForPaymentMode(userID, mode, nil)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account for payment method"})
+			return
+		}
+		accountID = resolved
+	}
+
+	if err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&paymentOut).Error; err != nil {
+			return err
+		}
+
+		if err := postStandalonePaymentOutAccounting(tx, userID, &paymentOut, netAmount); err != nil {
+			return err
+		}
+
+		// Record the cash/bank movement so the payment out shows in Cash &
+		// Bank.
+		if !isInitialInvestmentPayment(mode) && netAmount > 0 {
+			ref := paymentOutCashRef(&paymentOut)
+			cashRef := ref
+			desc := fmt.Sprintf("Payment out %s", ref)
+			if linkedBill.ID != uuid.Nil {
+				cashRef = linkedBill.BillNumber
+				desc = fmt.Sprintf("Payment out %s for purchase %s", ref, linkedBill.BillNumber)
+			}
+			if err := recordPaymentCashTxn(tx, userID, accountID, "out", netAmount, input.Date, cashRef, desc); err != nil {
+				return err
+			}
+		}
+
+		// Update purchase bill if provided
+		if linkedBill.ID != uuid.Nil {
+			newPaid := linkedBill.PaidAmount + netAmount
+			status := linkedBill.Status
+			if newPaid >= linkedBill.TotalAmount {
 				status = "paid"
 			} else if newPaid > 0 {
 				status = "partial"
 			}
-			utils.DB.Model(&bill).Updates(map[string]interface{}{
+			if err := tx.Model(&linkedBill).Updates(map[string]interface{}{
 				"paid_amount": newPaid,
-				"balance_due": bill.TotalAmount - newPaid,
+				"balance_due": linkedBill.TotalAmount - newPaid,
 				"status":      status,
-			})
+			}).Error; err != nil {
+				return err
+			}
 		}
-	}
 
-	// Update party balance (increase since we paid them)
-	var party models.Party
-	if err := utils.DB.Where("user_id = ? AND id = ?", userID, input.PartyID).First(&party).Error; err == nil {
-		utils.DB.Model(&party).Update("balance", party.Balance+netAmount)
+		// Update party balance (increase since we paid them)
+		var party models.Party
+		if err := tx.Where("user_id = ? AND id = ?", userID, input.PartyID).First(&party).Error; err == nil {
+			if err := tx.Model(&party).Update("balance", party.Balance+netAmount).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create payment out"})
+		return
 	}
 
 	c.JSON(http.StatusCreated, paymentOut)
@@ -185,35 +226,55 @@ func DeletePaymentOut(c *gin.Context) {
 	// Calculate net amount (amount paid minus discount)
 	netAmount := paymentOut.AmountPaid - paymentOut.PaymentOutDiscount
 
-	// Reverse purchase bill payment
-	if paymentOut.PurchaseBillID != nil {
-		var bill models.PurchaseBill
-		if err := utils.DB.Where("user_id = ? AND id = ?", userID, *paymentOut.PurchaseBillID).First(&bill).Error; err == nil {
-			newPaid := bill.PaidAmount - netAmount
-			if newPaid < 0 {
-				newPaid = 0
-			}
-			status := "unpaid"
-			if newPaid > 0 && newPaid < bill.TotalAmount {
-				status = "partial"
-			} else if newPaid >= bill.TotalAmount {
-				status = "paid"
-			}
-			utils.DB.Model(&bill).Updates(map[string]interface{}{
-				"paid_amount": newPaid,
-				"balance_due": bill.TotalAmount - newPaid,
-				"status":      status,
-			})
+	if err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		// Reverse the standalone journal and the linked cash/bank ledger row.
+		if err := reverseAccountingByRef(tx, userID, "payment_out_record", paymentOut.ID); err != nil {
+			return err
 		}
-	}
+		txns, err := findPaymentCashTransactions(tx, userID, "out", paymentOutCashRef(&paymentOut))
+		if err != nil {
+			return err
+		}
+		for _, txn := range txns {
+			if err := reverseCashReduceTransaction(tx, userID, txn); err != nil {
+				return err
+			}
+		}
 
-	// Reverse party balance (decrease since we're reversing the payment)
-	var party models.Party
-	if err := utils.DB.Where("user_id = ? AND id = ?", userID, paymentOut.PartyID).First(&party).Error; err == nil {
-		utils.DB.Model(&party).Update("balance", party.Balance-netAmount)
-	}
+		// Reverse purchase bill payment
+		if paymentOut.PurchaseBillID != nil {
+			var bill models.PurchaseBill
+			if err := tx.Where("user_id = ? AND id = ?", userID, *paymentOut.PurchaseBillID).First(&bill).Error; err == nil {
+				newPaid := bill.PaidAmount - netAmount
+				if newPaid < 0 {
+					newPaid = 0
+				}
+				status := "unpaid"
+				if newPaid > 0 && newPaid < bill.TotalAmount {
+					status = "partial"
+				} else if newPaid >= bill.TotalAmount {
+					status = "paid"
+				}
+				if err := tx.Model(&bill).Updates(map[string]interface{}{
+					"paid_amount": newPaid,
+					"balance_due": bill.TotalAmount - newPaid,
+					"status":      status,
+				}).Error; err != nil {
+					return err
+				}
+			}
+		}
 
-	if err := utils.DB.Delete(&paymentOut).Error; err != nil {
+		// Reverse party balance (decrease since we're reversing the payment)
+		var party models.Party
+		if err := tx.Where("user_id = ? AND id = ?", userID, paymentOut.PartyID).First(&party).Error; err == nil {
+			if err := tx.Model(&party).Update("balance", party.Balance-netAmount).Error; err != nil {
+				return err
+			}
+		}
+
+		return tx.Delete(&paymentOut).Error
+	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete payment out"})
 		return
 	}
