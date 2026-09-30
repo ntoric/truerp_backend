@@ -69,6 +69,27 @@ func normalizeInvoicePaymentStatus(invoice *models.Invoice) {
 	}
 }
 
+// invoiceStatusForPaidAmount resolves an invoice's status from a proposed
+// amount_paid value. Unlike normalizeInvoicePaymentStatus it also resets to
+// the "sent" baseline when nothing has been paid (used when reversing
+// payments) and keeps "overdue" on partially-paid overdue invoices.
+func invoiceStatusForPaidAmount(invoice models.Invoice, paid float64) string {
+	if invoice.Status == "cancelled" || invoice.Status == "draft" {
+		return invoice.Status
+	}
+	overdue := invoice.DueDate != nil && invoice.DueDate.Before(time.Now())
+	switch {
+	case invoice.TotalAmount > 0 && paid+0.01 >= invoice.TotalAmount:
+		return "paid"
+	case overdue:
+		return "overdue"
+	case paid > 0:
+		return "partial"
+	default:
+		return "sent"
+	}
+}
+
 func recordInvoiceStatusHistory(invoiceID, userID uuid.UUID, fromStatus, toStatus, note, changedBy string) {
 	if fromStatus == toStatus {
 		return

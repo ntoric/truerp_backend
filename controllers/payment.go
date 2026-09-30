@@ -132,6 +132,10 @@ func CreatePayment(c *gin.Context) {
 
 	// Calculate net amount (amount received minus discount)
 	netAmount := input.AmountReceived - input.PaymentInDiscount
+	if netAmount <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Amount received must be greater than the discount"})
+		return
+	}
 
 	payment := models.Payment{
 		ID:                uuid.New(),
@@ -148,10 +152,20 @@ func CreatePayment(c *gin.Context) {
 	}
 
 	// Load the linked invoice up front — invoice edits locate payment-in cash
-	// transactions by the invoice number, so the cash row must carry it.
+	// transactions by the invoice number, so the cash row must carry it. An
+	// unknown or mismatched invoice must fail loudly: saving the payment
+	// anyway would leave it looking linked while the invoice's paid amount
+	// and status never update.
 	var linkedInvoice models.Invoice
-	if input.InvoiceID != nil {
-		utils.DB.Where("user_id = ? AND id = ?", userID, *input.InvoiceID).First(&linkedInvoice)
+	if input.InvoiceID != nil && *input.InvoiceID != uuid.Nil {
+		if err := utils.DB.Where("user_id = ? AND id = ?", userID, *input.InvoiceID).First(&linkedInvoice).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid invoice"})
+			return
+		}
+		if linkedInvoice.PartyID != input.PartyID {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invoice does not belong to the selected party"})
+			return
+		}
 	}
 
 	// Resolve the destination account up front. Initial-investment payments
@@ -192,13 +206,9 @@ func CreatePayment(c *gin.Context) {
 		// Update invoice if provided
 		if linkedInvoice.ID != uuid.Nil {
 			newPaid := linkedInvoice.AmountPaid + netAmount
-			status := linkedInvoice.Status
-			if newPaid >= linkedInvoice.TotalAmount {
-				status = "paid"
-			}
 			if err := tx.Model(&linkedInvoice).Updates(map[string]interface{}{
 				"amount_paid": newPaid,
-				"status":      status,
+				"status":      invoiceStatusForPaidAmount(linkedInvoice, newPaid),
 			}).Error; err != nil {
 				return err
 			}
@@ -293,13 +303,9 @@ func DeletePayment(c *gin.Context) {
 			if newPaid < 0 {
 				newPaid = 0
 			}
-			status := "sent"
-			if newPaid <= 0 {
-				status = "sent"
-			}
 			if err := tx.Model(&linkedInvoice).Updates(map[string]interface{}{
 				"amount_paid": newPaid,
-				"status":      status,
+				"status":      invoiceStatusForPaidAmount(linkedInvoice, newPaid),
 			}).Error; err != nil {
 				return err
 			}

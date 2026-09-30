@@ -120,6 +120,10 @@ func CreatePaymentOut(c *gin.Context) {
 
 	// Calculate net amount (amount paid minus discount)
 	netAmount := input.AmountPaid - input.PaymentOutDiscount
+	if netAmount <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Amount paid must be greater than the discount"})
+		return
+	}
 	mode := normalizePaymentMethod(input.Mode)
 
 	paymentOut := models.PaymentOut{
@@ -137,10 +141,20 @@ func CreatePaymentOut(c *gin.Context) {
 	}
 
 	// Load the linked bill up front — bill edits locate payment-out cash
-	// transactions by the bill number, so the cash row must carry it.
+	// transactions by the bill number, so the cash row must carry it. An
+	// unknown or mismatched bill must fail loudly: saving the payment anyway
+	// would leave it looking linked while the bill's paid amount and status
+	// never update.
 	var linkedBill models.PurchaseBill
-	if input.PurchaseBillID != nil {
-		utils.DB.Where("user_id = ? AND id = ?", userID, *input.PurchaseBillID).First(&linkedBill)
+	if input.PurchaseBillID != nil && *input.PurchaseBillID != uuid.Nil {
+		if err := utils.DB.Where("user_id = ? AND id = ?", userID, *input.PurchaseBillID).First(&linkedBill).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid purchase bill"})
+			return
+		}
+		if linkedBill.PartyID != input.PartyID {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Purchase bill does not belong to the selected vendor"})
+			return
+		}
 	}
 
 	// Resolve the destination account up front. Initial-investment payments
@@ -183,14 +197,18 @@ func CreatePaymentOut(c *gin.Context) {
 		if linkedBill.ID != uuid.Nil {
 			newPaid := linkedBill.PaidAmount + netAmount
 			status := linkedBill.Status
-			if newPaid >= linkedBill.TotalAmount {
+			if linkedBill.TotalAmount > 0 && newPaid+0.01 >= linkedBill.TotalAmount {
 				status = "paid"
 			} else if newPaid > 0 {
 				status = "partial"
 			}
+			balanceDue := linkedBill.TotalAmount - newPaid
+			if balanceDue < 0 {
+				balanceDue = 0
+			}
 			if err := tx.Model(&linkedBill).Updates(map[string]interface{}{
 				"paid_amount": newPaid,
-				"balance_due": linkedBill.TotalAmount - newPaid,
+				"balance_due": balanceDue,
 				"status":      status,
 			}).Error; err != nil {
 				return err
@@ -250,10 +268,10 @@ func DeletePaymentOut(c *gin.Context) {
 					newPaid = 0
 				}
 				status := "unpaid"
-				if newPaid > 0 && newPaid < bill.TotalAmount {
-					status = "partial"
-				} else if newPaid >= bill.TotalAmount {
+				if bill.TotalAmount > 0 && newPaid+0.01 >= bill.TotalAmount {
 					status = "paid"
+				} else if newPaid > 0 {
+					status = "partial"
 				}
 				if err := tx.Model(&bill).Updates(map[string]interface{}{
 					"paid_amount": newPaid,
