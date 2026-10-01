@@ -3,6 +3,7 @@ package controllers
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 	"truerp/models"
 	"truerp/utils"
@@ -11,6 +12,47 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+// paginationRequested reports whether the caller asked for a paginated
+// response. Unparameterized callers keep the legacy response shape.
+func paginationRequested(c *gin.Context) bool {
+	return c.Query("page") != "" || c.Query("per_page") != ""
+}
+
+// pageParams parses page/per_page. per_page <= 0 means "return all rows".
+func pageParams(c *gin.Context) (page, perPage int) {
+	page, _ = strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
+	}
+	perPage, _ = strconv.Atoi(c.DefaultQuery("per_page", "25"))
+	return page, perPage
+}
+
+func sectionPageParam(c *gin.Context, key string) int {
+	page, _ := strconv.Atoi(c.DefaultQuery(key, "1"))
+	if page < 1 {
+		page = 1
+	}
+	return page
+}
+
+// slicePage returns the requested page of an in-memory report section;
+// perPage <= 0 returns the whole slice.
+func slicePage[T any](items []T, page, perPage int) []T {
+	if perPage <= 0 {
+		return items
+	}
+	start := (page - 1) * perPage
+	if start >= len(items) {
+		return []T{}
+	}
+	end := start + perPage
+	if end > len(items) {
+		end = len(items)
+	}
+	return items[start:end]
+}
 
 func GetAccounts(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
@@ -21,7 +63,7 @@ func GetAccounts(c *gin.Context) {
 	}
 
 	var accounts []models.Account
-	query := utils.DB.Where("user_id = ?", userID)
+	query := utils.DB.Model(&models.Account{}).Where("user_id = ?", userID)
 
 	if accountType := c.Query("account_type"); accountType != "" {
 		query = query.Where("account_type = ?", accountType)
@@ -29,6 +71,33 @@ func GetAccounts(c *gin.Context) {
 
 	if isGroup := c.Query("is_group"); isGroup != "" {
 		query = query.Where("parent_id IS NULL")
+	}
+
+	if paginationRequested(c) {
+		page, perPage := pageParams(c)
+
+		var total int64
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch accounts"})
+			return
+		}
+
+		pageQuery := query.Order("account_type, name")
+		if perPage > 0 {
+			pageQuery = pageQuery.Limit(perPage).Offset((page - 1) * perPage)
+		}
+		if err := pageQuery.Find(&accounts).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch accounts"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"data":     accounts,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+		})
+		return
 	}
 
 	if err := query.Order("account_type, name").Find(&accounts).Error; err != nil {
@@ -152,7 +221,7 @@ func GetJournalEntries(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var entries []models.JournalEntry
-	query := utils.DB.Where("user_id = ?", userID).Preload("Lines").Preload("Lines.Account")
+	query := utils.DB.Model(&models.JournalEntry{}).Where("user_id = ?", userID)
 
 	if status := c.Query("status"); status != "" {
 		query = query.Where("status = ?", status)
@@ -164,7 +233,34 @@ func GetJournalEntries(c *gin.Context) {
 		query = query.Where("entry_date <= ?", toDate)
 	}
 
-	if err := query.Order("entry_date DESC").Find(&entries).Error; err != nil {
+	if paginationRequested(c) {
+		page, perPage := pageParams(c)
+
+		var total int64
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch entries"})
+			return
+		}
+
+		pageQuery := query.Preload("Lines").Preload("Lines.Account").Order("entry_date DESC, created_at DESC")
+		if perPage > 0 {
+			pageQuery = pageQuery.Limit(perPage).Offset((page - 1) * perPage)
+		}
+		if err := pageQuery.Find(&entries).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch entries"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"data":     entries,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+		})
+		return
+	}
+
+	if err := query.Preload("Lines").Preload("Lines.Account").Order("entry_date DESC, created_at DESC").Find(&entries).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch entries"})
 		return
 	}
@@ -382,9 +478,26 @@ func GetTrialBalance(c *gin.Context) {
 		}
 	}
 
+	totalItems := len(items)
+	if paginationRequested(c) {
+		page, perPage := pageParams(c)
+		c.JSON(http.StatusOK, gin.H{
+			"as_of_date":   asOfDate,
+			"items":        slicePage(items, page, perPage),
+			"total":        totalItems,
+			"page":         page,
+			"per_page":     perPage,
+			"total_debit":  totalDebit,
+			"total_credit": totalCredit,
+			"is_balanced":  totalDebit == totalCredit,
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"as_of_date":   asOfDate,
 		"items":        items,
+		"total":        totalItems,
 		"total_debit":  totalDebit,
 		"total_credit": totalCredit,
 		"is_balanced":  totalDebit == totalCredit,
@@ -439,15 +552,38 @@ func GetProfitLoss(c *gin.Context) {
 	}
 
 	netProfit := totalIncome - totalExpense
+	incomeCount := len(incomeItems)
+	expenseCount := len(expenseItems)
+
+	if paginationRequested(c) {
+		_, perPage := pageParams(c)
+		incomePage := sectionPageParam(c, "income_page")
+		expensePage := sectionPageParam(c, "expense_page")
+		c.JSON(http.StatusOK, gin.H{
+			"from_date":      fromDate,
+			"to_date":        toDate,
+			"income":         slicePage(incomeItems, incomePage, perPage),
+			"income_count":   incomeCount,
+			"total_income":   totalIncome,
+			"expenses":       slicePage(expenseItems, expensePage, perPage),
+			"expenses_count": expenseCount,
+			"total_expense":  totalExpense,
+			"net_profit":     netProfit,
+			"per_page":       perPage,
+		})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"from_date":     fromDate,
-		"to_date":       toDate,
-		"income":        incomeItems,
-		"total_income":  totalIncome,
-		"expenses":      expenseItems,
-		"total_expense": totalExpense,
-		"net_profit":    netProfit,
+		"from_date":      fromDate,
+		"to_date":        toDate,
+		"income":         incomeItems,
+		"income_count":   incomeCount,
+		"total_income":   totalIncome,
+		"expenses":       expenseItems,
+		"expenses_count": expenseCount,
+		"total_expense":  totalExpense,
+		"net_profit":     netProfit,
 	})
 }
 
@@ -524,13 +660,40 @@ func GetBalanceSheet(c *gin.Context) {
 		}
 	}
 
+	assetsCount := len(assets)
+	liabilitiesCount := len(liabilities)
+	equityCount := len(equity)
+
+	if paginationRequested(c) {
+		_, perPage := pageParams(c)
+		c.JSON(http.StatusOK, gin.H{
+			"as_of_date":               asOfDate,
+			"assets":                   slicePage(assets, sectionPageParam(c, "assets_page"), perPage),
+			"assets_count":             assetsCount,
+			"total_assets":             totalAssets,
+			"liabilities":              slicePage(liabilities, sectionPageParam(c, "liabilities_page"), perPage),
+			"liabilities_count":        liabilitiesCount,
+			"total_liabilities":        totalLiabilities,
+			"equity":                   slicePage(equity, sectionPageParam(c, "equity_page"), perPage),
+			"equity_count":             equityCount,
+			"total_equity":             totalEquity,
+			"total_liabilities_equity": totalLiabilities + totalEquity,
+			"is_balanced":              totalAssets == (totalLiabilities + totalEquity),
+			"per_page":                 perPage,
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"as_of_date":               asOfDate,
 		"assets":                   assets,
+		"assets_count":             assetsCount,
 		"total_assets":             totalAssets,
 		"liabilities":              liabilities,
+		"liabilities_count":        liabilitiesCount,
 		"total_liabilities":        totalLiabilities,
 		"equity":                   equity,
+		"equity_count":             equityCount,
 		"total_equity":             totalEquity,
 		"total_liabilities_equity": totalLiabilities + totalEquity,
 		"is_balanced":              totalAssets == (totalLiabilities + totalEquity),
@@ -550,7 +713,7 @@ func GetGeneralLedger(c *gin.Context) {
 	}
 
 	var ledgerEntries []models.Ledger
-	query := utils.DB.Where("user_id = ? AND account_id = ?", userID, accountID)
+	query := utils.DB.Model(&models.Ledger{}).Where("user_id = ? AND account_id = ?", userID, accountID)
 
 	if fromDate != "" {
 		query = query.Where("transaction_date >= ?", fromDate)
@@ -559,9 +722,26 @@ func GetGeneralLedger(c *gin.Context) {
 		query = query.Where("transaction_date <= ?", toDate)
 	}
 
-	if err := query.Order("transaction_date ASC").Find(&ledgerEntries).Error; err != nil {
+	var total int64
+	paginated := paginationRequested(c)
+	var page, perPage int
+	if paginated {
+		page, perPage = pageParams(c)
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch ledger entries"})
+			return
+		}
+		if perPage > 0 {
+			query = query.Limit(perPage).Offset((page - 1) * perPage)
+		}
+	}
+
+	if err := query.Order("transaction_date ASC, created_at ASC").Find(&ledgerEntries).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch ledger entries"})
 		return
+	}
+	if !paginated {
+		total = int64(len(ledgerEntries))
 	}
 
 	// Calculate opening balance
@@ -584,6 +764,9 @@ func GetGeneralLedger(c *gin.Context) {
 		"account":         account,
 		"opening_balance": openingBalance,
 		"entries":         ledgerEntries,
+		"total":           total,
+		"page":            page,
+		"per_page":        perPage,
 		"closing_balance": account.Balance,
 	})
 }
@@ -591,7 +774,7 @@ func GetGeneralLedger(c *gin.Context) {
 func GetLedgers(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
-	query := utils.DB.Where("user_id = ?", userID).Preload("Account")
+	query := utils.DB.Model(&models.Ledger{}).Where("user_id = ?", userID)
 
 	if accountID := c.Query("account_id"); accountID != "" {
 		query = query.Where("account_id = ?", accountID)
@@ -607,7 +790,34 @@ func GetLedgers(c *gin.Context) {
 	}
 
 	var entries []models.Ledger
-	if err := query.Order("transaction_date DESC, created_at DESC").Limit(500).Find(&entries).Error; err != nil {
+	if paginationRequested(c) {
+		page, perPage := pageParams(c)
+
+		var total int64
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch ledger entries"})
+			return
+		}
+
+		pageQuery := query.Preload("Account").Order("transaction_date DESC, created_at DESC")
+		if perPage > 0 {
+			pageQuery = pageQuery.Limit(perPage).Offset((page - 1) * perPage)
+		}
+		if err := pageQuery.Find(&entries).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch ledger entries"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"data":     entries,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+		})
+		return
+	}
+
+	if err := query.Preload("Account").Order("transaction_date DESC, created_at DESC").Limit(500).Find(&entries).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch ledger entries"})
 		return
 	}
@@ -667,13 +877,78 @@ func CreateBankReconciliation(c *gin.Context) {
 func GetBankReconciliations(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
+	query := utils.DB.Model(&models.BankReconciliation{}).Where("user_id = ?", userID)
+
+	if paginationRequested(c) {
+		page, perPage := pageParams(c)
+
+		var total int64
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch reconciliations"})
+			return
+		}
+
+		var reconciliations []models.BankReconciliation
+		pageQuery := query.Order("statement_date DESC")
+		if perPage > 0 {
+			pageQuery = pageQuery.Limit(perPage).Offset((page - 1) * perPage)
+		}
+		if err := pageQuery.Find(&reconciliations).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch reconciliations"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"data":     reconciliations,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+		})
+		return
+	}
+
 	var reconciliations []models.BankReconciliation
-	if err := utils.DB.Where("user_id = ?", userID).Order("statement_date DESC").Find(&reconciliations).Error; err != nil {
+	if err := query.Order("statement_date DESC").Find(&reconciliations).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch reconciliations"})
 		return
 	}
 
 	c.JSON(http.StatusOK, reconciliations)
+}
+
+// GetAccountingStats returns lightweight aggregate totals for the accounting
+// dashboard widgets so they can load independently of the tab data.
+func GetAccountingStats(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	var rows []struct {
+		AccountType string
+		Total       float64
+	}
+	if err := utils.DB.Model(&models.Account{}).
+		Select("account_type, COALESCE(SUM(balance), 0) AS total").
+		Where("user_id = ? AND is_active = ?", userID, true).
+		Group("account_type").
+		Scan(&rows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch accounting stats"})
+		return
+	}
+
+	totals := map[string]float64{}
+	for _, r := range rows {
+		totals[r.AccountType] = r.Total
+	}
+	totalIncome := totals["income"]
+	totalExpense := totals["expense"]
+
+	c.JSON(http.StatusOK, gin.H{
+		"total_assets":      totals["asset"],
+		"total_liabilities": totals["liability"],
+		"total_equity":      totals["equity"],
+		"total_income":      totalIncome,
+		"total_expense":     totalExpense,
+		"net_profit":        totalIncome - totalExpense,
+	})
 }
 
 func CompleteBankReconciliation(c *gin.Context) {

@@ -193,13 +193,6 @@ func parseInvoiceImportRow(rowNum int, record, headers []string, def invoiceImpo
 	line.unitPrice = parseCurrencyAmount(firstCSVValue(record, headers, "Unit Price", "Rate", "Price"))
 	line.discount = parseFloat(firstCSVValue(record, headers, "Discount %", "Discount", "Disc %"))
 	line.taxRate = parseFloat(firstCSVValue(record, headers, "Tax Rate %", "Tax Rate", "Tax %", "GST %"))
-	if line.taxRate == 0 {
-		if def.taxRate > 0 {
-			line.taxRate = def.taxRate
-		} else {
-			line.taxRate = 18
-		}
-	}
 
 	amount := parseCurrencyAmount(firstCSVValue(record, headers, "Amount", "Total Amount", "Total"))
 	if line.itemDescription == "" && amount > 0 {
@@ -263,7 +256,8 @@ func createImportedInvoice(userID uuid.UUID, userName string, lines []invoiceImp
 		itemTotal := line.quantity * line.unitPrice
 		itemDiscount := itemTotal * (line.discount / 100)
 		taxableAmount := itemTotal - itemDiscount
-		itemTax := taxableAmount * (line.taxRate / 100)
+		// Billing is tax-free: the line tax rate is ignored.
+		itemTax := 0.0
 
 		var cgst, sgst, igst float64
 		if header.isInterState {
@@ -287,7 +281,7 @@ func createImportedInvoice(userID uuid.UUID, userName string, lines []invoiceImp
 			Unit:        line.unit,
 			UnitPrice:   line.unitPrice,
 			Discount:    line.discount,
-			TaxRate:     line.taxRate,
+			TaxRate:     0,
 			CGST:        cgst,
 			SGST:        sgst,
 			IGST:        igst,

@@ -292,7 +292,8 @@ func CreateInvoice(c *gin.Context) {
 		qty := item.Quantity.Float64()
 		unitPrice := item.UnitPrice.Float64()
 		discount := item.Discount.Float64()
-		taxRate := item.TaxRate.Float64()
+		// Billing is tax-free: the item tax rate is ignored.
+		taxRate := 0.0
 
 		itemTotal := qty * unitPrice
 		itemDiscount := itemTotal * (discount / 100)
@@ -614,7 +615,8 @@ func UpdateInvoice(c *gin.Context) {
 		qty := item.Quantity.Float64()
 		price := item.UnitPrice.Float64()
 		disc := item.Discount.Float64()
-		tax := item.TaxRate.Float64()
+		// Billing is tax-free: the item tax rate is ignored.
+		tax := 0.0
 
 		itemTotal := qty * price
 		itemDiscount := itemTotal * (disc / 100)

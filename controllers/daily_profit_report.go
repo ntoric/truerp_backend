@@ -62,6 +62,7 @@ func mergeDailyProfitSum(dst, src map[string]float64) {
 
 // loadDailyProfitAggregates returns per-day source amounts for the inclusive
 // [start, end] range, keyed by YYYY-MM-DD. Cancelled documents are excluded.
+// All amounts are tax-exclusive so profit figures match the billwise report.
 func loadDailyProfitAggregates(db *gorm.DB, userID uuid.UUID, start, end string) map[string]*dailyProfitAgg {
 	agg := make(map[string]*dailyProfitAgg)
 	at := func(day string) *dailyProfitAgg {
@@ -77,7 +78,7 @@ func loadDailyProfitAggregates(db *gorm.DB, userID uuid.UUID, start, end string)
 	}
 
 	for day, v := range scanDailyProfitSum(db,
-		`SELECT `+utils.SQLDateExpr("date")+` AS day, COALESCE(SUM(total_amount), 0) AS value
+		`SELECT `+utils.SQLDateExpr("date")+` AS day, COALESCE(SUM(total_amount - tax_total), 0) AS value
 		 FROM invoices
 		 WHERE user_id = ? AND status != 'cancelled' AND deleted_at IS NULL
 		 AND `+dayRange("date")+`
@@ -98,17 +99,21 @@ func loadDailyProfitAggregates(db *gorm.DB, userID uuid.UUID, start, end string)
 	}
 
 	salesReturn := scanDailyProfitSum(db,
-		`SELECT `+utils.SQLDateExpr("date")+` AS day, COALESCE(SUM(amount), 0) AS value
-		 FROM sales_returns
-		 WHERE user_id = ? AND status != 'cancelled' AND deleted_at IS NULL
-		 AND `+dayRange("date")+`
-		 GROUP BY `+utils.SQLDateExpr("date"), userID, start, end)
+		`SELECT `+utils.SQLDateExpr("sr.date")+` AS day,
+			COALESCE(SUM(sri.quantity * sri.unit_price), 0) AS value
+		 FROM sales_return_items sri
+		 INNER JOIN sales_returns sr ON sr.id = sri.return_id
+		 WHERE sr.user_id = ? AND sr.status != 'cancelled' AND sr.deleted_at IS NULL
+		 AND `+dayRange("sr.date")+`
+		 GROUP BY `+utils.SQLDateExpr("sr.date"), userID, start, end)
 	mergeDailyProfitSum(salesReturn, scanDailyProfitSum(db,
-		`SELECT `+utils.SQLDateExpr("date")+` AS day, COALESCE(SUM(total_amount), 0) AS value
-		 FROM credit_notes
-		 WHERE user_id = ? AND status != 'cancelled' AND deleted_at IS NULL
-		 AND `+dayRange("date")+`
-		 GROUP BY `+utils.SQLDateExpr("date"), userID, start, end))
+		`SELECT `+utils.SQLDateExpr("cn.date")+` AS day,
+			COALESCE(SUM(cni.quantity * cni.unit_price), 0) AS value
+		 FROM credit_note_items cni
+		 INNER JOIN credit_notes cn ON cn.id = cni.credit_note_id
+		 WHERE cn.user_id = ? AND cn.status != 'cancelled' AND cn.deleted_at IS NULL
+		 AND `+dayRange("cn.date")+`
+		 GROUP BY `+utils.SQLDateExpr("cn.date"), userID, start, end))
 	for day, v := range salesReturn {
 		at(day).SalesReturn = v
 	}
@@ -137,7 +142,7 @@ func loadDailyProfitAggregates(db *gorm.DB, userID uuid.UUID, start, end string)
 	}
 
 	for day, v := range scanDailyProfitSum(db,
-		`SELECT `+utils.SQLDateExpr("bill_date")+` AS day, COALESCE(SUM(total_amount), 0) AS value
+		`SELECT `+utils.SQLDateExpr("bill_date")+` AS day, COALESCE(SUM(total_amount - tax_total), 0) AS value
 		 FROM purchase_bills
 		 WHERE user_id = ? AND deleted_at IS NULL
 		 AND `+dayRange("bill_date")+`
@@ -146,17 +151,21 @@ func loadDailyProfitAggregates(db *gorm.DB, userID uuid.UUID, start, end string)
 	}
 
 	purchaseReturn := scanDailyProfitSum(db,
-		`SELECT `+utils.SQLDateExpr("date")+` AS day, COALESCE(SUM(amount), 0) AS value
-		 FROM purchase_returns
-		 WHERE user_id = ? AND status != 'cancelled' AND deleted_at IS NULL
-		 AND `+dayRange("date")+`
-		 GROUP BY `+utils.SQLDateExpr("date"), userID, start, end)
+		`SELECT `+utils.SQLDateExpr("pr.date")+` AS day,
+			COALESCE(SUM(pri.quantity * pri.unit_price), 0) AS value
+		 FROM purchase_return_items pri
+		 INNER JOIN purchase_returns pr ON pr.id = pri.return_id
+		 WHERE pr.user_id = ? AND pr.status != 'cancelled' AND pr.deleted_at IS NULL
+		 AND `+dayRange("pr.date")+`
+		 GROUP BY `+utils.SQLDateExpr("pr.date"), userID, start, end)
 	mergeDailyProfitSum(purchaseReturn, scanDailyProfitSum(db,
-		`SELECT `+utils.SQLDateExpr("date")+` AS day, COALESCE(SUM(total_amount), 0) AS value
-		 FROM debit_notes
-		 WHERE user_id = ? AND status != 'cancelled' AND deleted_at IS NULL
-		 AND `+dayRange("date")+`
-		 GROUP BY `+utils.SQLDateExpr("date"), userID, start, end))
+		`SELECT `+utils.SQLDateExpr("dn.date")+` AS day,
+			COALESCE(SUM(dni.quantity * dni.unit_price), 0) AS value
+		 FROM debit_note_items dni
+		 INNER JOIN debit_notes dn ON dn.id = dni.debit_note_id
+		 WHERE dn.user_id = ? AND dn.status != 'cancelled' AND dn.deleted_at IS NULL
+		 AND `+dayRange("dn.date")+`
+		 GROUP BY `+utils.SQLDateExpr("dn.date"), userID, start, end))
 	for day, v := range purchaseReturn {
 		at(day).PurchaseReturn = v
 	}
@@ -580,6 +589,7 @@ func ExportDailyProfitReportExcel(c *gin.Context) {
 	writeRow("Note", "Sales profit = (sales - sales return) - cost of items sold at current purchase price.")
 	writeRow("Note", "Gross profit = (sales - sales return) - (purchase - purchase return) + closing stock - opening stock.")
 	writeRow("Note", "Net profit = gross profit - expenses. Stock values come from the daily stock snapshot ledger.")
+	writeRow("Note", "All amounts are tax-exclusive.")
 
 	period := strings.ToLower(strings.TrimSpace(params.period))
 	filename := fmt.Sprintf("daily_profit_%s_%s_%s.xlsx", period, start, end)
@@ -669,7 +679,7 @@ func buildDailyProfitReportPDF(report models.DailyProfitReport, rows []models.Da
 
 	pdf.SetFont("Arial", "I", 7.5)
 	pdf.SetTextColor(140, 140, 140)
-	pdf.MultiCell(0, 4, sanitizePDFText("Sales profit = (sales - sales return) - cost of items sold at current purchase price. Gross profit = (sales - sales return) - (purchase - purchase return) + closing stock - opening stock. Net profit = gross profit - expenses. Stock values come from the daily stock snapshot ledger; cancelled documents are excluded. Generated from TruERP."), "", "L", false)
+	pdf.MultiCell(0, 4, sanitizePDFText("Sales profit = (sales - sales return) - cost of items sold at current purchase price. Gross profit = (sales - sales return) - (purchase - purchase return) + closing stock - opening stock. Net profit = gross profit - expenses. All amounts are tax-exclusive. Stock values come from the daily stock snapshot ledger; cancelled documents are excluded. Generated from TruERP."), "", "L", false)
 
 	var buf bytes.Buffer
 	if err := pdf.Output(&buf); err != nil {

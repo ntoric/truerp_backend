@@ -462,6 +462,7 @@ func SetupRoutes(r *gin.Engine) {
 		accounting.DELETE("/journal/:id", controllers.DeleteJournalEntry)
 
 		// Financial Reports
+		accounting.GET("/stats", controllers.GetAccountingStats)
 		accounting.GET("/trial-balance", controllers.GetTrialBalance)
 		accounting.GET("/profit-loss", controllers.GetProfitLoss)
 		accounting.GET("/balance-sheet", controllers.GetBalanceSheet)
