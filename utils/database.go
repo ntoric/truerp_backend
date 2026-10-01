@@ -185,6 +185,7 @@ func allApplicationModels() []interface{} {
 		&models.DataBackup{},
 		&models.GDPRRequest{},
 		&models.DailyReportEmailSettings{},
+		&models.DailyProfitEntry{},
 		&models.DBMaintenanceSettings{},
 		&models.DBBackupSettings{},
 		&models.DBBackupRecord{},

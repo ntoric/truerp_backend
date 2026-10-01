@@ -83,7 +83,7 @@ func GetProducts(c *gin.Context) {
 
 	if search := c.Query("search"); search != "" {
 		like := "%" + strings.ToLower(search) + "%"
-		query = query.Where("LOWER(name) LIKE ? OR LOWER(sku) LIKE ? OR LOWER(item_code) LIKE ? OR LOWER(plu) LIKE ?", like, like, like, like)
+		query = query.Where("LOWER(name) LIKE ? OR LOWER(sku) LIKE ? OR LOWER(item_code) LIKE ? OR LOWER(plu) LIKE ? OR LOWER(hsn_code) LIKE ? OR LOWER(category) LIKE ?", like, like, like, like, like, like)
 	}
 
 	// Paginated mode (opt-in via page/per_page); per_page <= 0 returns every

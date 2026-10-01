@@ -412,13 +412,19 @@ func processDueStockSnapshots() {
 // snapshotPositionsAsOf returns the closing position of the latest snapshot on
 // or before the given date for every product, aggregated across outlets.
 func snapshotPositionsAsOf(userID uuid.UUID, date string) map[uuid.UUID]stockPosition {
+	return snapshotPositionsAsOfDB(utils.DB, userID, date)
+}
+
+// snapshotPositionsAsOfDB is snapshotPositionsAsOf on an explicit DB handle,
+// so callers can run it inside a transaction.
+func snapshotPositionsAsOfDB(db *gorm.DB, userID uuid.UUID, date string) map[uuid.UUID]stockPosition {
 	positions := make(map[uuid.UUID]stockPosition)
-	if !utils.DB.Migrator().HasTable(&models.StockDailySnapshot{}) {
+	if !db.Migrator().HasTable(&models.StockDailySnapshot{}) {
 		return positions
 	}
 
 	var snaps []models.StockDailySnapshot
-	if err := utils.DB.
+	if err := db.
 		Where("user_id = ?", userID).
 		Where(utils.SQLDateLTE("snapshot_date"), date).
 		Select("product_id", "outlet_id", "snapshot_date", "closing_qty", "closing_value", "avg_cost").

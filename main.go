@@ -52,6 +52,11 @@ func main() {
 	// snapshots forward (and catches up days missed while the server was down).
 	controllers.StartStockSnapshotScheduler()
 
+	// Start the background cron that recalculates the materialized daily
+	// profit rows every 2 minutes for users who enabled asynchronous
+	// daily-profit updates in Developer Settings, plus priority refresh jobs.
+	controllers.StartDailyProfitScheduler()
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 

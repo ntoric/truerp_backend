@@ -520,6 +520,127 @@ type ProfitLossReport struct {
 	ExpenseLines []ExpenseLine `json:"expense_lines"`
 }
 
+// BillwiseProfitItem is one invoice line's margin contribution inside a
+// BillwiseProfitBill.
+type BillwiseProfitItem struct {
+	Description string  `json:"description"`
+	Quantity    float64 `json:"quantity"`
+	UnitPrice   float64 `json:"unit_price"`
+	DiscountPct float64 `json:"discount_pct"`
+	CostPrice   float64 `json:"cost_price"`  // product purchase price used as unit cost
+	SaleAmount  float64 `json:"sale_amount"` // qty × unit_price × (1 − discount/100)
+	CostAmount  float64 `json:"cost_amount"` // qty × cost_price
+	Profit      float64 `json:"profit"`
+}
+
+// BillwiseProfitBill is one invoice's profit row in the billwise profit report.
+type BillwiseProfitBill struct {
+	InvoiceID     uuid.UUID            `json:"invoice_id"`
+	InvoiceNumber string               `json:"invoice_number"`
+	Date          string               `json:"date"` // YYYY-MM-DD
+	PartyID       uuid.UUID            `json:"party_id"`
+	PartyName     string               `json:"party_name"`
+	Status        string               `json:"status"`
+	InvoiceTotal  float64              `json:"invoice_total"`  // grand total incl. tax, for reference
+	SaleAmount    float64              `json:"sale_amount"`    // taxable sale value after line discounts
+	Discount      float64              `json:"discount"`       // invoice-level + loyalty discount
+	CostAmount    float64              `json:"cost_amount"`    // purchase cost of items billed
+	ReturnsAmount float64              `json:"returns_amount"` // sale value reversed by sales returns / credit notes
+	Profit        float64              `json:"profit"`
+	MarginPct     float64              `json:"margin_pct"`
+	Items         []BillwiseProfitItem `json:"items,omitempty"`
+}
+
+// BillwiseProfitReport is a per-invoice (bill-wise) profit statement over an
+// arbitrary period: profit = net taxable sale value − purchase cost, net of
+// linked sales returns and credit notes.
+type BillwiseProfitReport struct {
+	BusinessName string `json:"business_name"`
+	Period       string `json:"period"`     // daily | weekly | monthly | yearly | custom
+	StartDate    string `json:"start_date"` // YYYY-MM-DD inclusive
+	EndDate      string `json:"end_date"`   // YYYY-MM-DD inclusive
+	Label        string `json:"label"`      // human-readable period label
+
+	BillCount     int64                `json:"bill_count"`
+	SaleAmount    float64              `json:"sale_amount"`
+	Discount      float64              `json:"discount"`
+	ReturnsAmount float64              `json:"returns_amount"`
+	CostAmount    float64              `json:"cost_amount"`
+	Profit        float64              `json:"profit"`
+	MarginPct     float64              `json:"margin_pct"`
+	Bills         []BillwiseProfitBill `json:"bills"`
+}
+
+// DailyProfitRow is one calendar day's profit line in the daily profit report.
+// SalesProfit = (Sales − SalesReturn) − (COGS − returned-item cost).
+// GrossProfit = (Sales − SalesReturn) − (Purchase − PurchaseReturn) +
+// ClosingStock − OpeningStock — the same trading-account convention as the
+// P&L report, so stock purchases and adjustments show up here.
+// NetProfit = GrossProfit − Expenses.
+type DailyProfitRow struct {
+	Date           string  `json:"date"` // YYYY-MM-DD
+	OpeningStock   float64 `json:"opening_stock"`
+	Sales          float64 `json:"sales"`
+	COGS           float64 `json:"cogs"`
+	SalesReturn    float64 `json:"sales_return"`
+	SalesProfit    float64 `json:"sales_profit"`
+	Purchase       float64 `json:"purchase"`
+	PurchaseReturn float64 `json:"purchase_return"`
+	ClosingStock   float64 `json:"closing_stock"`
+	GrossProfit    float64 `json:"gross_profit"`
+	Expenses       float64 `json:"expenses"`
+	NetProfit      float64 `json:"net_profit"`
+}
+
+// DailyProfitReport is a per-day profit table over an inclusive [start, end]
+// range. Rows is the server-side paginated slice of the day rows; Totals
+// aggregates every day in the range (OpeningStock = first day's opening,
+// ClosingStock = last day's closing).
+type DailyProfitReport struct {
+	BusinessName string `json:"business_name"`
+	Period       string `json:"period"`
+	StartDate    string `json:"start_date"`
+	EndDate      string `json:"end_date"`
+	Label        string `json:"label"`
+
+	Page      int   `json:"page"`
+	PerPage   int   `json:"per_page"`
+	TotalDays int64 `json:"total_days"`
+
+	Rows   []DailyProfitRow `json:"rows"`
+	Totals DailyProfitRow   `json:"totals"`
+
+	// AsyncMode is true when rows were served from the materialized
+	// daily_profit_entries table (background cron mode), false when they were
+	// computed live from transactions at read time.
+	AsyncMode bool `json:"async_mode"`
+}
+
+// DailyProfitEntry is a materialized DailyProfitRow persisted per
+// (user, date) so the report can be served without recomputing. Rows are
+// maintained by the daily-profit scheduler when asynchronous updates are
+// enabled in Developer Settings, and by the manual refresh endpoint.
+type DailyProfitEntry struct {
+	ID     uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex:idx_daily_profit_entries_user_date"`
+	Date   string    `json:"date" gorm:"type:varchar(10);not null;uniqueIndex:idx_daily_profit_entries_user_date"` // YYYY-MM-DD
+
+	OpeningStock   float64 `json:"opening_stock" gorm:"not null;default:0"`
+	Sales          float64 `json:"sales" gorm:"not null;default:0"`
+	COGS           float64 `json:"cogs" gorm:"not null;default:0"`
+	SalesReturn    float64 `json:"sales_return" gorm:"not null;default:0"`
+	SalesProfit    float64 `json:"sales_profit" gorm:"not null;default:0"`
+	Purchase       float64 `json:"purchase" gorm:"not null;default:0"`
+	PurchaseReturn float64 `json:"purchase_return" gorm:"not null;default:0"`
+	ClosingStock   float64 `json:"closing_stock" gorm:"not null;default:0"`
+	GrossProfit    float64 `json:"gross_profit" gorm:"not null;default:0"`
+	Expenses       float64 `json:"expenses" gorm:"not null;default:0"`
+	NetProfit      float64 `json:"net_profit" gorm:"not null;default:0"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // StockReportLine is a per-product opening → movement → closing breakdown for
 // a period, valued at weighted average cost replayed from the stock ledger.
 type StockReportLine struct {
@@ -2386,6 +2507,12 @@ type DeveloperSettings struct {
 	// time-based automations. Empty falls back to the server's local timezone.
 	Timezone string `json:"timezone" gorm:"default:''"`
 
+	// AsyncDailyProfit enables asynchronous daily-profit updates: the Daily
+	// Profit Report is served from the materialized daily_profit_entries table
+	// which a background cron recalculates every 2 minutes. When off, report
+	// columns are computed live from transactions whenever the report is read.
+	AsyncDailyProfit bool `json:"async_daily_profit" gorm:"default:false"`
+
 	// Encrypted fields (database storage only)
 	EncryptedSMTPPassword        string `json:"-" gorm:"column:smtp_password"`
 	EncryptedSendGridAPIKey      string `json:"-" gorm:"column:sendgrid_api_key"`
@@ -2487,10 +2614,14 @@ type InvoiceStatusHistory struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-// PageFeatureSettings stores which app pages/menus are enabled (system-wide singleton).
+// PageFeatureSettings stores which app pages/menus are enabled for a store.
 // PagesJSON is a JSON object of route key -> enabled bool, e.g. {"/pos":true,"/loyalty":false}.
+// StoreID scopes the row to a store; rows with a NULL store_id act as the
+// global fallback (the pre-store-scoping singleton) used when the active
+// store has no row of its own.
 type PageFeatureSettings struct {
 	ID        uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	StoreID   *uuid.UUID     `json:"store_id,omitempty" gorm:"type:uuid;uniqueIndex:idx_page_feature_store"`
 	PagesJSON string         `json:"-" gorm:"column:pages_json;type:text"`
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`

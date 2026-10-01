@@ -184,6 +184,13 @@ func SetupRoutes(r *gin.Engine) {
 		dashboard.GET("/profit-loss-report", controllers.GetProfitLossReport)
 		dashboard.GET("/profit-loss-report/excel", controllers.ExportProfitLossReportExcel)
 		dashboard.GET("/profit-loss-report/pdf", controllers.ExportProfitLossReportPDF)
+		dashboard.GET("/billwise-profit-report", controllers.GetBillwiseProfitReport)
+		dashboard.GET("/billwise-profit-report/excel", controllers.ExportBillwiseProfitReportExcel)
+		dashboard.GET("/billwise-profit-report/pdf", controllers.ExportBillwiseProfitReportPDF)
+		dashboard.GET("/daily-profit-report", controllers.GetDailyProfitReport)
+		dashboard.GET("/daily-profit-report/excel", controllers.ExportDailyProfitReportExcel)
+		dashboard.GET("/daily-profit-report/pdf", controllers.ExportDailyProfitReportPDF)
+		dashboard.POST("/daily-profit-report/refresh", controllers.RefreshDailyProfitReport)
 		dashboard.GET("/stock-report", controllers.GetStockReport)
 
 		// Daily report email automation (auto-mail PDF export to configured recipients)

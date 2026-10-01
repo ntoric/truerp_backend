@@ -17,6 +17,30 @@ import (
 	"gorm.io/gorm"
 )
 
+// fetchWarehouseNames returns a map of warehouse ID to name for the given
+// outlet IDs, deduplicating them before issuing the query.
+func fetchWarehouseNames(outletIDs []uuid.UUID) map[uuid.UUID]string {
+	warehouseMap := make(map[uuid.UUID]string)
+	seen := make(map[uuid.UUID]struct{}, len(outletIDs))
+	uniqueIDs := make([]uuid.UUID, 0, len(outletIDs))
+	for _, id := range outletIDs {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniqueIDs = append(uniqueIDs, id)
+	}
+	if len(uniqueIDs) == 0 {
+		return warehouseMap
+	}
+	var warehouses []models.Warehouse
+	utils.DB.Where("id IN ?", uniqueIDs).Find(&warehouses)
+	for _, wh := range warehouses {
+		warehouseMap[wh.ID] = wh.Name
+	}
+	return warehouseMap
+}
+
 type StockBalance struct {
 	ProductID   uuid.UUID `json:"product_id"`
 	ProductName string    `json:"product_name"`
@@ -35,7 +59,7 @@ func GetStockBalance(c *gin.Context) {
 	fmt.Printf("[DEBUG] GetStockBalance - UserID: %s, OutletID: %s\n", userID, outletID)
 
 	var stocks []models.InventoryStock
-	query := utils.DB.Where("user_id = ?", userID).Preload("Product")
+	query := utils.DB.Where("user_id = ?", userID)
 
 	if outletID != "" {
 		query = query.Where("outlet_id = ?", outletID)
@@ -49,18 +73,29 @@ func GetStockBalance(c *gin.Context) {
 
 	fmt.Printf("[DEBUG] GetStockBalance - Found %d stock rows (before consolidation)\n", len(stocks))
 
-	// Fetch outlet names
+	// Fetch referenced products and outlet names with deduped IDs.
+	productIDSet := make(map[uuid.UUID]struct{})
 	var outletIDs []uuid.UUID
 	for _, stock := range stocks {
+		productIDSet[stock.ProductID] = struct{}{}
 		outletIDs = append(outletIDs, stock.OutletID)
 	}
-	var warehouses []models.Warehouse
-	if len(outletIDs) > 0 {
-		utils.DB.Where("id IN ?", outletIDs).Find(&warehouses)
-	}
-	warehouseMap := make(map[uuid.UUID]string)
-	for _, wh := range warehouses {
-		warehouseMap[wh.ID] = wh.Name
+	warehouseMap := fetchWarehouseNames(outletIDs)
+
+	productMap := make(map[uuid.UUID]models.Product, len(productIDSet))
+	if len(productIDSet) > 0 {
+		productIDs := make([]uuid.UUID, 0, len(productIDSet))
+		for id := range productIDSet {
+			productIDs = append(productIDs, id)
+		}
+		var products []models.Product
+		if err := utils.DB.Where("id IN ?", productIDs).Find(&products).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch stock balance"})
+			return
+		}
+		for _, p := range products {
+			productMap[p.ID] = p
+		}
 	}
 
 	// Consolidate batches into one row per product + outlet.
@@ -82,8 +117,8 @@ func GetStockBalance(c *gin.Context) {
 		}
 		balanceMap[key] = &StockBalance{
 			ProductID:   stock.ProductID,
-			ProductName: stock.Product.Name,
-			SKU:         stock.Product.SKU,
+			ProductName: productMap[stock.ProductID].Name,
+			SKU:         productMap[stock.ProductID].SKU,
 			StockQty:    stock.Quantity,
 			CostPrice:   stock.AverageCost,
 			Value:       lineValue,
@@ -187,14 +222,7 @@ func GetStockEntries(c *gin.Context) {
 	for _, entry := range entries {
 		outletIDs = append(outletIDs, entry.OutletID)
 	}
-	var warehouses []models.Warehouse
-	if len(outletIDs) > 0 {
-		utils.DB.Where("id IN ?", outletIDs).Find(&warehouses)
-	}
-	warehouseMap := make(map[uuid.UUID]string)
-	for _, wh := range warehouses {
-		warehouseMap[wh.ID] = wh.Name
-	}
+	warehouseMap := fetchWarehouseNames(outletIDs)
 
 	// Add outlet names to entries
 	type StockEntryWithDetails struct {
@@ -1253,7 +1281,7 @@ func GetInventoryValuation(c *gin.Context) {
 	fmt.Printf("[DEBUG] GetInventoryValuation - UserID: %s, OutletID: %s\n", userID, outletID)
 
 	var stocks []models.InventoryStock
-	query := utils.DB.Where("user_id = ?", userID).Preload("Product")
+	query := utils.DB.Where("user_id = ?", userID)
 
 	if outletID != "" {
 		query = query.Where("outlet_id = ?", outletID)
@@ -1279,18 +1307,29 @@ func GetInventoryValuation(c *gin.Context) {
 	var results []ValuationResult
 	var totalValue float64
 
-	// Fetch outlet names
+	// Fetch outlet names and referenced products with deduped IDs.
+	productIDSet := make(map[uuid.UUID]struct{})
 	var outletIDs []uuid.UUID
 	for _, stock := range stocks {
+		productIDSet[stock.ProductID] = struct{}{}
 		outletIDs = append(outletIDs, stock.OutletID)
 	}
-	var warehouses []models.Warehouse
-	if len(outletIDs) > 0 {
-		utils.DB.Where("id IN ?", outletIDs).Find(&warehouses)
-	}
-	warehouseMap := make(map[uuid.UUID]string)
-	for _, wh := range warehouses {
-		warehouseMap[wh.ID] = wh.Name
+	warehouseMap := fetchWarehouseNames(outletIDs)
+
+	productMap := make(map[uuid.UUID]models.Product, len(productIDSet))
+	if len(productIDSet) > 0 {
+		productIDs := make([]uuid.UUID, 0, len(productIDSet))
+		for id := range productIDSet {
+			productIDs = append(productIDs, id)
+		}
+		var products []models.Product
+		if err := utils.DB.Where("id IN ?", productIDs).Find(&products).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch valuation"})
+			return
+		}
+		for _, p := range products {
+			productMap[p.ID] = p
+		}
 	}
 
 	for _, stock := range stocks {
@@ -1298,8 +1337,8 @@ func GetInventoryValuation(c *gin.Context) {
 		totalValue += itemValue
 		results = append(results, ValuationResult{
 			ProductID:   stock.ProductID,
-			ProductName: stock.Product.Name,
-			SKU:         stock.Product.SKU,
+			ProductName: productMap[stock.ProductID].Name,
+			SKU:         productMap[stock.ProductID].SKU,
 			StockQty:    stock.Quantity,
 			CostPrice:   stock.AverageCost,
 			TotalValue:  itemValue,
@@ -1422,14 +1461,7 @@ func GetInventoryStocks(c *gin.Context) {
 	for _, stock := range stocks {
 		outletIDs = append(outletIDs, stock.OutletID)
 	}
-	var warehouses []models.Warehouse
-	if len(outletIDs) > 0 {
-		utils.DB.Where("id IN ?", outletIDs).Find(&warehouses)
-	}
-	warehouseMap := make(map[uuid.UUID]string)
-	for _, wh := range warehouses {
-		warehouseMap[wh.ID] = wh.Name
-	}
+	warehouseMap := fetchWarehouseNames(outletIDs)
 
 	// Add outlet names to stocks
 	type InventoryStockWithOutlet struct {

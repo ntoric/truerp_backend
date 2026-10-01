@@ -42,6 +42,7 @@ type developerSettingsInput struct {
 	AWSRegion                 string `json:"aws_region"`
 	SendGridSMSAPIKey         string `json:"sendgrid_sms_api_key"`
 	Timezone                  string `json:"timezone"`
+	AsyncDailyProfit          bool   `json:"async_daily_profit"`
 }
 
 type testEmailInput struct {
@@ -82,6 +83,7 @@ func applyDeveloperSettingsInput(settings *models.DeveloperSettings, input devel
 	settings.AWSAccessKey = input.AWSAccessKey
 	settings.AWSRegion = input.AWSRegion
 	settings.Timezone = input.Timezone
+	settings.AsyncDailyProfit = input.AsyncDailyProfit
 
 	var err error
 	if input.SMTPPassword != "" {
@@ -182,6 +184,7 @@ func developerSettingsUpdates(input developerSettingsInput) (map[string]interfac
 		"aws_access_key":               input.AWSAccessKey,
 		"aws_region":                   input.AWSRegion,
 		"timezone":                     input.Timezone,
+		"async_daily_profit":           input.AsyncDailyProfit,
 	}
 
 	secretFields := []struct {

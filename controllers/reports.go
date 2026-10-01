@@ -3,6 +3,7 @@ package controllers
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 	"truerp/models"
 	"truerp/utils"
@@ -447,9 +448,22 @@ func GetOutstandingInvoicesReport(c *gin.Context) {
 	})
 }
 
+// reportLimit parses the optional `limit` query param, defaulting to 25 and
+// capping at 500 so it can be safely bound into a LIMIT clause.
+func reportLimit(c *gin.Context) int {
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "25"))
+	if err != nil || limit <= 0 {
+		return 25
+	}
+	if limit > 500 {
+		return 500
+	}
+	return limit
+}
+
 func GetCustomerWiseReport(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
-	limit := c.DefaultQuery("limit", "25")
+	limit := reportLimit(c)
 	period := c.DefaultQuery("period", "monthly")
 	periodStart := reportPeriodStart(period)
 
@@ -469,23 +483,25 @@ func GetCustomerWiseReport(c *gin.Context) {
 
 	var results []CustomerRow
 	query := `
-		SELECT
-			p.id as party_id,
-			p.name,
-			p.phone,
-			p.email,
-			p.gstin,
-			COALESCE(SUM(CASE WHEN i.status = 'paid' AND i.date >= ? THEN i.total_amount ELSE 0 END), 0) as total_sales,
-			COALESCE(SUM(CASE WHEN i.status NOT IN ('cancelled', 'paid') THEN i.total_amount - i.amount_paid ELSE 0 END), 0) as total_outstanding,
-			COUNT(CASE WHEN i.date >= ? THEN i.id END) as invoice_count,
-			SUM(CASE WHEN i.status = 'paid' AND i.date >= ? THEN 1 ELSE 0 END) as paid_count,
-			COALESCE(AVG(CASE WHEN i.status = 'paid' AND i.date >= ? THEN i.total_amount END), 0) as avg_invoice_value,
-			MAX(CASE WHEN i.date >= ? THEN i.date END) as last_invoice_date
-		FROM parties p
-		LEFT JOIN invoices i ON p.id = i.party_id AND i.user_id = ?
-		WHERE p.user_id = ? AND p.party_type = 'customer'
-		GROUP BY p.id, p.name, p.phone, p.email, p.gstin
-		HAVING total_sales > 0 OR total_outstanding > 0
+		SELECT * FROM (
+			SELECT
+				p.id as party_id,
+				p.name,
+				p.phone,
+				p.email,
+				p.gstin,
+				COALESCE(SUM(CASE WHEN i.status = 'paid' AND i.date >= ? THEN i.total_amount ELSE 0 END), 0) as total_sales,
+				COALESCE(SUM(CASE WHEN i.status NOT IN ('cancelled', 'paid') THEN i.total_amount - i.amount_paid ELSE 0 END), 0) as total_outstanding,
+				COUNT(CASE WHEN i.date >= ? THEN i.id END) as invoice_count,
+				SUM(CASE WHEN i.status = 'paid' AND i.date >= ? THEN 1 ELSE 0 END) as paid_count,
+				COALESCE(AVG(CASE WHEN i.status = 'paid' AND i.date >= ? THEN i.total_amount END), 0) as avg_invoice_value,
+				MAX(CASE WHEN i.date >= ? THEN i.date END) as last_invoice_date
+			FROM parties p
+			LEFT JOIN invoices i ON p.id = i.party_id AND i.user_id = ?
+			WHERE p.user_id = ? AND p.party_type = 'customer'
+			GROUP BY p.id, p.name, p.phone, p.email, p.gstin
+		) t
+		WHERE total_sales > 0 OR total_outstanding > 0
 		ORDER BY total_sales DESC
 		LIMIT ?
 	`
@@ -522,7 +538,7 @@ func GetCustomerWiseReport(c *gin.Context) {
 
 func GetProductWiseReport(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
-	limit := c.DefaultQuery("limit", "25")
+	limit := reportLimit(c)
 	period := c.DefaultQuery("period", "monthly")
 	periodStart := reportPeriodStart(period)
 
@@ -623,7 +639,7 @@ func GetProductWiseReport(c *gin.Context) {
 
 func GetCategoryWiseReport(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
-	limit := c.DefaultQuery("limit", "25")
+	limit := reportLimit(c)
 	period := c.DefaultQuery("period", "monthly")
 	periodStart := reportPeriodStart(period)
 
@@ -838,17 +854,40 @@ func GetInventoryReport(c *gin.Context) {
 	}
 
 	var stocks []models.InventoryStock
-	if err := utils.DB.Where("user_id = ?", userID).Preload("Product").Find(&stocks).Error; err != nil {
+	if err := utils.DB.Where("user_id = ?", userID).Find(&stocks).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch inventory report"})
 		return
 	}
 
-	var outletIDs []uuid.UUID
+	productIDSet := make(map[uuid.UUID]struct{})
+	outletIDSet := make(map[uuid.UUID]struct{})
 	for _, s := range stocks {
-		outletIDs = append(outletIDs, s.OutletID)
+		productIDSet[s.ProductID] = struct{}{}
+		outletIDSet[s.OutletID] = struct{}{}
 	}
-	warehouseMap := make(map[uuid.UUID]string)
-	if len(outletIDs) > 0 {
+
+	productMap := make(map[uuid.UUID]models.Product, len(productIDSet))
+	if len(productIDSet) > 0 {
+		productIDs := make([]uuid.UUID, 0, len(productIDSet))
+		for id := range productIDSet {
+			productIDs = append(productIDs, id)
+		}
+		var products []models.Product
+		if err := utils.DB.Where("id IN ?", productIDs).Find(&products).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch inventory report"})
+			return
+		}
+		for _, p := range products {
+			productMap[p.ID] = p
+		}
+	}
+
+	warehouseMap := make(map[uuid.UUID]string, len(outletIDSet))
+	if len(outletIDSet) > 0 {
+		outletIDs := make([]uuid.UUID, 0, len(outletIDSet))
+		for id := range outletIDSet {
+			outletIDs = append(outletIDs, id)
+		}
 		var warehouses []models.Warehouse
 		utils.DB.Where("id IN ?", outletIDs).Find(&warehouses)
 		for _, wh := range warehouses {
@@ -882,7 +921,7 @@ func GetInventoryReport(c *gin.Context) {
 			continue
 		}
 		aggregated[key] = &aggregatedStock{
-			product:      stock.Product,
+			product:      productMap[stock.ProductID],
 			outletID:     stock.OutletID,
 			stockQty:     stock.Quantity,
 			reservedQty:  stock.ReservedQty,

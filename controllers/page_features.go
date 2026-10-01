@@ -30,9 +30,16 @@ var defaultPageFeatureKeys = []string{
 	"/credit-notes",
 	"/payments",
 	"/expenses",
+	"/expense-categories",
 	"/cash-bank",
+	"/profit-distribution",
 	"/accounting",
+	"/reports/index",
 	"/reports/daily",
+	"/reports/daily-profit",
+	"/reports/profit-loss",
+	"/reports/billwise-profit",
+	"/reports/stock",
 	"/reports",
 	"/gst",
 	"/e-invoicing",
@@ -83,17 +90,33 @@ func parsePagesJSON(raw string) map[string]bool {
 	return mergePageFeatures(stored)
 }
 
-// GetPageFeatures returns which pages/menus are enabled. Any authenticated user may read.
+// GetPageFeatures returns which pages/menus are enabled for the active store.
+// Falls back to the global (NULL store) row, then to all-enabled defaults.
+// Any authenticated user may read.
 func GetPageFeatures(c *gin.Context) {
 	var settings models.PageFeatureSettings
-	if err := utils.DB.Order("created_at asc").First(&settings).Error; err != nil {
+	found := false
+	if storeID, ok := currentStoreID(c); ok {
+		found = utils.DB.Where("store_id = ?", storeID).
+			Order("created_at asc").First(&settings).Error == nil
+	}
+	if !found {
+		found = utils.DB.Where("store_id IS NULL").
+			Order("created_at asc").First(&settings).Error == nil
+	}
+	if !found {
 		c.JSON(http.StatusOK, gin.H{"pages": defaultPageFeatures()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"pages": parsePagesJSON(settings.PagesJSON)})
+	c.JSON(http.StatusOK, gin.H{
+		"pages":    parsePagesJSON(settings.PagesJSON),
+		"store_id": settings.StoreID,
+	})
 }
 
-// UpdatePageFeatures updates page/menu enablement. Super admin only.
+// UpdatePageFeatures updates page/menu enablement for the active store.
+// Super admin only. When no store context is present (no stores exist), the
+// global fallback row is updated instead.
 func UpdatePageFeatures(c *gin.Context) {
 	var input struct {
 		Pages map[string]bool `json:"pages" binding:"required"`
@@ -110,11 +133,21 @@ func UpdatePageFeatures(c *gin.Context) {
 		return
 	}
 
+	var storeID *uuid.UUID
+	query := utils.DB.Order("created_at asc")
+	if id, ok := currentStoreID(c); ok {
+		storeID = &id
+		query = query.Where("store_id = ?", id)
+	} else {
+		query = query.Where("store_id IS NULL")
+	}
+
 	var settings models.PageFeatureSettings
-	err = utils.DB.Order("created_at asc").First(&settings).Error
+	err = query.First(&settings).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		settings = models.PageFeatureSettings{
 			ID:        uuid.New(),
+			StoreID:   storeID,
 			PagesJSON: string(payload),
 		}
 		if err := utils.DB.Create(&settings).Error; err != nil {
@@ -132,7 +165,8 @@ func UpdatePageFeatures(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Page features updated successfully",
-		"pages":   pages,
+		"message":  "Page features updated successfully",
+		"pages":    pages,
+		"store_id": settings.StoreID,
 	})
 }
