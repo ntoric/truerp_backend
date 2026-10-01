@@ -369,6 +369,13 @@ func GetPurchaseBills(c *gin.Context) {
 	if status := c.Query("status"); status != "" {
 		query = query.Where("status = ?", status)
 	}
+	// payable=true limits to bills that still owe money: not fully paid and
+	// with a positive balance (derived from total - paid in case balance_due
+	// is stale on older rows).
+	if payable := c.Query("payable"); payable == "true" || payable == "1" {
+		query = query.Where("status <> ?", "paid").
+			Where("(balance_due > 0 OR total_amount - COALESCE(paid_amount, 0) > 0)")
+	}
 	if fromDate := c.Query("from_date"); fromDate != "" {
 		query = query.Where(utils.SQLDateGTE("bill_date"), fromDate)
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -132,8 +133,111 @@ func GetStockBalance(c *gin.Context) {
 		balances = append(balances, *balance)
 	}
 
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		needle := strings.ToLower(search)
+		filtered := balances[:0]
+		for _, balance := range balances {
+			if strings.Contains(strings.ToLower(balance.ProductName), needle) ||
+				strings.Contains(strings.ToLower(balance.SKU), needle) {
+				filtered = append(filtered, balance)
+			}
+		}
+		balances = filtered
+	}
+
+	sort.Slice(balances, func(i, j int) bool {
+		if balances[i].ProductName != balances[j].ProductName {
+			return balances[i].ProductName < balances[j].ProductName
+		}
+		return balances[i].OutletName < balances[j].OutletName
+	})
+
+	// Paginated mode (opt-in via page/per_page); per_page <= 0 returns every
+	// matching row. Unparameterized callers keep the legacy {data: [...]} shape.
+	paginated := c.Query("page") != "" || c.Query("per_page") != ""
+	if paginated {
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "25"))
+
+		total := len(balances)
+		if perPage > 0 {
+			start := (page - 1) * perPage
+			if start >= total {
+				balances = balances[:0]
+			} else {
+				end := start + perPage
+				if end > total {
+					end = total
+				}
+				balances = balances[start:end]
+			}
+		}
+
+		fmt.Printf("[DEBUG] GetStockBalance - Returning %d of %d consolidated balances\n", len(balances), total)
+		c.JSON(http.StatusOK, gin.H{
+			"data":     balances,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+		})
+		return
+	}
+
 	fmt.Printf("[DEBUG] GetStockBalance - Returning %d consolidated balances\n", len(balances))
 	c.JSON(http.StatusOK, gin.H{"data": balances})
+}
+
+// GetInventoryStats returns the aggregate figures behind the inventory stat
+// widgets: stock value, units, distinct products/outlets, and the count of
+// consolidated low-stock alerts (product + outlet pairs at or below min_stock).
+func GetInventoryStats(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	var stats struct {
+		TotalValue   float64 `json:"total_value"`
+		TotalQty     float64 `json:"total_qty"`
+		ProductCount int64   `json:"product_count"`
+		OutletCount  int64   `json:"outlet_count"`
+	}
+	if err := utils.DB.Raw(`
+		SELECT COALESCE(SUM(quantity * average_cost), 0) AS total_value,
+			COALESCE(SUM(quantity), 0) AS total_qty,
+			COUNT(DISTINCT product_id) AS product_count,
+			COUNT(DISTINCT outlet_id) AS outlet_count
+		FROM inventory_stocks WHERE user_id = ?
+	`, userID).Scan(&stats).Error; err != nil {
+		fmt.Printf("[DEBUG] GetInventoryStats - DB error: %v\n", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch inventory stats"})
+		return
+	}
+
+	var lowStockCount int64
+	// Same consolidation rule as GetLowStockAlerts: one row per product + outlet.
+	if err := utils.DB.Raw(`
+		SELECT COUNT(*) FROM (
+			SELECT p.id
+			FROM products p
+			INNER JOIN inventory_stocks s ON p.id = s.product_id
+			WHERE p.user_id = ? AND p.deleted_at IS NULL AND p.low_stock_alert = true
+			GROUP BY p.id, p.min_stock, s.outlet_id
+			HAVING SUM(s.quantity) <= p.min_stock
+		) consolidated
+	`, userID).Scan(&lowStockCount).Error; err != nil {
+		fmt.Printf("[DEBUG] GetInventoryStats - low stock count error: %v\n", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch inventory stats"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"total_value":     stats.TotalValue,
+		"total_qty":       stats.TotalQty,
+		"product_count":   stats.ProductCount,
+		"outlet_count":    stats.OutletCount,
+		"low_stock_count": lowStockCount,
+	})
 }
 
 func GetStockEntries(c *gin.Context) {
@@ -1920,7 +2024,7 @@ func GetLowStockAlerts(c *gin.Context) {
 
 	results := make([]LowStockItem, 0)
 	// Consolidate batches per product + outlet (same as GetStockBalance).
-	query := `
+	baseQuery := `
 		SELECT p.id as product_id, p.name as product_name, p.sku, p.min_stock, s.outlet_id,
 			SUM(s.quantity) as current_stock, w.name as outlet_name
 		FROM products p
@@ -1931,7 +2035,46 @@ func GetLowStockAlerts(c *gin.Context) {
 		HAVING SUM(s.quantity) <= p.min_stock
 	`
 
-	if err := utils.DB.Raw(query, userID).Scan(&results).Error; err != nil {
+	// Paginated mode (opt-in via page/per_page); per_page <= 0 returns every
+	// matching row. Unparameterized callers keep the legacy plain array.
+	paginated := c.Query("page") != "" || c.Query("per_page") != ""
+	if paginated {
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "25"))
+
+		var total int64
+		if err := utils.DB.Raw("SELECT COUNT(*) FROM ("+baseQuery+") consolidated", userID).Scan(&total).Error; err != nil {
+			fmt.Printf("[DEBUG] GetLowStockAlerts - count error: %v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch low stock alerts"})
+			return
+		}
+
+		pageQuery := baseQuery + " ORDER BY product_name ASC, outlet_name ASC"
+		args := []interface{}{userID}
+		if perPage > 0 {
+			pageQuery += " LIMIT ? OFFSET ?"
+			args = append(args, perPage, (page-1)*perPage)
+		}
+		if err := utils.DB.Raw(pageQuery, args...).Scan(&results).Error; err != nil {
+			fmt.Printf("[DEBUG] GetLowStockAlerts - DB error: %v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch low stock alerts"})
+			return
+		}
+
+		fmt.Printf("[DEBUG] GetLowStockAlerts - Found %d of %d low stock alerts\n", len(results), total)
+		c.JSON(http.StatusOK, gin.H{
+			"data":     results,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+		})
+		return
+	}
+
+	if err := utils.DB.Raw(baseQuery, userID).Scan(&results).Error; err != nil {
 		fmt.Printf("[DEBUG] GetLowStockAlerts - DB error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch low stock alerts"})
 		return

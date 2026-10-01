@@ -262,6 +262,7 @@ func SetupRoutes(r *gin.Engine) {
 		// Stock Balance & Valuation
 		inventory.GET("/balance", controllers.GetStockBalance)
 		inventory.GET("/valuation", controllers.GetInventoryValuation)
+		inventory.GET("/stats", controllers.GetInventoryStats)
 		inventory.POST("/snapshots/refresh-closing", controllers.RefreshStockClosing)
 
 		// Opening stock overrides — superadmin only

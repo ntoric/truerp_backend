@@ -43,7 +43,9 @@ func GetPaymentOuts(c *gin.Context) {
 			like, like, like, like, like, like,
 		)
 	}
-	query = query.Order("payment_outs.updated_at DESC")
+	// Order by payment date — covered by idx_payment_outs_user_date, unlike
+	// updated_at which forces a full sort of the user's rows.
+	query = query.Order("payment_outs.date DESC, payment_outs.created_at DESC")
 
 	paymentOuts := make([]models.PaymentOut, 0)
 
