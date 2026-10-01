@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"fmt"
 	"testing"
 	"time"
 	"truerp/models"
@@ -14,12 +15,22 @@ import (
 
 func setupDBMaintenanceTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	db, err := gorm.Open(sqlite.Open("file::memory:"), &gorm.Config{
+	// Shared-cache in-memory database with a unique name per invocation:
+	// file::memory: gives every pooled connection its own empty DB, so the
+	// scheduler goroutine and the test's polling queries would race onto
+	// different databases. Pinning the pool to one connection additionally
+	// serializes access against VACUUM.
+	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:dbmaint-%s?mode=memory&cache=shared", uuid.New())), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
 	if err := db.AutoMigrate(&models.DBMaintenanceSettings{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -28,8 +39,13 @@ func setupDBMaintenanceTestDB(t *testing.T) *gorm.DB {
 	utils.DB = db
 	utils.SetDialect(utils.DialectSQLite)
 	t.Cleanup(func() {
+		// Wait for any in-flight scheduled run: it keeps using utils.DB, so
+		// restoring globals or closing the pool first would race/panic.
+		dbMaintenanceMu.Lock()
+		dbMaintenanceMu.Unlock()
 		utils.DB = previousDB
 		utils.SetDialect(previousDialect)
+		sqlDB.Close()
 	})
 	return db
 }
