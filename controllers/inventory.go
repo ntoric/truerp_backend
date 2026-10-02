@@ -2097,6 +2097,7 @@ func GetInventoryItems(c *gin.Context) {
 		Type           string    `json:"type"` // "product" or "standalone"
 		IsActive       bool      `json:"is_active"`
 		EnableBatching bool      `json:"enable_batching"`
+		Unit           string    `json:"unit"`
 	}
 
 	items := make([]InventoryItem, 0)
@@ -2114,6 +2115,7 @@ func GetInventoryItems(c *gin.Context) {
 				Type:           "product",
 				IsActive:       p.IsActive,
 				EnableBatching: p.EnableBatching,
+				Unit:           p.Unit,
 			})
 		}
 	}
