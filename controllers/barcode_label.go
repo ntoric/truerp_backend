@@ -262,8 +262,8 @@ body {
 	display: flex;
 	flex-direction: column;
 	align-items: stretch;
-	justify-content: space-between;
-	gap: 0.9mm;
+	justify-content: flex-start;
+	gap: 0.5mm;
 	overflow: hidden;
 	border: none;
 	page-break-after: always;
@@ -276,6 +276,7 @@ body {
 	break-after: auto;
 }
 .label-brand {
+	flex: 0 0 auto;
 	font-size: %.1fpx;
 	font-weight: 600;
 	line-height: 1.15;
@@ -289,6 +290,7 @@ body {
 	text-overflow: ellipsis;
 }
 .product-name {
+	flex: 0 0 auto;
 	font-size: %.1fpx;
 	font-weight: 600;
 	line-height: 1.15;
@@ -308,7 +310,7 @@ body {
 	flex: 1 1 auto;
 	min-height: 0;
 	line-height: 1;
-	margin: 0.5mm 0;
+	margin: 0.3mm 0;
 	display: flex;
 	flex-direction: column;
 	align-items: center;
@@ -323,6 +325,7 @@ body {
 }
 .product-barcode .barcode-text,
 .product-barcode-fallback {
+	flex: 0 0 auto;
 	font-family: "Courier New", Courier, monospace;
 	font-size: %.1fpx;
 	line-height: 1.1;
@@ -335,6 +338,7 @@ body {
 	white-space: normal;
 }
 .price-row {
+	flex: 0 0 auto;
 	width: 100%%;
 	display: flex;
 	flex-direction: row;
@@ -488,12 +492,12 @@ func barcodeLabelSizeForA4Layout(layout A4LabelSheetLayout) BarcodeLabelSize {
 	namePx := 9.0
 	metaPx := 7.0
 	barcodeH := 24
-	padding := 2.0
+	padding := 1.5
 	if h >= 24 {
 		namePx = 10
 		metaPx = 7.5
 		barcodeH = 26
-		padding = 2.5
+		padding = 1.8
 	}
 	if h >= 25 {
 		namePx = 10.5
