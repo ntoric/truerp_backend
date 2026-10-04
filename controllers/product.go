@@ -939,6 +939,211 @@ func PrintProductLabel(c *gin.Context) {
 	c.String(http.StatusOK, html)
 }
 
+// PrintProductLabels prints barcode labels for several products in one job.
+// Body: { items: [{product_id, quantity}], label_size, format, start_position, preview }
+func PrintProductLabels(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	var input struct {
+		Items []struct {
+			ProductID string `json:"product_id"`
+			Quantity  int    `json:"quantity"`
+		} `json:"items"`
+		LabelSize     string `json:"label_size"`
+		Format        string `json:"format"`
+		StartPosition int    `json:"start_position"`
+		Preview       bool   `json:"preview"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	if len(input.Items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No products selected"})
+		return
+	}
+	if len(input.Items) > 200 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Too many products (max 200)"})
+		return
+	}
+
+	ids := make([]string, 0, len(input.Items))
+	seen := make(map[string]bool, len(input.Items))
+	qtyByID := make(map[string]int, len(input.Items))
+	for _, it := range input.Items {
+		pid := strings.TrimSpace(it.ProductID)
+		if pid == "" {
+			continue
+		}
+		q := it.Quantity
+		if q < 1 {
+			q = 1
+		}
+		if q > 500 {
+			q = 500
+		}
+		if !seen[pid] {
+			seen[pid] = true
+			ids = append(ids, pid)
+		}
+		qtyByID[pid] = q
+	}
+	if len(ids) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No products selected"})
+		return
+	}
+
+	var products []models.Product
+	if err := utils.DB.Where("user_id = ? AND id IN ?", userID, ids).Find(&products).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch products"})
+		return
+	}
+	productByID := make(map[string]models.Product, len(products))
+	for _, p := range products {
+		productByID[p.ID.String()] = p
+	}
+
+	// Fetch business settings for label printing (same defaults as single-product print)
+	var business models.Business
+	if err := utils.DB.Where("user_id = ?", userID).First(&business).Error; err != nil {
+		business = models.Business{
+			LabelPaperSize: "A4",
+			LabelWidthMM:   50,
+			LabelHeightMM:  30,
+			LabelColumns:   3,
+			LabelRows:      8,
+			LabelMarginMM:  10,
+		}
+	}
+
+	barcodeMode := "a4"
+	labelSizeKey := "2inch"
+	var printSettings models.PrintSettings
+	if err := utils.DB.Where("user_id = ?", userID).First(&printSettings).Error; err == nil {
+		if printSettings.BarcodePrintMode == "label" {
+			barcodeMode = "label"
+		}
+		labelSizeKey = normalizeBarcodeLabelSize(printSettings.BarcodeLabelSize)
+	}
+	if input.LabelSize != "" {
+		labelSizeKey = normalizeBarcodeLabelSize(input.LabelSize)
+		// Explicit size from the print dialog always targets thermal label rolls
+		barcodeMode = "label"
+	}
+	labelSize := getBarcodeLabelSize(labelSizeKey)
+	compact := labelSizeKey == "1inch" || labelSizeKey == "1.5inch"
+
+	type labelJob struct {
+		data productLabelData
+		qty  int
+	}
+	jobs := make([]labelJob, 0, len(ids))
+	total := 0
+	for _, pid := range ids {
+		p, ok := productByID[pid]
+		if !ok {
+			continue
+		}
+		q := qtyByID[pid]
+		total += q
+		jobs = append(jobs, labelJob{
+			data: productLabelData{
+				Name:      p.Name,
+				Brand:     business.Name,
+				SKU:       p.SKU,
+				ItemCode:  p.ItemCode,
+				Category:  p.Category,
+				SalePrice: p.SalePrice,
+				MRP:       p.MRP,
+			},
+			qty: q,
+		})
+	}
+	if len(jobs) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Products not found"})
+		return
+	}
+	if total > 2000 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Too many labels in one job (max 2000)"})
+		return
+	}
+	if input.Preview && total > 8 {
+		// Trim quantities so the preview stays light.
+		remaining := 8
+		for i := range jobs {
+			if jobs[i].qty > remaining {
+				jobs[i].qty = remaining
+			}
+			remaining -= jobs[i].qty
+			if remaining <= 0 {
+				jobs = jobs[:i+1]
+				break
+			}
+		}
+	}
+
+	format := strings.ToLower(strings.TrimSpace(input.Format))
+	if format == "" {
+		format = strings.ToLower(strings.TrimSpace(c.Query("format")))
+	}
+
+	if barcodeMode == "label" && (format == "json" || wantsJSONResponse(c)) {
+		labels := make([]BarcodeLabelItemJSON, 0, total)
+		for _, job := range jobs {
+			entry := BarcodeLabelItemJSON{
+				Name:    job.data.Name,
+				Brand:   job.data.Brand,
+				Barcode: barcodeValueForProduct(job.data),
+				SKU:     job.data.SKU,
+				Price:   job.data.SalePrice,
+			}
+			if job.data.MRP > 0 {
+				entry.MRP = job.data.MRP
+			}
+			for i := 0; i < job.qty; i++ {
+				labels = append(labels, entry)
+			}
+		}
+		c.JSON(http.StatusOK, BarcodeLabelsResponse{
+			Title:    "Product Labels",
+			Size:     labelSize.Key,
+			WidthMM:  labelSize.WidthMM,
+			HeightMM: labelSize.HeightMM,
+			Compact:  compact,
+			Labels:   labels,
+		})
+		return
+	}
+
+	if barcodeMode == "label" {
+		var labelsHTML strings.Builder
+		for _, job := range jobs {
+			single := buildProductLabelHTML(job.data, labelSize, compact)
+			for i := 0; i < job.qty; i++ {
+				labelsHTML.WriteString(single)
+			}
+		}
+		html := wrapBarcodeLabelDocument("Product Labels", barcodeLabelPageCSS(labelSize), labelsHTML.String())
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, html)
+		return
+	}
+
+	sheetLayout := a4LabelSheetLayoutFromBusiness(business)
+	a4Size := barcodeLabelSizeForA4Layout(sheetLayout)
+	labelHTMLs := make([]string, 0, total)
+	for _, job := range jobs {
+		single := buildProductLabelHTML(job.data, a4Size, false)
+		for i := 0; i < job.qty; i++ {
+			labelHTMLs = append(labelHTMLs, single)
+		}
+	}
+
+	html := buildA4LabelsSheetDocument("Product Labels", labelHTMLs, sheetLayout, input.StartPosition, input.Preview)
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, html)
+}
+
 func ImportProductsCSV(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 	_ = utils.EnsureDefaultCategories(utils.DB, userID)
