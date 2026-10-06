@@ -216,6 +216,13 @@ func UpdateParty(c *gin.Context) {
 		"is_active":    input.IsActive,
 	}
 
+	// The opening balance is editable; keep balance consistent by shifting
+	// it with the same delta (balance = opening + net transaction activity).
+	if input.OpeningBalance != party.OpeningBalance {
+		updates["opening_balance"] = input.OpeningBalance
+		updates["balance"] = party.Balance + (input.OpeningBalance - party.OpeningBalance)
+	}
+
 	if err := utils.DB.Model(&party).Updates(updates).Error; err != nil {
 		fmt.Printf("[DEBUG] UpdateParty - DB update error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update party"})

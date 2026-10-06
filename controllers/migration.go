@@ -300,7 +300,16 @@ func importPartiesRows(userID uuid.UUID, content []byte, vendorHints map[string]
 			partyType = "customer"
 		}
 
-		balance := mbParseAmount(mbFirstCSVValue(row, header, "Bal.", "Balance", "Opening Balance", "OpeningBalance"))
+		// "Bal."/"Balance" is the party's closing balance at export time —
+		// the daybook and other importers recreate the transactions behind
+		// it as real documents, so it must not seed opening_balance (the
+		// ledger would count it twice). Only an explicit "Opening Balance"
+		// column carries a true pre-transaction opening.
+		balance := mbParseAmount(mbFirstCSVValue(row, header, "Bal.", "Balance"))
+		opening := mbParseAmount(mbFirstCSVValue(row, header, "Opening Balance", "OpeningBalance"))
+		if balance == 0 {
+			balance = opening
+		}
 
 		// A negative balance means the business owes the party money (to
 		// pay), so the party is a vendor regardless of the default/hinted
@@ -321,7 +330,7 @@ func importPartiesRows(userID uuid.UUID, content []byte, vendorHints map[string]
 			Pincode:        mbFirstCSVValue(row, header, "Pincode", "Pin Code"),
 			Category:       mbFirstCSVValue(row, header, "Party Category", "Category"),
 			PartyType:      partyType,
-			OpeningBalance: balance,
+			OpeningBalance: opening,
 			Balance:        balance,
 			IsActive:       true,
 		}
@@ -1426,7 +1435,6 @@ func markPurchaseBillPaid(db *gorm.DB, userID, billID uuid.UUID, amount float64)
 		"status":      status,
 	})
 }
-
 
 // -----------------------------------------------------------------------------
 // 4. Expenses CSV importer  —  POST /api/v1/expenses/import/csv

@@ -230,6 +230,72 @@ func runRawMigrations(db *gorm.DB) {
 	backfillProductGstEnabled(db)
 	BackfillProductPLUs(db)
 	backfillInvoiceSourceLinks(db)
+	backfillPartyOpeningBalances(db)
+}
+
+// backfillPartyOpeningBalances repairs parties whose opening_balance was
+// seeded from the myBillBook "Bal." column during migration. That column is
+// the party's closing balance at export time — the same transactions are
+// imported as real documents, so seeding it as the opening double-counts it
+// in the party ledger. The true opening (balance before all transactions)
+// is recomputed as balance − Σ(document deltas), matching
+// loadPartyLedgerRows. Runs once, tracked in the data_repairs table, so a
+// manually entered opening balance is never rewritten later.
+func backfillPartyOpeningBalances(db *gorm.DB) {
+	if !db.Migrator().HasTable(&models.Party{}) {
+		return
+	}
+	if err := db.Exec(`CREATE TABLE IF NOT EXISTS data_repairs (
+		name VARCHAR(200) PRIMARY KEY,
+		applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)`).Error; err != nil {
+		log.Printf("backfillPartyOpeningBalances: create marker table failed: %v", err)
+		return
+	}
+	const marker = "party_opening_balance_rebase_v2"
+	var applied int64
+	if err := db.Raw(`SELECT COUNT(*) FROM data_repairs WHERE name = ?`, marker).Scan(&applied).Error; err != nil {
+		log.Printf("backfillPartyOpeningBalances: marker check failed: %v", err)
+		return
+	}
+	if applied > 0 {
+		return
+	}
+	// Recompute every party's opening backwards from its current balance so
+	// that opening + Σ(document debits − credits) = balance for each party.
+	// Documents the balance cannot explain land in the opening figure.
+	res := db.Exec(`UPDATE parties SET opening_balance = balance - (
+		COALESCE((SELECT SUM(total_amount) FROM invoices
+			WHERE party_id = parties.id AND deleted_at IS NULL
+			  AND status NOT IN ('draft', 'cancelled')), 0)
+		- COALESCE((SELECT SUM(amount_received) FROM payments
+			WHERE party_id = parties.id AND deleted_at IS NULL), 0)
+		+ COALESCE((SELECT SUM(payment_in_discount) FROM payments
+			WHERE party_id = parties.id AND deleted_at IS NULL), 0)
+		+ COALESCE((SELECT SUM(amount_paid) FROM payment_outs
+			WHERE party_id = parties.id AND deleted_at IS NULL), 0)
+		- COALESCE((SELECT SUM(payment_out_discount) FROM payment_outs
+			WHERE party_id = parties.id AND deleted_at IS NULL), 0)
+		- COALESCE((SELECT SUM(CASE WHEN amount - deduction_total > 0
+				THEN amount - deduction_total ELSE 0 END)
+			FROM sales_returns
+			WHERE party_id = parties.id AND deleted_at IS NULL AND status = 'processed'), 0)
+		- COALESCE((SELECT SUM(total_amount) FROM purchase_bills
+			WHERE party_id = parties.id AND deleted_at IS NULL AND status <> 'draft'), 0)
+		+ COALESCE((SELECT SUM(amount) FROM purchase_returns
+			WHERE party_id = parties.id AND deleted_at IS NULL AND status = 'processed'), 0)
+		- COALESCE((SELECT SUM(total_amount) FROM credit_notes
+			WHERE party_id = parties.id AND deleted_at IS NULL AND status = 'issued'), 0)
+		+ COALESCE((SELECT SUM(total_amount) FROM debit_notes
+			WHERE party_id = parties.id AND deleted_at IS NULL AND status = 'issued'), 0)
+		)`)
+	if res.Error != nil {
+		log.Printf("backfillPartyOpeningBalances: update failed: %v", res.Error)
+		return
+	}
+	if res.RowsAffected > 0 {
+		log.Printf("backfillPartyOpeningBalances: rebased opening balance for %d parties", res.RowsAffected)
+	}
+	db.Exec(`INSERT INTO data_repairs (name) VALUES (?)`, marker)
 }
 
 // backfillInvoiceSourceLinks moves myBillBook "Invoice link: <url>" segments

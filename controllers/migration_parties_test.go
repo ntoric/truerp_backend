@@ -61,6 +61,14 @@ Other Party,,,,,4444444444,0,
 		parties[2].Phone != "3333333333" || parties[2].Balance != 100 {
 		t.Fatalf("same-name parties = %+v, want three distinct phone/balance combinations", parties)
 	}
+	// "Bal." is the party's closing balance at export time — it lands on
+	// Balance only. Storing it as OpeningBalance would double-count the
+	// imported transactions in the party ledger.
+	for _, p := range parties {
+		if p.OpeningBalance != 0 {
+			t.Fatalf("party %s opening_balance = %.2f, want 0", p.Name, p.OpeningBalance)
+		}
+	}
 
 	imported, errs, err = importPartiesRows(userID, content, nil, "", nil)
 	if err != nil {
@@ -79,5 +87,34 @@ Other Party,,,,,4444444444,0,
 	}
 	if count != 4 {
 		t.Fatalf("party count = %d, want 4", count)
+	}
+}
+
+func TestImportPartiesRowsExplicitOpeningBalanceColumn(t *testing.T) {
+	db := openPartyImportTestDB(t)
+	previousDB := utils.DB
+	utils.DB = db
+	t.Cleanup(func() { utils.DB = previousDB })
+
+	userID := uuid.New()
+	content := []byte("Name,Mob No.,Opening Balance\nVendor A,,-500\n")
+
+	imported, errs, err := importPartiesRows(userID, content, nil, "", nil)
+	if err != nil {
+		t.Fatalf("import parties: %v", err)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("import errors = %v, want none", errs)
+	}
+	if imported != 1 {
+		t.Fatalf("imported = %d, want 1", imported)
+	}
+
+	var party models.Party
+	if err := db.Where("user_id = ? AND name = ?", userID, "Vendor A").First(&party).Error; err != nil {
+		t.Fatalf("load party: %v", err)
+	}
+	if party.OpeningBalance != -500 || party.Balance != -500 {
+		t.Fatalf("opening/balance = %.2f/%.2f, want -500/-500", party.OpeningBalance, party.Balance)
 	}
 }

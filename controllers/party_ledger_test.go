@@ -187,6 +187,80 @@ func TestPartyLedgerVendorAndOpeningDelta(t *testing.T) {
 	}
 }
 
+// Regression: a migrated vendor's imported "Bal." is the closing balance,
+// not an opening. With the underlying purchase bill imported as a document,
+// the all-time ledger must close at -7098 (actual payable), not -14196.
+func TestPartyLedgerMigratedBalanceNotDoubleCounted(t *testing.T) {
+	db := openPartyLedgerTestDB(t)
+	userID := uuid.New()
+
+	vendor := models.Party{
+		ID: uuid.New(), UserID: userID, Name: "AAURA SALES & DISTRIBUTION",
+		PartyType: "vendor", OpeningBalance: 0, Balance: -7098,
+	}
+	if err := db.Create(&vendor).Error; err != nil {
+		t.Fatalf("create vendor: %v", err)
+	}
+	if err := db.Create(&models.PurchaseBill{
+		ID: uuid.New(), UserID: userID, PartyID: vendor.ID,
+		BillNumber: "P-0465", BillDate: time.Date(2026, 9, 11, 0, 0, 0, 0, time.UTC),
+		Status: "unpaid", TotalAmount: 7098,
+	}).Error; err != nil {
+		t.Fatalf("create bill: %v", err)
+	}
+
+	c, rec := ledgerGetContext("/parties/"+vendor.ID.String()+"/ledger", vendor.ID.String())
+	c.Set("user_id", userID)
+	GetPartyLedger(c)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var ledger PartyLedger
+	if err := json.Unmarshal(rec.Body.Bytes(), &ledger); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if ledger.OpeningBalance != 0 {
+		t.Fatalf("opening = %.2f, want 0", ledger.OpeningBalance)
+	}
+	if ledger.ClosingBalance != -7098 {
+		t.Fatalf("closing = %.2f, want -7098", ledger.ClosingBalance)
+	}
+}
+
+// A party imported from the balance file alone (no transactions imported)
+// still shows its imported balance as the opening.
+func TestPartyLedgerImportedBalanceWithoutDocuments(t *testing.T) {
+	db := openPartyLedgerTestDB(t)
+	userID := uuid.New()
+
+	vendor := models.Party{
+		ID: uuid.New(), UserID: userID, Name: "Balance Only Vendor",
+		PartyType: "vendor", OpeningBalance: 0, Balance: -7098,
+	}
+	if err := db.Create(&vendor).Error; err != nil {
+		t.Fatalf("create vendor: %v", err)
+	}
+
+	c, rec := ledgerGetContext("/parties/"+vendor.ID.String()+"/ledger", vendor.ID.String())
+	c.Set("user_id", userID)
+	GetPartyLedger(c)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var ledger PartyLedger
+	if err := json.Unmarshal(rec.Body.Bytes(), &ledger); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if ledger.OpeningBalance != -7098 {
+		t.Fatalf("opening = %.2f, want -7098 (imported balance)", ledger.OpeningBalance)
+	}
+	if ledger.ClosingBalance != -7098 {
+		t.Fatalf("closing = %.2f, want -7098", ledger.ClosingBalance)
+	}
+}
+
 func TestPartyLedgerUnknownParty(t *testing.T) {
 	openPartyLedgerTestDB(t)
 	userID := uuid.New()

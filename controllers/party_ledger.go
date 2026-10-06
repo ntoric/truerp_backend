@@ -28,7 +28,9 @@ import (
 //
 // The opening balance is party.opening_balance plus the net delta of all
 // qualifying documents dated before the requested range, so the ledger always
-// reconciles: opening + Σ entries = closing.
+// reconciles: opening + Σ entries = closing. When the party has no documents
+// at all, party.balance (e.g. an imported closing balance) is shown as the
+// opening instead.
 // -----------------------------------------------------------------------------
 
 type partyLedgerRow struct {
@@ -276,6 +278,12 @@ func loadPartyLedger(userID, partyID uuid.UUID, fromDate, toDate string) (*Party
 	}
 
 	opening := party.OpeningBalance
+	if opening == 0 && len(rows) == 0 {
+		// A party imported from the balance file alone carries only its
+		// closing balance with no underlying documents — show it as the
+		// opening so the statement still reflects the payable/receivable.
+		opening = party.Balance
+	}
 	var inRange []partyLedgerRow
 	for _, r := range rows {
 		d := partyLedgerDate(r.Date)
