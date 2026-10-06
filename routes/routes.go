@@ -23,6 +23,7 @@ func SetupRoutes(r *gin.Engine) {
 		auth.GET("/profile", middleware.AuthRequired(), controllers.GetProfile)
 		auth.PUT("/profile", middleware.AuthRequired(), controllers.UpdateProfile)
 		auth.GET("/my-stores", middleware.AuthRequired(), controllers.MyStores)
+		auth.POST("/app-version", middleware.AuthRequired(), controllers.ReportAppVersion)
 	}
 
 	// Store management (super admin)

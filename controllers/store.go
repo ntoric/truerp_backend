@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 	"truerp/models"
 	"truerp/utils"
 
@@ -201,6 +202,50 @@ func ListStores(c *gin.Context) {
 		out = append(out, item)
 	}
 	c.JSON(http.StatusOK, out)
+}
+
+type appVersionReport struct {
+	Version string `json:"version"`
+}
+
+// ReportAppVersion records the Tauri desktop app version for the caller's
+// resolved store (set by AuthRequired from X-Store-ID / the user's store).
+// Older servers return 404, which newer clients ignore — and older clients
+// simply never call it, so the feature is backward compatible both ways.
+func ReportAppVersion(c *gin.Context) {
+	var req appVersionReport
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request data"})
+		return
+	}
+	version := strings.TrimSpace(req.Version)
+	if version == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "version is required"})
+		return
+	}
+	if len(version) > 64 {
+		version = version[:64]
+	}
+
+	raw, ok := c.Get("store_id")
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No active store"})
+		return
+	}
+	storeID, ok := raw.(uuid.UUID)
+	if !ok || storeID == uuid.Nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No active store"})
+		return
+	}
+
+	if err := utils.DB.Model(&models.Store{}).Where("id = ?", storeID).Updates(map[string]interface{}{
+		"app_version":         version,
+		"app_version_seen_at": time.Now(),
+	}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record app version"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "ok"})
 }
 
 func GetStore(c *gin.Context) {

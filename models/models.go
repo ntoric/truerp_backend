@@ -141,21 +141,24 @@ type User struct {
 
 // Store is a multi-tenant business unit. Operational data is scoped to OwnerUserID.
 type Store struct {
-	ID          uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	Name        string         `json:"name" gorm:"not null"`
-	Code        string         `json:"code" gorm:"uniqueIndex;not null"`
-	Description string         `json:"description"`
-	Address     string         `json:"address"`
-	City        string         `json:"city"`
-	State       string         `json:"state"`
-	Pincode     string         `json:"pincode"`
-	Phone       string         `json:"phone"`
-	Email       string         `json:"email"`
-	OwnerUserID uuid.UUID      `json:"owner_user_id" gorm:"type:uuid;not null;uniqueIndex"`
-	IsActive    bool           `json:"is_active" gorm:"default:true"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
-	DeletedAt   gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+	ID          uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	Name        string    `json:"name" gorm:"not null"`
+	Code        string    `json:"code" gorm:"uniqueIndex;not null"`
+	Description string    `json:"description"`
+	Address     string    `json:"address"`
+	City        string    `json:"city"`
+	State       string    `json:"state"`
+	Pincode     string    `json:"pincode"`
+	Phone       string    `json:"phone"`
+	Email       string    `json:"email"`
+	OwnerUserID uuid.UUID `json:"owner_user_id" gorm:"type:uuid;not null;uniqueIndex"`
+	IsActive    bool      `json:"is_active" gorm:"default:true"`
+	// Last Tauri desktop app version reported by this store's clients.
+	AppVersion       string         `json:"app_version"`
+	AppVersionSeenAt *time.Time     `json:"app_version_seen_at"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+	DeletedAt        gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type Business struct {

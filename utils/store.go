@@ -69,18 +69,20 @@ func FindStoreByOwnerUserID(db *gorm.DB, ownerUserID uuid.UUID) (models.Store, e
 
 func StorePublicJSON(store models.Store) map[string]interface{} {
 	return map[string]interface{}{
-		"id":          store.ID,
-		"name":        store.Name,
-		"code":        store.Code,
-		"description": store.Description,
-		"address":     store.Address,
-		"city":        store.City,
-		"state":       store.State,
-		"pincode":     store.Pincode,
-		"phone":       store.Phone,
-		"email":       store.Email,
-		"is_active":   store.IsActive,
-		"created_at":  store.CreatedAt,
-		"updated_at":  store.UpdatedAt,
+		"id":                  store.ID,
+		"name":                store.Name,
+		"code":                store.Code,
+		"description":         store.Description,
+		"address":             store.Address,
+		"city":                store.City,
+		"state":               store.State,
+		"pincode":             store.Pincode,
+		"phone":               store.Phone,
+		"email":               store.Email,
+		"is_active":           store.IsActive,
+		"app_version":         store.AppVersion,
+		"app_version_seen_at": store.AppVersionSeenAt,
+		"created_at":          store.CreatedAt,
+		"updated_at":          store.UpdatedAt,
 	}
 }
