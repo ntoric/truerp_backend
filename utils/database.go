@@ -126,6 +126,7 @@ func allApplicationModels() []interface{} {
 		&models.PayrollPayment{},
 		&models.StaffDeduction{},
 		&models.StaffAdvancePayment{},
+		&models.StaffExtraAmount{},
 		&models.Partner{},
 		&models.ProfitDistribution{},
 		&models.InvoiceSettings{},

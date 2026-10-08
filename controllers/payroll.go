@@ -251,6 +251,35 @@ func reversePayrollAdvanceRecovery(tx *gorm.DB, userID uuid.UUID, payroll *model
 	return nil
 }
 
+// applyPayrollExtraSettlement marks pending extra amounts as settled by the
+// payroll so they are not folded into a later payroll again.
+func applyPayrollExtraSettlement(tx *gorm.DB, extras []models.StaffExtraAmount, payrollID uuid.UUID) error {
+	for _, e := range extras {
+		if err := tx.Model(&models.StaffExtraAmount{}).
+			Where("id = ?", e.ID).
+			Updates(map[string]interface{}{
+				"status":                "settled",
+				"settled_amount":        e.Amount,
+				"settled_by_payroll_id": payrollID,
+			}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reversePayrollExtraSettlement restores extras that were settled by a payroll,
+// used when the payroll is deleted.
+func reversePayrollExtraSettlement(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll) error {
+	return tx.Model(&models.StaffExtraAmount{}).
+		Where("user_id = ? AND settled_by_payroll_id = ?", userID, payroll.ID).
+		Updates(map[string]interface{}{
+			"status":                "pending",
+			"settled_amount":        0,
+			"settled_by_payroll_id": nil,
+		}).Error
+}
+
 // reversePayrollPayment undoes every payment recorded against the payroll:
 // restores cash/bank, removes the linked expenses, reverses the GL postings
 // and deletes the payment rows. It also cleans up the legacy single
@@ -361,6 +390,12 @@ type payrollPeriodData struct {
 	PeriodDeductions    float64
 	AdvanceRecovery     float64
 	OutstandingAdvances []models.StaffAdvancePayment
+	// ExtraAdd / ExtraDeduct are pending staff extra amounts folded into the
+	// payroll: "add" raises the net (owed to staff), "deduct" lowers it
+	// (redeemed extras or dues the staff owes).
+	ExtraAdd          float64
+	ExtraDeduct       float64
+	OutstandingExtras []models.StaffExtraAmount
 }
 
 func computePayrollPeriodData(userID, staffID uuid.UUID, startDateStr, endDateStr string) payrollPeriodData {
@@ -400,6 +435,19 @@ func computePayrollPeriodData(userID, staffID uuid.UUID, startDateStr, endDateSt
 
 	for _, adv := range data.OutstandingAdvances {
 		data.AdvanceRecovery += adv.PendingAmount
+	}
+
+	// Pending extra amounts dated on or before the period end fold into this payroll.
+	utils.DB.Where("user_id = ? AND staff_id = ? AND entry_date <= ? AND status = ?",
+		userID, staffID, endDateStr, "pending").
+		Order("entry_date ASC").
+		Find(&data.OutstandingExtras)
+	for _, e := range data.OutstandingExtras {
+		if e.Direction == "add" {
+			data.ExtraAdd += e.Amount
+		} else {
+			data.ExtraDeduct += e.Amount
+		}
 	}
 
 	return data
@@ -449,7 +497,7 @@ func CalculatePayroll(c *gin.Context) {
 
 	data := computePayrollPeriodData(userID, staff.ID, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
 	calculated := payableSalary(staff.Salary, staff.SalaryType, data)
-	net := calculated - data.PeriodDeductions - data.AdvanceRecovery
+	net := calculated - data.PeriodDeductions - data.AdvanceRecovery - data.ExtraDeduct + data.ExtraAdd
 	if net < 0 {
 		net = 0
 	}
@@ -468,6 +516,9 @@ func CalculatePayroll(c *gin.Context) {
 		"period_deductions": data.PeriodDeductions,
 		"advance_recovery":  data.AdvanceRecovery,
 		"advance_count":     len(data.OutstandingAdvances),
+		"extra_add":         data.ExtraAdd,
+		"extra_deduct":      data.ExtraDeduct,
+		"extra_count":       len(data.OutstandingExtras),
 		"estimated_net":     net,
 	})
 }
@@ -546,6 +597,9 @@ func CreatePayroll(c *gin.Context) {
 	totalPeriodDeductions := periodData.PeriodDeductions
 	outstandingAdvances := periodData.OutstandingAdvances
 	totalAdvanceRecovery := periodData.AdvanceRecovery
+	outstandingExtras := periodData.OutstandingExtras
+	extraAdd := periodData.ExtraAdd
+	extraDeduct := periodData.ExtraDeduct
 
 	basicSalary := input.BasicSalary
 	if basicSalary == 0 {
@@ -554,9 +608,10 @@ func CreatePayroll(c *gin.Context) {
 
 	payableAmount := payableSalary(basicSalary, staff.SalaryType, periodData)
 
-	totalDeductions := input.Deductions + totalPeriodDeductions + totalAdvanceRecovery
+	totalDeductions := input.Deductions + totalPeriodDeductions + totalAdvanceRecovery + extraDeduct
+	totalBonus := input.Bonus + extraAdd
 
-	netSalary := payableAmount - totalDeductions + input.Bonus
+	netSalary := payableAmount - totalDeductions + totalBonus
 	if netSalary < 0 {
 		netSalary = 0
 	}
@@ -600,7 +655,7 @@ func CreatePayroll(c *gin.Context) {
 		PaidLeaveDays: paidLeaveDays,
 		WeeklyOffDays: weeklyOffDays,
 		Deductions:    totalDeductions,
-		Bonus:         input.Bonus,
+		Bonus:         totalBonus,
 		NetSalary:     netSalary,
 		PaymentMode:   paymentMode,
 		BankAccountID: input.BankAccountID,
@@ -614,6 +669,9 @@ func CreatePayroll(c *gin.Context) {
 			return err
 		}
 		if err := applyPayrollAdvanceRecovery(tx, outstandingAdvances, payroll.ID); err != nil {
+			return err
+		}
+		if err := applyPayrollExtraSettlement(tx, outstandingExtras, payroll.ID); err != nil {
 			return err
 		}
 		if _, err := recordPayrollPaymentTx(tx, userID, &payroll, staff.Name, payrollPaymentInput{
@@ -712,8 +770,21 @@ func settleStaffDuesTx(tx *gorm.DB, userID uuid.UUID, staff *models.Staff, in pa
 	for _, a := range advances {
 		advancesPending += a.PendingAmount
 	}
+	var extras []models.StaffExtraAmount
+	if err := tx.Where("user_id = ? AND staff_id = ? AND status = ?",
+		userID, staff.ID, "pending").Order("entry_date ASC").Find(&extras).Error; err != nil {
+		return 0, nil, err
+	}
+	var extrasAddPending, extrasDeductPending float64
+	for _, e := range extras {
+		if e.Direction == "add" {
+			extrasAddPending += e.Amount
+		} else {
+			extrasDeductPending += e.Amount
+		}
+	}
 
-	balance := computeStaffBalance(*staff, payrolls, attendances, advancesPending, deductions)
+	balance := computeStaffBalance(*staff, payrolls, attendances, advancesPending, deductions, extrasAddPending, extrasDeductPending)
 	if balance.Balance <= 0 {
 		return 0, nil, fmt.Errorf("no dues pending for this staff")
 	}
@@ -787,9 +858,25 @@ func settleStaffDuesTx(tx *gorm.DB, userID uuid.UUID, staff *models.Staff, in pa
 		foldAdvances = append(foldAdvances, adv)
 		foldAdvanceTotal += adv.PendingAmount
 	}
+	var foldExtras []models.StaffExtraAmount
+	var foldExtraAdd, foldExtraDeduct float64
+	for _, e := range extras {
+		if e.EntryDate.Format("2006-01-02") > payDateStr {
+			continue
+		}
+		foldExtras = append(foldExtras, e)
+		if e.Direction == "add" {
+			foldExtraAdd += e.Amount
+		} else {
+			foldExtraDeduct += e.Amount
+		}
+		if e.EntryDate.Before(settleStart) {
+			settleStart = e.EntryDate
+		}
+	}
 
 	var settlePayroll *models.Payroll
-	if len(uncoveredAtt) > 0 || foldDeductions > 0 || foldAdvanceTotal > 0 {
+	if len(uncoveredAtt) > 0 || foldDeductions > 0 || foldAdvanceTotal > 0 || len(foldExtras) > 0 {
 		var workingDays, presentDays, absentDays, halfDays, paidLeaveDays, weeklyOffDays int
 		var payableDays float64
 		for _, a := range uncoveredAtt {
@@ -808,8 +895,8 @@ func settleStaffDuesTx(tx *gorm.DB, userID uuid.UUID, staff *models.Staff, in pa
 			}
 			payableDays += payableWeight(a.Status)
 		}
-		totalDeductions := foldDeductions + foldAdvanceTotal
-		net := payableDays*staffDailyRate(*staff) - totalDeductions
+		totalDeductions := foldDeductions + foldAdvanceTotal + foldExtraDeduct
+		net := payableDays*staffDailyRate(*staff) - totalDeductions + foldExtraAdd
 		if net < 0 {
 			net = 0
 		}
@@ -830,6 +917,7 @@ func settleStaffDuesTx(tx *gorm.DB, userID uuid.UUID, staff *models.Staff, in pa
 			PaidLeaveDays: paidLeaveDays,
 			WeeklyOffDays: weeklyOffDays,
 			Deductions:    totalDeductions,
+			Bonus:         foldExtraAdd,
 			NetSalary:     net,
 			PaymentMode:   in.PaymentMode,
 			BankAccountID: in.BankAccountID,
@@ -842,6 +930,9 @@ func settleStaffDuesTx(tx *gorm.DB, userID uuid.UUID, staff *models.Staff, in pa
 			return 0, nil, err
 		}
 		if err := applyPayrollAdvanceRecovery(tx, foldAdvances, sp.ID); err != nil {
+			return 0, nil, err
+		}
+		if err := applyPayrollExtraSettlement(tx, foldExtras, sp.ID); err != nil {
 			return 0, nil, err
 		}
 		pay := net
@@ -1126,6 +1217,9 @@ func DeletePayroll(c *gin.Context) {
 		if err := reversePayrollAdvanceRecovery(tx, userID, &payroll); err != nil {
 			return err
 		}
+		if err := reversePayrollExtraSettlement(tx, userID, &payroll); err != nil {
+			return err
+		}
 		return tx.Delete(&payroll).Error
 	})
 	if err != nil {
@@ -1158,6 +1252,9 @@ func BulkDeletePayrolls(c *gin.Context) {
 				return err
 			}
 			if err := reversePayrollAdvanceRecovery(tx, userID, &payrolls[i]); err != nil {
+				return err
+			}
+			if err := reversePayrollExtraSettlement(tx, userID, &payrolls[i]); err != nil {
 				return err
 			}
 		}

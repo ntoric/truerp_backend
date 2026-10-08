@@ -30,6 +30,7 @@ func openPayrollPaymentTestDB(t *testing.T) *gorm.DB {
 		&models.Attendance{},
 		&models.StaffDeduction{},
 		&models.StaffAdvancePayment{},
+		&models.StaffExtraAmount{},
 		&models.Expense{},
 		&models.ExpenseItem{},
 		&models.CashTransaction{},
@@ -206,11 +207,11 @@ func TestPayrollPayAllDue(t *testing.T) {
 	// Three uncovered present days on Sep 10-12 → earned unpaid 3000.
 	for _, day := range []int{10, 11, 12} {
 		att := models.Attendance{
-			ID:        uuid.New(),
-			UserID:    userID,
-			StaffID:   staff.ID,
-			Date:      time.Date(2026, 9, day, 0, 0, 0, 0, time.UTC),
-			Status:    "present",
+			ID:      uuid.New(),
+			UserID:  userID,
+			StaffID: staff.ID,
+			Date:    time.Date(2026, 9, day, 0, 0, 0, 0, time.UTC),
+			Status:  "present",
 		}
 		if err := db.Create(&att).Error; err != nil {
 			t.Fatalf("create attendance: %v", err)
@@ -303,7 +304,8 @@ func TestPayrollPayAllDue(t *testing.T) {
 	db.Where("user_id = ? AND staff_id = ?", userID, staff.ID).Find(&attendances)
 	var deductions []models.StaffDeduction
 	db.Where("user_id = ? AND staff_id = ? AND status = ?", userID, staff.ID, "active").Find(&deductions)
-	bal := computeStaffBalance(staff, payrolls, attendances, pendingAdvances(userID, staff.ID), deductions)
+	extrasAdd, extrasDeduct := pendingExtras(userID, staff.ID)
+	bal := computeStaffBalance(staff, payrolls, attendances, pendingAdvances(userID, staff.ID), deductions, extrasAdd, extrasDeduct)
 	if bal.Balance != 0 {
 		t.Fatalf("expected zero balance, got %.2f", bal.Balance)
 	}

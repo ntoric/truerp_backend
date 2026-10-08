@@ -225,3 +225,48 @@ func TestStockOpeningOverride(t *testing.T) {
 		t.Fatalf("post-delete position = %v qty / %v value, want 7/350", qty, value)
 	}
 }
+
+// A daily-profit range starting after an override's base day must open with
+// the override-adjusted closing of the previous day — the first day's opening
+// is the previous day's closing, so a month boundary must never jump.
+func TestDailyStockPositionsOpeningCarriesOverride(t *testing.T) {
+	db := setupProfitLossTestDB(t)
+	userID := uuid.New()
+	productID := uuid.New()
+	outletID := uuid.New()
+
+	if err := db.Create(&models.Product{ID: productID, UserID: userID, Name: "P", PurchasePrice: 50}).Error; err != nil {
+		t.Fatalf("product: %v", err)
+	}
+	for _, e := range []models.StockEntry{
+		{ID: uuid.New(), UserID: userID, ProductID: &productID, ItemName: "P", OutletID: outletID,
+			EntryType: "opening", Quantity: 10, CostPrice: 50, ApprovalStatus: "approved", EntryDate: day(2026, 1, 1)},
+		{ID: uuid.New(), UserID: userID, ProductID: &productID, ItemName: "P", OutletID: outletID,
+			EntryType: "sale", Quantity: -3, CostPrice: 80, ApprovalStatus: "approved", EntryDate: day(2026, 1, 5)},
+	} {
+		if err := db.Create(&e).Error; err != nil {
+			t.Fatalf("entry: %v", err)
+		}
+	}
+	ensureStockSnapshots(userID)
+
+	// Override effective Jan 3 → base Jan 2, computed base value 500,
+	// delta = 4000 − 500 = 3500.
+	if err := db.Create(&models.StockOpeningOverride{
+		ID: uuid.New(), UserID: userID,
+		EffectiveDate: day(2026, 1, 3), Quantity: 100, Value: 4000, CreatedBy: userID,
+	}).Error; err != nil {
+		t.Fatalf("override: %v", err)
+	}
+
+	positions := loadDailyStockPositions(db, userID, "2026-01-04", "2026-01-06")
+	if pos := positions["2026-01-04"]; pos.Opening != 4000 || pos.Closing != 4000 {
+		t.Fatalf("jan 4 = open %v / close %v, want 4000/4000", pos.Opening, pos.Closing)
+	}
+	if pos := positions["2026-01-05"]; pos.Opening != 4000 || pos.Closing != 3850 {
+		t.Fatalf("jan 5 = open %v / close %v, want 4000/3850", pos.Opening, pos.Closing)
+	}
+	if pos := positions["2026-01-06"]; pos.Opening != 3850 || pos.Closing != 3850 {
+		t.Fatalf("jan 6 = open %v / close %v, want 3850/3850", pos.Opening, pos.Closing)
+	}
+}

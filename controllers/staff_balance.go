@@ -20,6 +20,8 @@ type staffBalance struct {
 	SalaryPaid           float64 `json:"salary_paid"`
 	AdvancesPending      float64 `json:"advances_pending"`
 	DeductionsPending    float64 `json:"deductions_pending"`
+	ExtrasAddPending     float64 `json:"extras_add_pending"`
+	ExtrasDeductPending  float64 `json:"extras_deduct_pending"`
 }
 
 // staffDailyRate mirrors payableSalary: monthly staff earn salary/30 per
@@ -69,7 +71,9 @@ func payableDaysInRange(attendances []models.Attendance, startStr, endStr string
 //   - payable salary for attendance days not covered by any payroll period.
 //   - minus advance amounts still pending recovery.
 //   - minus active deductions not yet folded into a payroll period.
-func computeStaffBalance(staff models.Staff, payrolls []models.Payroll, attendances []models.Attendance, advancesPending float64, deductions []models.StaffDeduction) staffBalance {
+//   - plus pending "add" extras owed to staff, minus pending "deduct" extras
+//     the staff owes.
+func computeStaffBalance(staff models.Staff, payrolls []models.Payroll, attendances []models.Attendance, advancesPending float64, deductions []models.StaffDeduction, extrasAddPending, extrasDeductPending float64) staffBalance {
 	var result staffBalance
 
 	coveredDates := map[string]bool{}
@@ -139,9 +143,28 @@ func computeStaffBalance(staff models.Staff, payrolls []models.Payroll, attendan
 		result.DeductionsPending += d.Amount
 	}
 
+	result.ExtrasAddPending = extrasAddPending
+	result.ExtrasDeductPending = extrasDeductPending
+
 	result.Balance = result.PayableFromPayrolls + result.EarnedUnpaid -
-		result.SalaryPaid - result.AdvancesPending - result.DeductionsPending
+		result.SalaryPaid - result.AdvancesPending - result.DeductionsPending +
+		result.ExtrasAddPending - result.ExtrasDeductPending
 	return result
+}
+
+// pendingExtras sums unsettled extra amounts for one staff member, split by
+// direction: add = owed to staff, deduct = owed by staff.
+func pendingExtras(userID, staffID uuid.UUID) (add, deduct float64) {
+	var extras []models.StaffExtraAmount
+	utils.DB.Where("user_id = ? AND staff_id = ? AND status = ?", userID, staffID, "pending").Find(&extras)
+	for _, e := range extras {
+		if e.Direction == "add" {
+			add += e.Amount
+		} else {
+			deduct += e.Amount
+		}
+	}
+	return
 }
 
 // pendingAdvances sums unrecovered advance amounts for one staff member.
@@ -187,7 +210,8 @@ func GetStaffBalance(c *gin.Context) {
 	var attendances []models.Attendance
 	utils.DB.Where("user_id = ? AND staff_id = ?", userID, staffID).Find(&attendances)
 
-	result := computeStaffBalance(staff, payrolls, attendances, pendingAdvances(userID, staffID), activeDeductions(userID, staffID))
+	extrasAdd, extrasDeduct := pendingExtras(userID, staffID)
+	result := computeStaffBalance(staff, payrolls, attendances, pendingAdvances(userID, staffID), activeDeductions(userID, staffID), extrasAdd, extrasDeduct)
 
 	c.JSON(http.StatusOK, gin.H{
 		"staff_id":               staffID,
@@ -198,6 +222,8 @@ func GetStaffBalance(c *gin.Context) {
 		"salary_paid":            result.SalaryPaid,
 		"advances_pending":       result.AdvancesPending,
 		"deductions_pending":     result.DeductionsPending,
+		"extras_add_pending":     result.ExtrasAddPending,
+		"extras_deduct_pending":  result.ExtrasDeductPending,
 	})
 }
 
@@ -239,6 +265,18 @@ func GetStaffBalances(c *gin.Context) {
 		deductionsByStaff[d.StaffID] = append(deductionsByStaff[d.StaffID], d)
 	}
 
+	var extras []models.StaffExtraAmount
+	utils.DB.Where("user_id = ? AND status = ?", userID, "pending").Find(&extras)
+	extrasAddByStaff := map[uuid.UUID]float64{}
+	extrasDeductByStaff := map[uuid.UUID]float64{}
+	for _, e := range extras {
+		if e.Direction == "add" {
+			extrasAddByStaff[e.StaffID] += e.Amount
+		} else {
+			extrasDeductByStaff[e.StaffID] += e.Amount
+		}
+	}
+
 	balances := gin.H{}
 	for _, s := range staffs {
 		result := computeStaffBalance(
@@ -247,6 +285,8 @@ func GetStaffBalances(c *gin.Context) {
 			attendanceByStaff[s.ID],
 			advancesByStaff[s.ID],
 			deductionsByStaff[s.ID],
+			extrasAddByStaff[s.ID],
+			extrasDeductByStaff[s.ID],
 		)
 		balances[s.ID.String()] = result.Balance
 	}

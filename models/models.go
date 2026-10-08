@@ -1533,6 +1533,40 @@ type StaffAdvancePayment struct {
 	DeletedAt             gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
+// StaffExtraAmount is an extra amount tracked against a staff member beyond
+// their regular salary. Direction "deduct" is an extra payout redeemed by the
+// staff (like an advance draw) that stays due until a payroll deducts it;
+// direction "add" is an extra amount owed to the staff (incentive,
+// reimbursement, etc.) that stays due until a payroll adds it. An entry may
+// also be paid out immediately via the redeem endpoint instead of waiting for
+// payroll — "deduct" entries still stay pending for salary recovery, while
+// "add" entries are settled outright by the payout.
+type StaffExtraAmount struct {
+	ID                 uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID             uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	StaffID            uuid.UUID      `json:"staff_id" gorm:"type:uuid;not null;index"`
+	Staff              Staff          `json:"staff,omitempty" gorm:"foreignKey:StaffID"`
+	ExtraNumber        string         `json:"extra_number" gorm:"not null;index"`
+	Direction          string         `json:"direction" gorm:"not null"` // add, deduct
+	Amount             float64        `json:"amount" gorm:"default:0"`
+	Reason             string         `json:"reason"`
+	EntryDate          time.Time      `json:"entry_date" gorm:"not null"`
+	IsRedeemed         bool           `json:"is_redeemed" gorm:"default:false"`
+	RedeemedAt         *time.Time     `json:"redeemed_at,omitempty"`
+	PaymentMode        string         `json:"payment_mode"`                                     // cash, bank_transfer, upi, cheque
+	BankAccountID      *uuid.UUID     `json:"bank_account_id,omitempty" gorm:"type:uuid;index"` // nil = cash in-hand
+	BankAccount        *BankAccount   `json:"bank_account,omitempty" gorm:"foreignKey:BankAccountID"`
+	ExpenseID          *uuid.UUID     `json:"expense_id,omitempty" gorm:"type:uuid;index"`
+	Status             string         `json:"status" gorm:"default:'pending'"` // pending, settled, cancelled
+	SettledByPayrollID *uuid.UUID     `json:"settled_by_payroll_id,omitempty" gorm:"type:uuid;index"`
+	SettledAmount      float64        `json:"settled_amount" gorm:"default:0"`
+	Reference          string         `json:"reference"`
+	Notes              string         `json:"notes"`
+	CreatedAt          time.Time      `json:"created_at"`
+	UpdatedAt          time.Time      `json:"updated_at"`
+	DeletedAt          gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
 type InvoiceSettings struct {
 	ID              uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`

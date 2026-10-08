@@ -254,8 +254,16 @@ func loadDailyStockPositions(db *gorm.DB, userID uuid.UUID, start, end string) m
 		}
 	}
 
+	// Seed the opening delta with overrides whose base day is on or before
+	// prevDay: the first day's opening must equal the previous day's
+	// override-adjusted closing so the position carries across range
+	// boundaries (e.g. Oct 1 opening = Sep 30 closing).
 	di := 0
 	var deltaPrev float64
+	for di < len(deltas) && deltas[di].base <= prevDay {
+		deltaPrev = deltas[di].delta
+		di++
+	}
 	for d := startT; !d.After(endT); d = d.AddDate(0, 0, 1) {
 		day := d.Format("2006-01-02")
 		delta := deltaPrev

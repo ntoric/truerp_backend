@@ -894,6 +894,7 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 		if err := wipeStoreScopeModels(tx, ownerID,
 			&models.StaffAdvancePayment{},
 			&models.StaffDeduction{},
+			&models.StaffExtraAmount{},
 			&models.PayrollPayment{},
 			&models.Payroll{},
 			&models.Attendance{},
@@ -905,6 +906,7 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 			{&models.Payroll{}, "staff_id", "payroll records", "Staff & payroll"},
 			{&models.StaffDeduction{}, "staff_id", "staff deductions", "Staff & payroll"},
 			{&models.StaffAdvancePayment{}, "staff_id", "staff advance payments", "Staff & payroll"},
+			{&models.StaffExtraAmount{}, "staff_id", "staff extra amounts", "Staff & payroll"},
 		}); err != nil {
 			return err
 		}

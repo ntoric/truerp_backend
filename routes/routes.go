@@ -704,6 +704,15 @@ func SetupRoutes(r *gin.Engine) {
 		staff.PUT("/advances/:id", controllers.UpdateStaffAdvancePayment)
 		staff.POST("/advances/:id/recover", controllers.RecoverStaffAdvance)
 		staff.DELETE("/advances/:id", controllers.DeleteStaffAdvancePayment)
+
+		// Staff Extra Amounts routes
+		staff.GET("/extras", controllers.GetStaffExtraAmounts)
+		staff.GET("/extras/next-number", controllers.GetNextExtraNumber)
+		staff.POST("/extras", controllers.CreateStaffExtraAmount)
+		staff.GET("/extras/:id", controllers.GetStaffExtraAmount)
+		staff.PUT("/extras/:id", controllers.UpdateStaffExtraAmount)
+		staff.POST("/extras/:id/redeem", controllers.RedeemStaffExtra)
+		staff.DELETE("/extras/:id", controllers.DeleteStaffExtraAmount)
 	}
 
 	// Attendance routes
