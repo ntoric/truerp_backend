@@ -665,6 +665,13 @@ func CreatePurchaseBill(c *gin.Context) {
 				return err
 			}
 
+			// A bill increases what we owe the party: negative delta (payable).
+			// The linked payment out below adds back the paid portion, leaving
+			// the party balance at -(total - paid) = -balance_due.
+			if err := adjustPartyBalance(tx, userID, bill.PartyID, -bill.TotalAmount); err != nil {
+				return err
+			}
+
 			// Full invoice amount is purchase expense (Dr Purchases / Cr AP).
 			// Paid amount auto-creates Payment Out and reduces AP; unpaid remains Accounts Payable.
 			if bill.PaidAmount > 0 {
@@ -977,6 +984,8 @@ func UpdatePurchaseBill(c *gin.Context) {
 
 	previousBillNumber := bill.BillNumber
 	previousPartyID := bill.PartyID
+	previousStatus := bill.Status
+	previousTotal := bill.TotalAmount
 
 	warehouseID := input.WarehouseID
 	if warehouseID == nil || *warehouseID == uuid.Nil {
@@ -1152,6 +1161,41 @@ func UpdatePurchaseBill(c *gin.Context) {
 			}
 		}
 
+		// Keep the GL journal in sync with the edited bill: reverse the old
+		// Dr Purchases / Cr AP posting and re-post with the new totals.
+		if err := reverseAccountingByRef(tx, userID, "purchase_bill", bill.ID); err != nil {
+			return err
+		}
+		if bill.Status != "draft" {
+			if err := postPurchaseBillAccounting(tx, userID, &bill); err != nil {
+				return err
+			}
+		}
+
+		// A non-draft bill contributes -TotalAmount to the party balance
+		// (payable). Delta-adjust when the party is unchanged; move the whole
+		// effect when the bill was reassigned to a different party.
+		oldDocDelta := 0.0
+		if previousStatus != "draft" {
+			oldDocDelta = -previousTotal
+		}
+		newDocDelta := 0.0
+		if bill.Status != "draft" {
+			newDocDelta = -bill.TotalAmount
+		}
+		if previousPartyID == bill.PartyID {
+			if err := adjustPartyBalance(tx, userID, bill.PartyID, newDocDelta-oldDocDelta); err != nil {
+				return err
+			}
+		} else {
+			if err := adjustPartyBalance(tx, userID, previousPartyID, -oldDocDelta); err != nil {
+				return err
+			}
+			if err := adjustPartyBalance(tx, userID, bill.PartyID, newDocDelta); err != nil {
+				return err
+			}
+		}
+
 		if err := createPendingPurchaseStockEntriesTx(tx, userID, &bill); err != nil {
 			return err
 		}
@@ -1211,12 +1255,35 @@ func DeletePurchaseBill(c *gin.Context) {
 		return
 	}
 
-	if err := removePurchaseStockEntries(userID, bill.ID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove linked stock entries"})
+	if err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		if err := removePurchaseStockEntriesTx(tx, userID, bill.ID); err != nil {
+			return err
+		}
+
+		// Restore cash/bank + AP and party balance for any payments made
+		// against this bill (partial bills can carry payment outs).
+		if err := reverseLinkedPurchasePaymentOuts(tx, userID, &bill); err != nil {
+			return err
+		}
+
+		// Undo the Dr Purchases / Cr AP journal posted at creation.
+		if err := reverseAccountingByRef(tx, userID, "purchase_bill", bill.ID); err != nil {
+			return err
+		}
+
+		// Restore the payable a non-draft bill had added to the party.
+		if bill.Status != "draft" {
+			if err := adjustPartyBalance(tx, userID, bill.PartyID, bill.TotalAmount); err != nil {
+				return err
+			}
+		}
+
+		return tx.Delete(&bill).Error
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete bill"})
 		return
 	}
 
-	utils.DB.Delete(&bill)
 	c.JSON(http.StatusOK, gin.H{"message": "Bill deleted"})
 }
 
