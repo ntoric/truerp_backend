@@ -424,6 +424,34 @@ func adjustBankAccountBalance(tx *gorm.DB, userID uuid.UUID, accountID *uuid.UUI
 	return tx.Save(&account).Error
 }
 
+// refundSettlesInMoney reports whether a return's refund mode moves cash/bank
+// immediately instead of staying as a credit on the party balance. Empty and
+// unknown modes stay on the credit path, matching pre-refund-mode records.
+func refundSettlesInMoney(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "cash", "bank", "upi", "card", "cheque", "bank_transfer", "original_payment":
+		return true
+	}
+	return false
+}
+
+// resolveRefundBankAccount picks the account a money-settled refund moves
+// through. original_payment follows the linked document's settlement
+// account/mode; other money modes use the payment-method mapping (or the
+// primary bank). Nil means cash in hand.
+func resolveRefundBankAccount(userID uuid.UUID, refundMode, linkedPaymentMode string, linkedAccountID *uuid.UUID) *uuid.UUID {
+	mode := normalizePaymentMethod(refundMode)
+	if mode == "original_payment" {
+		id, err := resolveBankAccountForPaymentMode(userID, linkedPaymentMode, linkedAccountID)
+		if err == nil {
+			return id
+		}
+		mode = "bank_transfer"
+	}
+	id, _ := resolveBankAccountForPaymentMode(userID, mode, nil)
+	return id
+}
+
 func adjustPartyBalance(tx *gorm.DB, userID, partyID uuid.UUID, delta float64) error {
 	if delta == 0 {
 		return nil
