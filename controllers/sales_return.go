@@ -75,7 +75,7 @@ func GetSalesReturn(c *gin.Context) {
 	id := c.Param("id")
 
 	var salesReturn models.SalesReturn
-	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).Preload("Party").Preload("Invoice").Preload("Items").First(&salesReturn).Error; err != nil {
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).Preload("Party").Preload("Invoice").Preload("SettleInvoice").Preload("Items").First(&salesReturn).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Sales return not found"})
 		return
 	}
@@ -88,14 +88,15 @@ func CreateSalesReturn(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		PartyID        uuid.UUID                 `json:"party_id" binding:"required"`
-		InvoiceID      uuid.UUID                 `json:"invoice_id"`
-		Date           time.Time                 `json:"date" binding:"required"`
-		Reason         string                    `json:"reason"`
-		RefundMode     string                    `json:"refund_mode"`
-		Notes          string                    `json:"notes"`
-		DeductionItems []models.AdditionalCharge `json:"deduction_items"`
-		Items          []struct {
+		PartyID         uuid.UUID                 `json:"party_id" binding:"required"`
+		InvoiceID       uuid.UUID                 `json:"invoice_id"`
+		SettleInvoiceID *uuid.UUID                `json:"settle_invoice_id"`
+		Date            time.Time                 `json:"date" binding:"required"`
+		Reason          string                    `json:"reason"`
+		RefundMode      string                    `json:"refund_mode"`
+		Notes           string                    `json:"notes"`
+		DeductionItems  []models.AdditionalCharge `json:"deduction_items"`
+		Items           []struct {
 			InvoiceItemID uuid.UUID  `json:"invoice_item_id"`
 			ProductID     *uuid.UUID `json:"product_id"`
 			Description   string     `json:"description"`
@@ -114,17 +115,33 @@ func CreateSalesReturn(c *gin.Context) {
 	var count int64
 	utils.DB.Model(&models.SalesReturn{}).Where("user_id = ?", userID).Count(&count)
 
+	// The settle invoice must exist and belong to the same party — the
+	// credit path reduces this party's balance while settling that
+	// invoice's outstanding, so a cross-party link would corrupt both.
+	if input.SettleInvoiceID != nil && *input.SettleInvoiceID != uuid.Nil {
+		var settleInvoice models.Invoice
+		if err := utils.DB.Where("user_id = ? AND id = ?", userID, *input.SettleInvoiceID).First(&settleInvoice).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid settle invoice"})
+			return
+		}
+		if settleInvoice.PartyID != input.PartyID {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Settle invoice does not belong to the selected party"})
+			return
+		}
+	}
+
 	salesReturn := models.SalesReturn{
-		ID:           uuid.New(),
-		UserID:       userID,
-		PartyID:      input.PartyID,
-		InvoiceID:    input.InvoiceID,
-		ReturnNumber: fmt.Sprintf("SR-%04d", count+1),
-		Date:         input.Date,
-		Status:       "draft",
-		Reason:       input.Reason,
-		RefundMode:   input.RefundMode,
-		Notes:        input.Notes,
+		ID:              uuid.New(),
+		UserID:          userID,
+		PartyID:         input.PartyID,
+		InvoiceID:       input.InvoiceID,
+		SettleInvoiceID: input.SettleInvoiceID,
+		ReturnNumber:    fmt.Sprintf("SR-%04d", count+1),
+		Date:            input.Date,
+		Status:          "draft",
+		Reason:          input.Reason,
+		RefundMode:      input.RefundMode,
+		Notes:           input.Notes,
 	}
 
 	var totalAmount float64
@@ -217,16 +234,31 @@ func UpdateSalesReturn(c *gin.Context) {
 	}
 
 	var input struct {
-		Date           time.Time                 `json:"date"`
-		Reason         string                    `json:"reason"`
-		RefundMode     string                    `json:"refund_mode"`
-		Notes          string                    `json:"notes"`
-		DeductionItems []models.AdditionalCharge `json:"deduction_items"`
+		Date            time.Time                 `json:"date"`
+		Reason          string                    `json:"reason"`
+		RefundMode      string                    `json:"refund_mode"`
+		Notes           string                    `json:"notes"`
+		DeductionItems  []models.AdditionalCharge `json:"deduction_items"`
+		SettleInvoiceID *uuid.UUID                `json:"settle_invoice_id"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	if input.SettleInvoiceID != nil && *input.SettleInvoiceID != uuid.Nil {
+		var settleInvoice models.Invoice
+		if err := utils.DB.Where("user_id = ? AND id = ?", userID, *input.SettleInvoiceID).First(&settleInvoice).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid settle invoice"})
+			return
+		}
+		if settleInvoice.PartyID != salesReturn.PartyID {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Settle invoice does not belong to the selected party"})
+			return
+		}
+	} else {
+		input.SettleInvoiceID = nil
 	}
 
 	deductionItems, err := normalizeDeductionItems(input.DeductionItems)
@@ -244,11 +276,12 @@ func UpdateSalesReturn(c *gin.Context) {
 	salesReturn.Reason = input.Reason
 	salesReturn.RefundMode = input.RefundMode
 	salesReturn.Notes = input.Notes
+	salesReturn.SettleInvoiceID = input.SettleInvoiceID
 	salesReturn.DeductionItems = deductionItems
 	salesReturn.DeductionTotal = deductionTotal
 
 	if err := utils.DB.Model(&salesReturn).
-		Select("date", "reason", "refund_mode", "notes", "deduction_items", "deduction_total").
+		Select("date", "reason", "refund_mode", "notes", "settle_invoice_id", "deduction_items", "deduction_total").
 		Updates(&salesReturn).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update sales return"})
 		return
@@ -352,6 +385,17 @@ func ProcessSalesReturn(c *gin.Context) {
 				linkedInvoice = &invoice
 			}
 		}
+		// The credit applies to SettleInvoiceID when set (e.g. an exchange
+		// where the returned item's value pays toward a new invoice),
+		// otherwise to the source invoice as before.
+		settleInvoice := linkedInvoice
+		if salesReturn.SettleInvoiceID != nil && *salesReturn.SettleInvoiceID != uuid.Nil {
+			settleInvoice = nil
+			var invoice models.Invoice
+			if err := utils.DB.Where("user_id = ? AND id = ?", userID, *salesReturn.SettleInvoiceID).First(&invoice).Error; err == nil {
+				settleInvoice = &invoice
+			}
+		}
 		if refundSettlesInMoney(salesReturn.RefundMode) {
 			var linkedMode string
 			var linkedAccountID *uuid.UUID
@@ -367,7 +411,7 @@ func ProcessSalesReturn(c *gin.Context) {
 			}
 		} else {
 			adjustPartyBalance(utils.DB, userID, salesReturn.PartyID, -salesReturn.RefundAmount)
-			settleInvoiceWithReturn(linkedInvoice, salesReturn.RefundAmount)
+			settleInvoiceWithReturn(settleInvoice, salesReturn.RefundAmount)
 			if err := issueCreditNoteForReturn(userID, &salesReturn); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create credit note"})
 				return
