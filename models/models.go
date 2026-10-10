@@ -1104,12 +1104,17 @@ type BankReconciliation struct {
 }
 
 type CreditNote struct {
-	ID               uuid.UUID        `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID           uuid.UUID        `json:"user_id" gorm:"type:uuid;not null;index"`
-	InvoiceID        uuid.UUID        `json:"invoice_id" gorm:"type:uuid"`
-	Invoice          *Invoice         `json:"invoice,omitempty" gorm:"foreignKey:InvoiceID"`
-	PartyID          uuid.UUID        `json:"party_id" gorm:"type:uuid;not null"`
-	Party            Party            `json:"party,omitempty" gorm:"foreignKey:PartyID"`
+	ID        uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID    uuid.UUID `json:"user_id" gorm:"type:uuid;not null;index"`
+	InvoiceID uuid.UUID `json:"invoice_id" gorm:"type:uuid"`
+	Invoice   *Invoice  `json:"invoice,omitempty" gorm:"foreignKey:InvoiceID"`
+	PartyID   uuid.UUID `json:"party_id" gorm:"type:uuid;not null"`
+	Party     Party     `json:"party,omitempty" gorm:"foreignKey:PartyID"`
+	// SalesReturnID marks credit notes issued automatically by a processed
+	// sales return. Reports that sum sales returns must exclude these to
+	// avoid counting the same return twice.
+	SalesReturnID    *uuid.UUID       `json:"sales_return_id,omitempty" gorm:"type:uuid;index"`
+	SalesReturn      *SalesReturn     `json:"sales_return,omitempty" gorm:"foreignKey:SalesReturnID"`
 	CreditNoteNumber string           `json:"credit_note_number" gorm:"not null;index"`
 	Reason           string           `json:"reason"`
 	TotalAmount      float64          `json:"total_amount" gorm:"default:0"`
@@ -1137,22 +1142,25 @@ type CreditNoteItem struct {
 }
 
 type DebitNote struct {
-	ID              uuid.UUID       `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID          uuid.UUID       `json:"user_id" gorm:"type:uuid;not null;index"`
-	PurchaseBillID  uuid.UUID       `json:"purchase_bill_id" gorm:"type:uuid"`
-	PurchaseBill    *PurchaseBill   `json:"purchase_bill,omitempty" gorm:"foreignKey:PurchaseBillID"`
-	PartyID         uuid.UUID       `json:"party_id" gorm:"type:uuid;not null"`
-	Party           Party           `json:"party,omitempty" gorm:"foreignKey:PartyID"`
-	DebitNoteNumber string          `json:"debit_note_number" gorm:"not null;index"`
-	Reason          string          `json:"reason"`
-	TotalAmount     float64         `json:"total_amount" gorm:"default:0"`
-	RefundMode      string          `json:"refund_mode"`                   // cash, original_payment, debit_note
-	Status          string          `json:"status" gorm:"default:'draft'"` // draft, issued
-	Date            time.Time       `json:"date" gorm:"not null"`
-	Items           []DebitNoteItem `json:"items" gorm:"foreignKey:DebitNoteID;constraint:OnDelete:CASCADE;"`
-	CreatedAt       time.Time       `json:"created_at"`
-	UpdatedAt       time.Time       `json:"updated_at"`
-	DeletedAt       gorm.DeletedAt  `json:"deleted_at,omitempty" gorm:"index"`
+	ID             uuid.UUID     `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID         uuid.UUID     `json:"user_id" gorm:"type:uuid;not null;index"`
+	PurchaseBillID uuid.UUID     `json:"purchase_bill_id" gorm:"type:uuid"`
+	PurchaseBill   *PurchaseBill `json:"purchase_bill,omitempty" gorm:"foreignKey:PurchaseBillID"`
+	PartyID        uuid.UUID     `json:"party_id" gorm:"type:uuid;not null"`
+	Party          Party         `json:"party,omitempty" gorm:"foreignKey:PartyID"`
+	// PurchaseReturnID marks debit notes issued automatically by a
+	// processed purchase return, mirroring CreditNote.SalesReturnID.
+	PurchaseReturnID *uuid.UUID      `json:"purchase_return_id,omitempty" gorm:"type:uuid;index"`
+	DebitNoteNumber  string          `json:"debit_note_number" gorm:"not null;index"`
+	Reason           string          `json:"reason"`
+	TotalAmount      float64         `json:"total_amount" gorm:"default:0"`
+	RefundMode       string          `json:"refund_mode"`                   // cash, original_payment, debit_note
+	Status           string          `json:"status" gorm:"default:'draft'"` // draft, issued
+	Date             time.Time       `json:"date" gorm:"not null"`
+	Items            []DebitNoteItem `json:"items" gorm:"foreignKey:DebitNoteID;constraint:OnDelete:CASCADE;"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+	DeletedAt        gorm.DeletedAt  `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type DebitNoteItem struct {

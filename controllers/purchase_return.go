@@ -266,16 +266,17 @@ func issueDebitNoteForReturn(userID uuid.UUID, purchaseReturn *models.PurchaseRe
 	}
 
 	debitNote := models.DebitNote{
-		ID:              uuid.New(),
-		UserID:          userID,
-		PurchaseBillID:  purchaseReturn.PurchaseBillID,
-		PartyID:         purchaseReturn.PartyID,
-		DebitNoteNumber: fmt.Sprintf("DN-%04d", count+1),
-		Date:            purchaseReturn.Date,
-		Status:          "issued",
-		Reason:          reason,
-		RefundMode:      "debit_note",
-		TotalAmount:     purchaseReturn.Amount,
+		ID:               uuid.New(),
+		UserID:           userID,
+		PurchaseBillID:   purchaseReturn.PurchaseBillID,
+		PartyID:          purchaseReturn.PartyID,
+		PurchaseReturnID: &purchaseReturn.ID,
+		DebitNoteNumber:  fmt.Sprintf("DN-%04d", count+1),
+		Date:             purchaseReturn.Date,
+		Status:           "issued",
+		Reason:           reason,
+		RefundMode:       "debit_note",
+		TotalAmount:      purchaseReturn.Amount,
 	}
 	for _, item := range purchaseReturn.Items {
 		debitNote.Items = append(debitNote.Items, models.DebitNoteItem{

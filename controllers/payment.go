@@ -169,9 +169,10 @@ func CreatePayment(c *gin.Context) {
 	}
 
 	// Resolve the destination account up front. Initial-investment payments
-	// settle against owner's equity and never touch cash or bank.
+	// settle against owner's equity and never touch cash or bank; credit-note
+	// settlements move no money at all.
 	var accountID *uuid.UUID
-	if !isInitialInvestmentPayment(payment.Mode) && netAmount > 0 {
+	if !isInitialInvestmentPayment(payment.Mode) && !isCreditSettlementPayment(payment.Mode) && netAmount > 0 {
 		resolved, err := resolveBankAccountForPaymentMode(userID, payment.Mode, nil)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account for payment method"})
@@ -185,13 +186,15 @@ func CreatePayment(c *gin.Context) {
 			return err
 		}
 
-		if err := postStandalonePaymentInAccounting(tx, userID, &payment, netAmount); err != nil {
-			return err
+		if !isCreditSettlementPayment(payment.Mode) {
+			if err := postStandalonePaymentInAccounting(tx, userID, &payment, netAmount); err != nil {
+				return err
+			}
 		}
 
 		// Record the cash/bank movement so the payment in shows in Cash &
 		// Bank.
-		if !isInitialInvestmentPayment(payment.Mode) && netAmount > 0 {
+		if !isInitialInvestmentPayment(payment.Mode) && !isCreditSettlementPayment(payment.Mode) && netAmount > 0 {
 			cashRef := paymentNumber
 			desc := fmt.Sprintf("Payment in %s", paymentNumber)
 			if linkedInvoice.ID != uuid.Nil {

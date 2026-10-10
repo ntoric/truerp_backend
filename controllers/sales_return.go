@@ -411,11 +411,13 @@ func ProcessSalesReturn(c *gin.Context) {
 			}
 		} else {
 			adjustPartyBalance(utils.DB, userID, salesReturn.PartyID, -salesReturn.RefundAmount)
-			settleInvoiceWithReturn(settleInvoice, salesReturn.RefundAmount)
-			if err := issueCreditNoteForReturn(userID, &salesReturn); err != nil {
+			creditNote, err := issueCreditNoteForReturn(userID, &salesReturn)
+			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create credit note"})
 				return
 			}
+			covered := settleInvoiceWithReturn(settleInvoice, salesReturn.RefundAmount)
+			recordCreditSettlePayment(userID, &salesReturn, settleInvoice, creditNote, covered)
 		}
 	}
 
@@ -427,10 +429,11 @@ func ProcessSalesReturn(c *gin.Context) {
 // note is created already issued because the balance and invoice effects
 // are applied by the caller; each withheld deduction is added as a
 // negative line so the items reconcile with the net credited amount.
-func issueCreditNoteForReturn(userID uuid.UUID, salesReturn *models.SalesReturn) error {
+// Returns the created note so callers can reference its number.
+func issueCreditNoteForReturn(userID uuid.UUID, salesReturn *models.SalesReturn) (*models.CreditNote, error) {
 	var count int64
 	if err := utils.DB.Model(&models.CreditNote{}).Where("user_id = ?", userID).Count(&count).Error; err != nil {
-		return err
+		return nil, err
 	}
 
 	reason := fmt.Sprintf("Sales return %s", salesReturn.ReturnNumber)
@@ -443,6 +446,7 @@ func issueCreditNoteForReturn(userID uuid.UUID, salesReturn *models.SalesReturn)
 		UserID:           userID,
 		InvoiceID:        salesReturn.InvoiceID,
 		PartyID:          salesReturn.PartyID,
+		SalesReturnID:    &salesReturn.ID,
 		CreditNoteNumber: fmt.Sprintf("CN-%04d", count+1),
 		Date:             salesReturn.Date,
 		Status:           "issued",
@@ -478,21 +482,55 @@ func issueCreditNoteForReturn(userID uuid.UUID, salesReturn *models.SalesReturn)
 	// Omit InvoiceID when the return is not linked to an invoice so NULL is
 	// written — a zero UUID would violate the credit_notes invoice FK.
 	if salesReturn.InvoiceID == uuid.Nil {
-		return utils.DB.Omit("InvoiceID", "Invoice").Create(&creditNote).Error
+		return &creditNote, utils.DB.Omit("InvoiceID", "Invoice").Create(&creditNote).Error
 	}
-	return utils.DB.Create(&creditNote).Error
+	return &creditNote, utils.DB.Create(&creditNote).Error
+}
+
+// recordCreditSettlePayment writes a non-cash payment-in (mode
+// "credit_note") for the portion of a return's credit that settled a
+// sales invoice. It records no cash/bank movement and no journal — the
+// credit was already applied to the party balance — it exists so the
+// invoice's payment trail and derived payment splits show the credit leg
+// ("Cash + Credit Note") instead of silently absorbing it into
+// amount_paid, which payment resyncs would otherwise convert to real
+// cash/bank transactions.
+func recordCreditSettlePayment(userID uuid.UUID, salesReturn *models.SalesReturn, settleInvoice *models.Invoice, creditNote *models.CreditNote, covered float64) {
+	if covered <= 0 || settleInvoice == nil {
+		return
+	}
+	notes := fmt.Sprintf("Credit note applied from sales return %s", salesReturn.ReturnNumber)
+	if creditNote != nil && creditNote.CreditNoteNumber != "" {
+		notes = fmt.Sprintf("Credit note %s applied from sales return %s", creditNote.CreditNoteNumber, salesReturn.ReturnNumber)
+	}
+	payment := models.Payment{
+		ID:              uuid.New(),
+		UserID:          userID,
+		InvoiceID:       &settleInvoice.ID,
+		PartyID:         salesReturn.PartyID,
+		AmountReceived:  covered,
+		PaymentInNumber: allocateUniquePaymentInNumber(utils.DB, userID, ""),
+		Mode:            "credit_note",
+		Date:            salesReturn.Date,
+		Reference:       settleInvoice.InvoiceNumber,
+		Notes:           notes,
+	}
+	if err := utils.DB.Create(&payment).Error; err != nil {
+		fmt.Printf("[DEBUG] recordCreditSettlePayment - create payment error: %v\n", err)
+	}
 }
 
 // settleInvoiceWithReturn applies a credit-settled return against the linked
 // invoice's outstanding amount. The covered share lands on amount_paid since
-// outstanding is derived as total - amount_paid everywhere else.
-func settleInvoiceWithReturn(invoice *models.Invoice, amount float64) {
+// outstanding is derived as total - amount_paid everywhere else. Returns the
+// amount actually covered.
+func settleInvoiceWithReturn(invoice *models.Invoice, amount float64) float64 {
 	if invoice == nil || amount <= 0 {
-		return
+		return 0
 	}
 	outstanding := invoice.TotalAmount - invoice.AmountPaid
 	if outstanding <= 0 {
-		return
+		return 0
 	}
 	covered := amount
 	if covered > outstanding {
@@ -503,6 +541,7 @@ func settleInvoiceWithReturn(invoice *models.Invoice, amount float64) {
 		"amount_paid": newPaid,
 		"status":      invoiceStatusForPaidAmount(*invoice, newPaid),
 	})
+	return covered
 }
 
 func DeleteSalesReturn(c *gin.Context) {

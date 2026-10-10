@@ -428,7 +428,11 @@ func CreateInvoice(c *gin.Context) {
 		if invoice.IsPOS {
 			notes = fmt.Sprintf("Auto-created from POS sale %s", invoice.InvoiceNumber)
 		}
-		if err := createLinkedSalePaymentIn(utils.DB, userID, &invoice, invoice.AmountPaid, invoice.Date, notes); err != nil {
+		// Wrap in a transaction so a failure mid-write can't leave a
+		// payment-in row without its matching cash/bank transaction.
+		if err := utils.DB.Transaction(func(tx *gorm.DB) error {
+			return createLinkedSalePaymentIn(tx, userID, &invoice, invoice.AmountPaid, invoice.Date, notes)
+		}); err != nil {
 			fmt.Printf("[DEBUG] CreateInvoice - payment in error: %v\n", err)
 		}
 	}
@@ -747,7 +751,9 @@ func DeleteInvoice(c *gin.Context) {
 	}
 
 	var linkedSalesReturns int64
-	utils.DB.Model(&models.SalesReturn{}).Where("user_id = ? AND invoice_id = ?", userID, invoice.ID).Count(&linkedSalesReturns)
+	utils.DB.Model(&models.SalesReturn{}).
+		Where("user_id = ? AND (invoice_id = ? OR settle_invoice_id = ?)", userID, invoice.ID, invoice.ID).
+		Count(&linkedSalesReturns)
 	if linkedSalesReturns > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot delete invoice with linked sales returns"})
 		return

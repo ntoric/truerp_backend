@@ -48,6 +48,10 @@ func computeProductProfitForRange(userID uuid.UUID, startDate, endDate string) f
 	utils.DB.Raw(returnsQuery, userID, startDate, endDate).Scan(&returnsProfit)
 
 	var creditNoteProfit float64
+	// Credit notes issued by a processed sales return carry the same items
+	// as that return — including them would reverse the margin twice.
+	// (reason LIKE fallback covers notes issued before sales_return_id
+	// existed.)
 	creditQuery := `
 		SELECT COALESCE(SUM(
 			(cni.quantity * cni.unit_price)
@@ -59,6 +63,7 @@ func computeProductProfitForRange(userID uuid.UUID, startDate, endDate string) f
 		LEFT JOIN products p ON p.id = ii.product_id
 		WHERE cn.user_id = ? AND DATE(cn.date) >= ? AND DATE(cn.date) <= ?
 			AND cn.status != 'cancelled' AND cn.deleted_at IS NULL
+			AND cn.sales_return_id IS NULL AND cn.reason NOT LIKE 'Sales return %'
 	`
 	utils.DB.Raw(creditQuery, userID, startDate, endDate).Scan(&creditNoteProfit)
 
@@ -179,7 +184,9 @@ func loadReportForRange(userID uuid.UUID, startDate, endDate string) (models.Dai
 	aggregate(&models.CreditNote{}, "date", "total_amount", "status != 'cancelled'", &report.CreditNotes)
 	aggregate(&models.DebitNote{}, "date", "total_amount", "status != 'cancelled'", &report.DebitNotes)
 	aggregate(&models.Expense{}, "date", "amount", "", &report.Expenses)
-	aggregate(&models.Payment{}, "date", "amount_received", "", &report.PaymentsIn)
+	// credit_note payments settle invoices with return credit — no money
+	// was received, so they stay out of Payments Received / net cash flow.
+	aggregate(&models.Payment{}, "date", "amount_received", "COALESCE(LOWER(TRIM(mode)), '') != 'credit_note'", &report.PaymentsIn)
 	aggregate(&models.PaymentOut{}, "date", "amount_paid", "", &report.PaymentsOut)
 	aggregate(&models.SalesReturn{}, "date", "amount", "status != 'cancelled'", &report.SalesReturns)
 	aggregate(&models.PurchaseReturn{}, "date", "amount", "status != 'cancelled'", &report.PurchaseReturns)
@@ -204,9 +211,26 @@ func loadReportForRange(userID uuid.UUID, startDate, endDate string) (models.Dai
 
 	report.NetCashFlow = report.PaymentsIn.TotalAmount - report.PaymentsOut.TotalAmount - report.Expenses.TotalAmount - report.ProfitDistributions.TotalAmount
 
+	// Period profit counts each revenue reversal once:
+	// - net sales returns (amount minus withheld deductions — the withheld
+	//   part is retained income, not lost revenue), and
+	// - standalone credit notes only. Credit notes issued by a processed
+	//   sales return are the same event as that return; counting both
+	//   double-subtracts it (reason LIKE covers pre-link rows).
+	var netSalesReturns float64
+	utils.DB.Model(&models.SalesReturn{}).
+		Where("user_id = ? AND DATE(date) >= ? AND DATE(date) <= ? AND status != 'cancelled' AND deleted_at IS NULL", userID, startDate, endDate).
+		Select("COALESCE(SUM(amount - deduction_total), 0)").Scan(&netSalesReturns)
+
+	var standaloneCreditNotes float64
+	utils.DB.Model(&models.CreditNote{}).
+		Where("user_id = ? AND DATE(date) >= ? AND DATE(date) <= ? AND status != 'cancelled' AND deleted_at IS NULL", userID, startDate, endDate).
+		Where("sales_return_id IS NULL AND reason NOT LIKE 'Sales return %'").
+		Select("COALESCE(SUM(total_amount), 0)").Scan(&standaloneCreditNotes)
+
 	report.DailyProfit = report.Sales.TotalAmount -
-		report.CreditNotes.TotalAmount -
-		report.SalesReturns.TotalAmount -
+		netSalesReturns -
+		standaloneCreditNotes -
 		report.Expenses.TotalAmount
 
 	report.ProductProfit = computeProductProfitForRange(userID, startDate, endDate)
@@ -296,6 +320,7 @@ func loadPaymentsByMethod(userID uuid.UUID, startDate, endDate string) []models.
 			COUNT(*) AS count
 		FROM payments
 		WHERE user_id = ? AND `+dateWhere+` AND deleted_at IS NULL
+			AND COALESCE(LOWER(TRIM(mode)), '') != 'credit_note'
 		GROUP BY `+methodExpr, userID, startDate, endDate).Scan(&inRows)
 	utils.DB.Raw(`
 		SELECT `+methodExpr+` AS method,

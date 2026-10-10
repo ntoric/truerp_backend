@@ -37,6 +37,7 @@ func openReturnBalanceTestDB(t *testing.T) *gorm.DB {
 		&models.BankAccount{},
 		&models.PurchaseBill{},
 		&models.PaymentMethodAccountMap{},
+		&models.Payment{},
 		&models.Invoice{},
 		&models.CreditNote{},
 		&models.CreditNoteItem{},
@@ -579,5 +580,127 @@ func TestDraftSalesReturnDeleteLeavesBalanceUntouched(t *testing.T) {
 	}
 	if got := reloadPartyBalance(t, db, party.ID); got != 1000 {
 		t.Fatalf("party balance after draft delete = %.2f, want 1000", got)
+	}
+}
+
+func TestProcessSalesReturnCreditSettlesOtherInvoice(t *testing.T) {
+	db := openReturnBalanceTestDB(t)
+	userID := uuid.New()
+
+	party := models.Party{ID: uuid.New(), UserID: userID, Name: "Customer", PartyType: "customer", Balance: 0}
+	if err := db.Create(&party).Error; err != nil {
+		t.Fatalf("create party: %v", err)
+	}
+
+	// The source invoice is fully paid; the credit goes to a different
+	// invoice (exchange scenario).
+	sourceInvoice := models.Invoice{
+		ID:            uuid.New(),
+		UserID:        userID,
+		PartyID:       party.ID,
+		InvoiceNumber: "INV-0001",
+		TotalAmount:   330,
+		AmountPaid:    330,
+		Status:        "paid",
+	}
+	if err := db.Create(&sourceInvoice).Error; err != nil {
+		t.Fatalf("create source invoice: %v", err)
+	}
+	settleInvoice := models.Invoice{
+		ID:            uuid.New(),
+		UserID:        userID,
+		PartyID:       party.ID,
+		InvoiceNumber: "INV-0002",
+		TotalAmount:   830,
+		AmountPaid:    500,
+		Status:        "partial",
+	}
+	if err := db.Create(&settleInvoice).Error; err != nil {
+		t.Fatalf("create settle invoice: %v", err)
+	}
+
+	salesReturn := models.SalesReturn{
+		ID:              uuid.New(),
+		UserID:          userID,
+		PartyID:         party.ID,
+		InvoiceID:       sourceInvoice.ID,
+		SettleInvoiceID: &settleInvoice.ID,
+		ReturnNumber:    "SR-0020",
+		Date:            time.Now(),
+		Amount:          330,
+		Status:          "draft",
+		RefundMode:      "credit_note",
+		Items: []models.SalesReturnItem{{
+			ID:          uuid.New(),
+			Description: "Returned item",
+			Quantity:    1,
+			UnitPrice:   330,
+			Total:       330,
+		}},
+	}
+	if err := db.Create(&salesReturn).Error; err != nil {
+		t.Fatalf("create sales return: %v", err)
+	}
+
+	c, rec := processContext("/sales-returns/"+salesReturn.ID.String()+"/process", salesReturn.ID.String())
+	c.Set("user_id", userID)
+	ProcessSalesReturn(c)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	// Settle invoice fully paid via credit; source invoice untouched.
+	var settle models.Invoice
+	if err := db.First(&settle, "id = ?", settleInvoice.ID).Error; err != nil {
+		t.Fatalf("reload settle invoice: %v", err)
+	}
+	if settle.AmountPaid != 830 || settle.Status != "paid" {
+		t.Fatalf("settle invoice = paid %.2f status %s, want paid 830 paid", settle.AmountPaid, settle.Status)
+	}
+
+	// The credit leg shows as a non-cash payment-in on the invoice.
+	var payments []models.Payment
+	if err := db.Where("user_id = ? AND invoice_id = ?", userID, settleInvoice.ID).Find(&payments).Error; err != nil {
+		t.Fatalf("load payments: %v", err)
+	}
+	if len(payments) != 1 {
+		t.Fatalf("payments = %d, want 1 credit settlement row", len(payments))
+	}
+	if payments[0].Mode != "credit_note" || payments[0].AmountReceived != 330 {
+		t.Fatalf("settlement payment = %+v, want credit_note 330", payments[0])
+	}
+
+	// Credit settlements move no money: zero cash transactions.
+	var txnCount int64
+	db.Model(&models.CashTransaction{}).Where("user_id = ?", userID).Count(&txnCount)
+	if txnCount != 0 {
+		t.Fatalf("cash transactions = %d, want 0 for credit settlement", txnCount)
+	}
+
+	// The credit note links back to its sales return so reports can
+	// exclude it from double-counted profit math.
+	var creditNote models.CreditNote
+	if err := db.Where("user_id = ? AND invoice_id = ?", userID, sourceInvoice.ID).First(&creditNote).Error; err != nil {
+		t.Fatalf("credit note not created: %v", err)
+	}
+	if creditNote.SalesReturnID == nil || *creditNote.SalesReturnID != salesReturn.ID {
+		t.Fatalf("credit note sales_return_id = %v, want %s", creditNote.SalesReturnID, salesReturn.ID)
+	}
+
+	// Party balance holds the granted credit: -330 (the settle invoice was
+	// created directly, so it never added its +830 to the balance).
+	if got := reloadPartyBalance(t, db, party.ID); got != -330 {
+		t.Fatalf("party balance = %.2f, want -330", got)
+	}
+}
+
+func TestInvoicePaymentsTotalSkipsCreditSettlements(t *testing.T) {
+	payments := []models.Payment{
+		{AmountReceived: 500, Mode: "cash"},
+		{AmountReceived: 330, Mode: "credit_note"},
+	}
+	if got := invoicePaymentsTotal(payments); got != 500 {
+		t.Fatalf("invoicePaymentsTotal = %.2f, want 500 (credit leg excluded)", got)
 	}
 }

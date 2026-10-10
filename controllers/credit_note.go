@@ -46,7 +46,7 @@ func GetCreditNote(c *gin.Context) {
 	id := c.Param("id")
 
 	var creditNote models.CreditNote
-	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).Preload("Party").Preload("Invoice").Preload("Items").First(&creditNote).Error; err != nil {
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).Preload("Party").Preload("Invoice").Preload("SalesReturn").Preload("Items").First(&creditNote).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Credit note not found"})
 		return
 	}

@@ -210,11 +210,15 @@ func createLinkedSalePaymentInWithModeInternal(tx *gorm.DB, userID uuid.UUID, in
 		return err
 	}
 
-	if isInitialInvestmentPayment(mode) {
+	switch {
+	case isInitialInvestmentPayment(mode):
 		if err := postStandalonePaymentInAccounting(tx, userID, &payment, amount); err != nil {
 			return err
 		}
-	} else {
+	case isCreditSettlementPayment(mode):
+		// Credit-note settlements move no money: the payment row exists only
+		// to document the credit applied to the invoice.
+	default:
 		desc := salePaymentDescription(invoice)
 		if err := recordSalePaymentIn(tx, userID, accountID, amount, date, invoice.InvoiceNumber, desc); err != nil {
 			return err
@@ -553,9 +557,21 @@ func createInvoicePaymentRecord(tx *gorm.DB, userID uuid.UUID, invoice *models.I
 	return tx.Create(&payment).Error
 }
 
+// isCreditSettlementPayment reports whether a payment mode represents a
+// credit-note application rather than money received. Such payments have
+// no cash/bank ledger row and never post a journal.
+func isCreditSettlementPayment(mode string) bool {
+	return normalizePaymentMethod(mode) == "credit_note"
+}
+
 func invoicePaymentsTotal(payments []models.Payment) float64 {
 	var total float64
 	for _, payment := range payments {
+		// Credit-note settlements never reduced the party balance — the
+		// return did that — so they must not be added back on reversal.
+		if isCreditSettlementPayment(payment.Mode) {
+			continue
+		}
 		total += payment.AmountReceived - payment.PaymentInDiscount
 	}
 	return total
