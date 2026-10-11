@@ -42,11 +42,16 @@ func openReturnBalanceTestDB(t *testing.T) *gorm.DB {
 		&models.Product{},
 		&models.PaymentMethodAccountMap{},
 		&models.Payment{},
+		&models.PaymentOut{},
 		&models.Invoice{},
 		&models.CreditNote{},
 		&models.CreditNoteItem{},
 		&models.DebitNote{},
 		&models.DebitNoteItem{},
+		&models.Account{},
+		&models.JournalEntry{},
+		&models.JournalEntryLine{},
+		&models.Ledger{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -560,6 +565,22 @@ func TestProcessSalesReturnCashRefundPaysOutCash(t *testing.T) {
 	}
 	if txn.AccountID != nil {
 		t.Fatalf("cash refund should pay out of cash in hand, got account %v", txn.AccountID)
+	}
+
+	// The refund is documented by a PaymentOut to the customer linked back
+	// to the sales return.
+	var paymentOut models.PaymentOut
+	if err := db.Where("user_id = ? AND reference = ?", userID, "SR-0003").First(&paymentOut).Error; err != nil {
+		t.Fatalf("load refund payment out: %v", err)
+	}
+	if paymentOut.AmountPaid != 250 || paymentOut.Mode != "cash" || paymentOut.PartyID != party.ID {
+		t.Fatalf("payment out = %+v, want cash 250 for party %s", paymentOut, party.ID)
+	}
+	if paymentOut.SalesReturnID == nil || *paymentOut.SalesReturnID != salesReturn.ID {
+		t.Fatalf("payment out sales_return_id = %v, want %s", paymentOut.SalesReturnID, salesReturn.ID)
+	}
+	if paymentOut.PaymentOutNumber == "" {
+		t.Fatal("payment out number is empty")
 	}
 }
 

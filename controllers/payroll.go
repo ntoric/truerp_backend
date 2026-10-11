@@ -17,8 +17,8 @@ import (
 func repairZeroNetPayrolls(userID uuid.UUID) {
 	var broken []models.Payroll
 	utils.DB.Where(
-		"user_id = ? AND net_salary = 0 AND basic_salary > 0 AND working_days = 0 AND is_settlement = ?",
-		userID, false,
+		"user_id = ? AND net_salary = 0 AND basic_salary > 0 AND working_days = 0 AND is_settlement = ? AND status != ?",
+		userID, false, "cancelled",
 	).Find(&broken)
 
 	for _, p := range broken {
@@ -286,13 +286,21 @@ func reversePayrollExtraSettlement(tx *gorm.DB, userID uuid.UUID, payroll *model
 // expense/cash/GL posting for payrolls paid before payments were tracked
 // individually.
 func reversePayrollPayment(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll) error {
+	// A cancelled payroll was already refunded via compensating add
+	// transactions; deleting it removes the outflow/reversal pair instead of
+	// refunding a second time.
+	cancelled := payroll.Status == "cancelled"
 	var payments []models.PayrollPayment
 	if err := tx.Where("user_id = ? AND payroll_id = ?", userID, payroll.ID).Find(&payments).Error; err != nil {
 		return err
 	}
 	for i := range payments {
 		p := &payments[i]
-		if err := reversePayrollCashOut(tx, userID, p.PaymentNumber); err != nil {
+		if cancelled {
+			if err := purgeRefundedPayrollCashOut(tx, userID, p.PaymentNumber); err != nil {
+				return err
+			}
+		} else if err := reversePayrollCashOut(tx, userID, p.PaymentNumber); err != nil {
 			return err
 		}
 		if p.ExpenseID != nil {
@@ -309,7 +317,11 @@ func reversePayrollPayment(tx *gorm.DB, userID uuid.UUID, payroll *models.Payrol
 	}
 
 	// Legacy paid payrolls keyed cash, expense and GL to the payroll itself.
-	if err := reversePayrollCashOut(tx, userID, payroll.PaymentNumber); err != nil {
+	if cancelled {
+		if err := purgeRefundedPayrollCashOut(tx, userID, payroll.PaymentNumber); err != nil {
+			return err
+		}
+	} else if err := reversePayrollCashOut(tx, userID, payroll.PaymentNumber); err != nil {
 		return err
 	}
 	if err := reverseAccountingByRef(tx, userID, "payroll", payroll.ID); err != nil {
@@ -326,6 +338,44 @@ func reversePayrollPayment(tx *gorm.DB, userID uuid.UUID, payroll *models.Payrol
 		"expense_id":  nil,
 		"paid_amount": 0,
 	}).Error
+}
+
+// refundPayrollPayments refunds every payment recorded against the payroll
+// without removing the money trail: each original cash/bank outflow stays and
+// a compensating "add" transaction is written so Cash & Banks shows the
+// refund. Linked expenses are removed and GL postings reversed. Payment rows
+// are kept for history. Used by payroll cancellation.
+func refundPayrollPayments(tx *gorm.DB, userID uuid.UUID, payroll *models.Payroll, staffName string) error {
+	var payments []models.PayrollPayment
+	if err := tx.Where("user_id = ? AND payroll_id = ?", userID, payroll.ID).Find(&payments).Error; err != nil {
+		return err
+	}
+	for i := range payments {
+		p := &payments[i]
+		if err := refundPayrollCashOut(tx, userID, p.PaymentNumber, staffName); err != nil {
+			return err
+		}
+		if p.ExpenseID != nil {
+			if err := tx.Where("user_id = ? AND id = ?", userID, *p.ExpenseID).Delete(&models.Expense{}).Error; err != nil {
+				return err
+			}
+		}
+		if err := reverseAccountingByRef(tx, userID, "payroll", p.ID); err != nil {
+			return err
+		}
+	}
+	if err := refundPayrollCashOut(tx, userID, payroll.PaymentNumber, staffName); err != nil {
+		return err
+	}
+	if err := reverseAccountingByRef(tx, userID, "payroll", payroll.ID); err != nil {
+		return err
+	}
+	if payroll.ExpenseID != nil {
+		if err := tx.Where("user_id = ? AND id = ?", userID, *payroll.ExpenseID).Delete(&models.Expense{}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func GetPayrolls(c *gin.Context) {
@@ -798,6 +848,9 @@ func settleStaffDuesTx(tx *gorm.DB, userID uuid.UUID, staff *models.Staff, in pa
 	// Settle unpaid payrolls, oldest first.
 	for i := range payrolls {
 		p := &payrolls[i]
+		if p.Status == "cancelled" {
+			continue
+		}
 		due := p.NetSalary - p.PaidAmount
 		if due <= 0 || remaining <= 0 {
 			continue
@@ -821,6 +874,9 @@ func settleStaffDuesTx(tx *gorm.DB, userID uuid.UUID, staff *models.Staff, in pa
 	// payroll so uncovered days and pending deductions/advances stop floating.
 	covered := map[string]bool{}
 	for _, p := range payrolls {
+		if p.Status == "cancelled" {
+			continue
+		}
 		for d := p.StartDate; !d.After(p.EndDate); d = d.AddDate(0, 0, 1) {
 			covered[d.Format("2006-01-02")] = true
 		}
@@ -984,6 +1040,10 @@ func UpdatePayroll(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Payroll not found"})
 		return
 	}
+	if payroll.Status == "cancelled" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "A cancelled payroll cannot be edited"})
+		return
+	}
 
 	netSalary := payroll.BasicSalary - input.Deductions + input.Bonus
 	if payroll.IsSettlement {
@@ -995,6 +1055,9 @@ func UpdatePayroll(c *gin.Context) {
 		utils.DB.Where("user_id = ? AND staff_id = ? AND id != ?", userID, payroll.StaffID, payroll.ID).Find(&others)
 		covered := map[string]bool{}
 		for _, p := range others {
+			if p.Status == "cancelled" {
+				continue
+			}
 			for d := p.StartDate; !d.After(p.EndDate); d = d.AddDate(0, 0, 1) {
 				covered[d.Format("2006-01-02")] = true
 			}
@@ -1128,6 +1191,10 @@ func CreatePayrollPayment(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Payroll not found"})
 		return
 	}
+	if payroll.Status == "cancelled" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "A cancelled payroll cannot receive payments"})
+		return
+	}
 
 	remaining := payroll.NetSalary - payroll.PaidAmount
 	if remaining <= 0 {
@@ -1176,6 +1243,10 @@ func DeletePayrollPayment(c *gin.Context) {
 	var payroll models.Payroll
 	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).First(&payroll).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Payroll not found"})
+		return
+	}
+	if payroll.Status == "cancelled" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Payments on a cancelled payroll were already refunded"})
 		return
 	}
 
@@ -1228,6 +1299,48 @@ func DeletePayroll(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Payroll deleted successfully"})
+}
+
+// CancelPayroll voids a payroll while keeping the record: every payment's
+// original cash/bank outflow stays and a compensating "add" transaction is
+// written so the refund shows in Cash & Banks as a revert entry. Linked
+// expenses and GL postings are reversed, recovered advances and settled
+// extras reopen, and the payroll is marked cancelled so it no longer counts
+// toward the staff balance or payroll stats.
+// POST /payroll/:id/cancel
+func CancelPayroll(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	id := c.Param("id")
+
+	var payroll models.Payroll
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).Preload("Staff").First(&payroll).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Payroll not found"})
+		return
+	}
+	if payroll.Status == "cancelled" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Payroll is already cancelled"})
+		return
+	}
+
+	err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		if err := refundPayrollPayments(tx, userID, &payroll, payroll.Staff.Name); err != nil {
+			return err
+		}
+		if err := reversePayrollAdvanceRecovery(tx, userID, &payroll); err != nil {
+			return err
+		}
+		if err := reversePayrollExtraSettlement(tx, userID, &payroll); err != nil {
+			return err
+		}
+		return tx.Model(&payroll).Update("status", "cancelled").Error
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to cancel payroll: " + err.Error()})
+		return
+	}
+
+	utils.DB.Preload("Staff").Preload("BankAccount").First(&payroll, payroll.ID)
+	c.JSON(http.StatusOK, payroll)
 }
 
 func BulkDeletePayrolls(c *gin.Context) {
@@ -1295,6 +1408,9 @@ func BulkUpdatePayrollStatus(c *gin.Context) {
 		}
 		for i := range payrolls {
 			p := &payrolls[i]
+			if p.Status == "cancelled" {
+				continue
+			}
 			if input.Status == "pending" {
 				if err := reversePayrollPayment(tx, userID, p); err != nil {
 					return err
@@ -1339,12 +1455,12 @@ func GetPayrollStats(c *gin.Context) {
 		ThisMonth     float64 `json:"this_month"`
 	}
 
-	utils.DB.Model(&models.Payroll{}).Where("user_id = ?", userID).Select("COALESCE(SUM(paid_amount), 0)").Scan(&stats.TotalPayments)
-	utils.DB.Model(&models.Payroll{}).Where("user_id = ?", userID).Count(&stats.TotalPayrolls)
+	utils.DB.Model(&models.Payroll{}).Where("user_id = ? AND status != ?", userID, "cancelled").Select("COALESCE(SUM(paid_amount), 0)").Scan(&stats.TotalPayments)
+	utils.DB.Model(&models.Payroll{}).Where("user_id = ? AND status != ?", userID, "cancelled").Count(&stats.TotalPayrolls)
 
 	now := time.Now()
 	startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
-	utils.DB.Model(&models.Payroll{}).Where("user_id = ? AND payment_date >= ?", userID, startOfMonth).Select("COALESCE(SUM(paid_amount), 0)").Scan(&stats.ThisMonth)
+	utils.DB.Model(&models.Payroll{}).Where("user_id = ? AND payment_date >= ? AND status != ?", userID, startOfMonth, "cancelled").Select("COALESCE(SUM(paid_amount), 0)").Scan(&stats.ThisMonth)
 
 	c.JSON(http.StatusOK, stats)
 }

@@ -759,11 +759,7 @@ func createLinkedPurchasePaymentOutInternal(tx *gorm.DB, userID uuid.UUID, bill 
 		return nil
 	}
 
-	var count int64
-	if err := tx.Model(&models.PaymentOut{}).Where("user_id = ?", userID).Count(&count).Error; err != nil {
-		return err
-	}
-	number := fmt.Sprintf("POUT-%04d", count+1)
+	number := allocateUniquePaymentOutNumber(tx, userID, "")
 
 	mode := normalizePaymentMethod(bill.PaymentMode)
 
@@ -993,6 +989,84 @@ func reversePayrollCashOut(tx *gorm.DB, userID uuid.UUID, reference string) erro
 	return nil
 }
 
+// refundPayrollCashOut keeps the original payroll outflow rows but writes a
+// compensating money-in ("add") transaction for each, so Cash & Banks shows
+// the refund explicitly. Used when a payroll is cancelled.
+func refundPayrollCashOut(tx *gorm.DB, userID uuid.UUID, reference, staffName string) error {
+	if reference == "" {
+		return nil
+	}
+	// Skip when a compensating refund already exists for this reference so a
+	// repeated refund cannot credit the account twice.
+	var refunded int64
+	if err := tx.Model(&models.CashTransaction{}).Where(
+		"user_id = ? AND reference = ? AND is_linked = ? AND transaction_type = ?",
+		userID, reference, true, "add",
+	).Count(&refunded).Error; err != nil {
+		return err
+	}
+	if refunded > 0 {
+		return nil
+	}
+	var transactions []models.CashTransaction
+	if err := tx.Where(
+		"user_id = ? AND reference = ? AND is_linked = ? AND transaction_type IN ?",
+		userID, reference, true, []string{"payroll", "reduce"},
+	).Find(&transactions).Error; err != nil {
+		return err
+	}
+	for _, txn := range transactions {
+		if err := adjustBankAccountBalance(tx, userID, txn.AccountID, txn.Amount, false); err != nil {
+			return err
+		}
+		reversal := models.CashTransaction{
+			ID:              uuid.New(),
+			UserID:          userID,
+			AccountID:       txn.AccountID,
+			TransactionType: "add",
+			Amount:          txn.Amount,
+			Date:            time.Now(),
+			Description:     fmt.Sprintf("Payroll reversal %s — %s", reference, staffName),
+			Reference:       reference,
+			IsLinked:        true,
+		}
+		if err := tx.Create(&reversal).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// purgeRefundedPayrollCashOut removes the original payroll outflow rows and
+// their cancellation reversals when a cancelled payroll is deleted outright.
+// Each removed row's signed movement is undone on the stored balance so any
+// subset that still exists stays consistent with the ledger-derived balance.
+func purgeRefundedPayrollCashOut(tx *gorm.DB, userID uuid.UUID, reference string) error {
+	if reference == "" {
+		return nil
+	}
+	var transactions []models.CashTransaction
+	if err := tx.Where(
+		"user_id = ? AND reference = ? AND is_linked = ? AND transaction_type IN ?",
+		userID, reference, true, []string{"payroll", "reduce", "add"},
+	).Find(&transactions).Error; err != nil {
+		return err
+	}
+	for _, txn := range transactions {
+		movement := -txn.Amount
+		if txn.TransactionType == "add" || txn.TransactionType == "transfer_in" {
+			movement = txn.Amount
+		}
+		if err := adjustBankAccountBalance(tx, userID, txn.AccountID, -movement, false); err != nil {
+			return err
+		}
+		if err := tx.Delete(&txn).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func validateUserBankAccount(userID uuid.UUID, accountID *uuid.UUID) error {
 	if accountID == nil {
 		return nil
@@ -1060,4 +1134,44 @@ func allocateUniquePaymentInNumber(db *gorm.DB, userID uuid.UUID, preferred stri
 		}
 	}
 	return fmt.Sprintf("%s-%d", paymentInNumberPrefix, time.Now().Unix())
+}
+
+const paymentOutNumberPrefix = "POUT"
+
+func paymentOutNumberInUse(db *gorm.DB, userID uuid.UUID, number string) bool {
+	var n int64
+	db.Model(&models.PaymentOut{}).Where("user_id = ? AND payment_out_number = ?", userID, number).Count(&n)
+	return n > 0
+}
+
+func maxPaymentOutSequence(db *gorm.DB, userID uuid.UUID) int64 {
+	var numbers []string
+	db.Model(&models.PaymentOut{}).
+		Where("user_id = ? AND payment_out_number LIKE ?", userID, paymentOutNumberPrefix+"-%").
+		Pluck("payment_out_number", &numbers)
+	var max int64
+	for _, number := range numbers {
+		if seq := parsePaymentNumberSequence(number, paymentOutNumberPrefix); seq > max {
+			max = seq
+		}
+	}
+	return max
+}
+
+func allocateUniquePaymentOutNumber(db *gorm.DB, userID uuid.UUID, preferred string) string {
+	preferred = strings.TrimSpace(preferred)
+	if preferred != "" && !paymentOutNumberInUse(db, userID, preferred) {
+		return preferred
+	}
+	start := maxPaymentOutSequence(db, userID) + 1
+	if start < 1 {
+		start = 1
+	}
+	for i := start; i < start+10000; i++ {
+		candidate := fmt.Sprintf("%s-%04d", paymentOutNumberPrefix, i)
+		if !paymentOutNumberInUse(db, userID, candidate) {
+			return candidate
+		}
+	}
+	return fmt.Sprintf("%s-%d", paymentOutNumberPrefix, time.Now().Unix())
 }

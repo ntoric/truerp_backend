@@ -318,3 +318,153 @@ func TestPayrollPayAllDue(t *testing.T) {
 		t.Fatalf("expected 3 payroll cash txns, got %d", txnCount)
 	}
 }
+
+func TestCancelPayrollRefundsPayments(t *testing.T) {
+	db := openPayrollPaymentTestDB(t)
+	userID := uuid.New()
+	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+
+	bank := models.BankAccount{
+		ID:          uuid.New(),
+		UserID:      userID,
+		AccountName: "Main",
+		Balance:     50000,
+		IsActive:    true,
+	}
+	if err := db.Create(&bank).Error; err != nil {
+		t.Fatalf("create bank account: %v", err)
+	}
+
+	payroll := models.Payroll{
+		ID:            uuid.New(),
+		UserID:        userID,
+		StaffID:       uuid.New(),
+		PaymentNumber: "PAY-001",
+		PaymentDate:   now,
+		StartDate:     now,
+		EndDate:       now,
+		BasicSalary:   10000,
+		NetSalary:     10000,
+		PaymentMode:   "bank_transfer",
+		Status:        "pending",
+	}
+	if err := db.Create(&payroll).Error; err != nil {
+		t.Fatalf("create payroll: %v", err)
+	}
+
+	// Two bank payments: 4000 + 6000.
+	for i, amount := range []float64{4000, 6000} {
+		amt := amount
+		err := db.Transaction(func(tx *gorm.DB) error {
+			if _, err := recordPayrollPaymentTx(tx, userID, &payroll, "Ravi Kumar", payrollPaymentInput{
+				Amount:        amt,
+				PaymentDate:   now.AddDate(0, 0, i),
+				PaymentMode:   "bank_transfer",
+				BankAccountID: &bank.ID,
+			}); err != nil {
+				return err
+			}
+			return refreshPayrollPaymentState(tx, &payroll)
+		})
+		if err != nil {
+			t.Fatalf("record payment %d: %v", i, err)
+		}
+	}
+
+	var bankAfter models.BankAccount
+	if err := db.First(&bankAfter, bank.ID).Error; err != nil {
+		t.Fatalf("reload bank: %v", err)
+	}
+	if bankAfter.Balance != 40000 {
+		t.Fatalf("expected bank balance 40000 after payouts, got %.2f", bankAfter.Balance)
+	}
+
+	// Cancel: refund payments (keep rows + outflows, write "add" reversals),
+	// drop the linked expenses and mark the payroll cancelled.
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var p models.Payroll
+		if err := tx.First(&p, payroll.ID).Error; err != nil {
+			return err
+		}
+		if err := refundPayrollPayments(tx, userID, &p, "Ravi Kumar"); err != nil {
+			return err
+		}
+		return tx.Model(&p).Update("status", "cancelled").Error
+	})
+	if err != nil {
+		t.Fatalf("cancel payroll: %v", err)
+	}
+
+	var reloaded models.Payroll
+	if err := db.First(&reloaded, payroll.ID).Error; err != nil {
+		t.Fatalf("reload payroll: %v", err)
+	}
+	if reloaded.Status != "cancelled" {
+		t.Fatalf("expected cancelled status, got %s", reloaded.Status)
+	}
+
+	// Payment rows stay for history.
+	var paymentCount int64
+	db.Model(&models.PayrollPayment{}).Where("payroll_id = ?", payroll.ID).Count(&paymentCount)
+	if paymentCount != 2 {
+		t.Fatalf("expected payment rows kept, got %d", paymentCount)
+	}
+
+	// Original outflows stay, each matched by a compensating "add" reversal.
+	var outflowCount int64
+	db.Model(&models.CashTransaction{}).
+		Where("user_id = ? AND transaction_type = 'payroll'", userID).Count(&outflowCount)
+	if outflowCount != 2 {
+		t.Fatalf("expected 2 original outflows kept, got %d", outflowCount)
+	}
+	var reversalCount int64
+	var reversalSum float64
+	db.Model(&models.CashTransaction{}).
+		Where("user_id = ? AND transaction_type = 'add' AND is_linked = ?", userID, true).
+		Count(&reversalCount)
+	db.Model(&models.CashTransaction{}).
+		Where("user_id = ? AND transaction_type = 'add' AND is_linked = ?", userID, true).
+		Select("COALESCE(SUM(amount), 0)").Scan(&reversalSum)
+	if reversalCount != 2 || reversalSum != 10000 {
+		t.Fatalf("expected 2 reversal entries totalling 10000, got %d rows %.2f", reversalCount, reversalSum)
+	}
+
+	// Bank balance fully restored.
+	if err := db.First(&bankAfter, bank.ID).Error; err != nil {
+		t.Fatalf("reload bank: %v", err)
+	}
+	if bankAfter.Balance != 50000 {
+		t.Fatalf("expected bank balance restored to 50000, got %.2f", bankAfter.Balance)
+	}
+
+	// Linked payroll expenses are removed.
+	var expenseCount int64
+	db.Model(&models.Expense{}).Where("user_id = ? AND category = 'Payroll'", userID).Count(&expenseCount)
+	if expenseCount != 0 {
+		t.Fatalf("expected payroll expenses removed, got %d", expenseCount)
+	}
+
+	// Deleting the cancelled payroll purges outflow + reversal pairs without
+	// moving the bank balance again.
+	var cancelled models.Payroll
+	if err := db.First(&cancelled, payroll.ID).Error; err != nil {
+		t.Fatalf("reload payroll: %v", err)
+	}
+	err = db.Transaction(func(tx *gorm.DB) error {
+		return reversePayrollPayment(tx, userID, &cancelled)
+	})
+	if err != nil {
+		t.Fatalf("delete cancelled payroll: %v", err)
+	}
+	var txnCount int64
+	db.Model(&models.CashTransaction{}).Where("user_id = ?", userID).Count(&txnCount)
+	if txnCount != 0 {
+		t.Fatalf("expected all cash txns purged, got %d", txnCount)
+	}
+	if err := db.First(&bankAfter, bank.ID).Error; err != nil {
+		t.Fatalf("reload bank: %v", err)
+	}
+	if bankAfter.Balance != 50000 {
+		t.Fatalf("expected bank balance still 50000, got %.2f", bankAfter.Balance)
+	}
+}

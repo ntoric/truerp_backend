@@ -93,7 +93,7 @@ func computeStaffBalance(staff models.Staff, payrolls []models.Payroll, attendan
 	// Pass 1: period payrolls earn payable salary for all attendance in their
 	// range and cover those dates.
 	for _, p := range payrolls {
-		if p.IsSettlement {
+		if p.IsSettlement || p.Status == "cancelled" {
 			continue
 		}
 		startStr := p.StartDate.Format("2006-01-02")
@@ -109,7 +109,7 @@ func computeStaffBalance(staff models.Staff, payrolls []models.Payroll, attendan
 	// uncovered by any period payroll (or an earlier settlement) in their
 	// range, then cover those dates too.
 	for _, p := range payrolls {
-		if !p.IsSettlement {
+		if !p.IsSettlement || p.Status == "cancelled" {
 			continue
 		}
 		startStr := p.StartDate.Format("2006-01-02")

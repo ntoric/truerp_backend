@@ -317,6 +317,17 @@ type PaymentOut struct {
 	UserID             uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index;index:idx_payment_outs_user_date,priority:1"`
 	PurchaseBillID     *uuid.UUID     `json:"purchase_bill_id,omitempty" gorm:"type:uuid;index"`
 	PurchaseBill       *PurchaseBill  `json:"purchase_bill,omitempty" gorm:"foreignKey:PurchaseBillID"`
+	// SalesReturnID links a payment-out to the sales return it refunds in
+	// money — created automatically when a processed return's refund
+	// settles in money, or manually from the payment-out form. Such
+	// payments never moved the party balance.
+	SalesReturnID      *uuid.UUID     `json:"sales_return_id,omitempty" gorm:"type:uuid;index"`
+	SalesReturn        *SalesReturn   `json:"sales_return,omitempty" gorm:"foreignKey:SalesReturnID"`
+	// CreditNoteID links a payment-out to the credit note it refunds in
+	// money. Unlike sales-return refunds these payments do move the party
+	// balance — the issued note's credit is being paid off.
+	CreditNoteID       *uuid.UUID     `json:"credit_note_id,omitempty" gorm:"type:uuid;index"`
+	CreditNote         *CreditNote    `json:"credit_note,omitempty" gorm:"foreignKey:CreditNoteID"`
 	PartyID            uuid.UUID      `json:"party_id" gorm:"type:uuid;not null;index"`
 	Party              Party          `json:"party,omitempty" gorm:"foreignKey:PartyID"`
 	AmountPaid         float64        `json:"amount_paid" gorm:"default:0"`
