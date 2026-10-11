@@ -1,6 +1,8 @@
 package controllers
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"testing"
@@ -36,6 +38,8 @@ func openReturnBalanceTestDB(t *testing.T) *gorm.DB {
 		&models.CashTransaction{},
 		&models.BankAccount{},
 		&models.PurchaseBill{},
+		&models.PurchaseBillItem{},
+		&models.Product{},
 		&models.PaymentMethodAccountMap{},
 		&models.Payment{},
 		&models.Invoice{},
@@ -57,6 +61,15 @@ func processContext(path, id string) (*gin.Context, *httptest.ResponseRecorder) 
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest("POST", path, nil)
 	c.Params = gin.Params{{Key: "id", Value: id}}
+	return c, rec
+}
+
+func createContext(path string, payload interface{}) (*gin.Context, *httptest.ResponseRecorder) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body, _ := json.Marshal(payload)
+	c.Request = httptest.NewRequest("POST", path, bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
 	return c, rec
 }
 
@@ -692,6 +705,173 @@ func TestProcessSalesReturnCreditSettlesOtherInvoice(t *testing.T) {
 	// created directly, so it never added its +830 to the balance).
 	if got := reloadPartyBalance(t, db, party.ID); got != -330 {
 		t.Fatalf("party balance = %.2f, want -330", got)
+	}
+}
+
+// Regression: creating a return without a linked bill used to fail because
+// the zero UUID written to purchase_bill_id violated the FK, and items sent
+// with only product_id (no description) failed binding.
+func TestCreatePurchaseReturnWithoutBill(t *testing.T) {
+	db := openReturnBalanceTestDB(t)
+	userID := uuid.New()
+
+	vendor := models.Party{ID: uuid.New(), UserID: userID, Name: "Vendor", PartyType: "vendor"}
+	if err := db.Create(&vendor).Error; err != nil {
+		t.Fatalf("create vendor: %v", err)
+	}
+	product := models.Product{ID: uuid.New(), UserID: userID, Name: "Raw material", SKU: "RM-1"}
+	if err := db.Create(&product).Error; err != nil {
+		t.Fatalf("create product: %v", err)
+	}
+
+	c, rec := createContext("/purchase-returns", map[string]interface{}{
+		"party_id":         vendor.ID.String(),
+		"purchase_bill_id": nil,
+		"date":             "2026-10-11",
+		"refund_mode":      "cash",
+		"items": []map[string]interface{}{{
+			"product_id": product.ID.String(),
+			"quantity":   2,
+			"unit_price": 0,
+			"tax_rate":   0,
+		}},
+	})
+	c.Set("user_id", userID)
+	CreatePurchaseReturn(c)
+
+	if rec.Code != 201 {
+		t.Fatalf("status = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	var created models.PurchaseReturn
+	if err := db.Preload("Items").First(&created, "user_id = ?", userID).Error; err != nil {
+		t.Fatalf("load return: %v", err)
+	}
+	var nullCount int64
+	db.Raw("SELECT COUNT(*) FROM purchase_returns WHERE id = ? AND purchase_bill_id IS NULL", created.ID).Scan(&nullCount)
+	if nullCount != 1 {
+		t.Fatalf("purchase_bill_id should be NULL when unlinked, got value %v", created.PurchaseBillID)
+	}
+	if len(created.Items) != 1 || created.Items[0].Description != "Raw material" {
+		t.Fatalf("items = %+v, want description resolved from product", created.Items)
+	}
+}
+
+func TestCreatePurchaseReturnLinkedBillStoresBillItemLink(t *testing.T) {
+	db := openReturnBalanceTestDB(t)
+	userID := uuid.New()
+
+	vendor := models.Party{ID: uuid.New(), UserID: userID, Name: "Vendor", PartyType: "vendor"}
+	if err := db.Create(&vendor).Error; err != nil {
+		t.Fatalf("create vendor: %v", err)
+	}
+	bill := models.PurchaseBill{
+		ID:         uuid.New(),
+		UserID:     userID,
+		PartyID:    vendor.ID,
+		BillNumber: "PB-0001",
+	}
+	if err := db.Create(&bill).Error; err != nil {
+		t.Fatalf("create bill: %v", err)
+	}
+	billItem := models.PurchaseBillItem{
+		ID:          uuid.New(),
+		BillID:      bill.ID,
+		Description: "Steel rod",
+		Quantity:    5,
+		UnitPrice:   100,
+	}
+	if err := db.Create(&billItem).Error; err != nil {
+		t.Fatalf("create bill item: %v", err)
+	}
+
+	c, rec := createContext("/purchase-returns", map[string]interface{}{
+		"party_id":         vendor.ID.String(),
+		"purchase_bill_id": bill.ID.String(),
+		"date":             "2026-10-11",
+		"refund_mode":      "debit_note",
+		"items": []map[string]interface{}{{
+			"purchase_bill_item_id": billItem.ID.String(),
+			"quantity":              5,
+			"unit_price":            100,
+		}},
+	})
+	c.Set("user_id", userID)
+	CreatePurchaseReturn(c)
+
+	if rec.Code != 201 {
+		t.Fatalf("status = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	var created models.PurchaseReturn
+	if err := db.Preload("Items").First(&created, "user_id = ?", userID).Error; err != nil {
+		t.Fatalf("load return: %v", err)
+	}
+	if created.PurchaseBillID != bill.ID {
+		t.Fatalf("purchase_bill_id = %v, want %s", created.PurchaseBillID, bill.ID)
+	}
+	if len(created.Items) != 1 || created.Items[0].PurchaseBillItemID != billItem.ID {
+		t.Fatalf("items = %+v, want bill item link %s", created.Items, billItem.ID)
+	}
+	if created.Items[0].Description != "Steel rod" {
+		t.Fatalf("description = %q, want resolved from bill item", created.Items[0].Description)
+	}
+}
+
+func TestCreatePurchaseReturnRejectsCrossVendorBill(t *testing.T) {
+	db := openReturnBalanceTestDB(t)
+	userID := uuid.New()
+
+	vendor := models.Party{ID: uuid.New(), UserID: userID, Name: "Vendor", PartyType: "vendor"}
+	otherVendor := models.Party{ID: uuid.New(), UserID: userID, Name: "Other", PartyType: "vendor"}
+	for _, v := range []models.Party{vendor, otherVendor} {
+		if err := db.Create(&v).Error; err != nil {
+			t.Fatalf("create party: %v", err)
+		}
+	}
+	bill := models.PurchaseBill{ID: uuid.New(), UserID: userID, PartyID: otherVendor.ID, BillNumber: "PB-0009"}
+	if err := db.Create(&bill).Error; err != nil {
+		t.Fatalf("create bill: %v", err)
+	}
+
+	c, rec := createContext("/purchase-returns", map[string]interface{}{
+		"party_id":         vendor.ID.String(),
+		"purchase_bill_id": bill.ID.String(),
+		"date":             "2026-10-11",
+		"items": []map[string]interface{}{{
+			"description": "Widget",
+			"quantity":    1,
+			"unit_price":  10,
+		}},
+	})
+	c.Set("user_id", userID)
+	CreatePurchaseReturn(c)
+
+	if rec.Code != 400 {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreatePurchaseReturnRejectsItemWithNoDescriptionOrProduct(t *testing.T) {
+	db := openReturnBalanceTestDB(t)
+	userID := uuid.New()
+
+	vendor := models.Party{ID: uuid.New(), UserID: userID, Name: "Vendor", PartyType: "vendor"}
+	if err := db.Create(&vendor).Error; err != nil {
+		t.Fatalf("create vendor: %v", err)
+	}
+
+	c, rec := createContext("/purchase-returns", map[string]interface{}{
+		"party_id": vendor.ID.String(),
+		"date":     "2026-10-11",
+		"items": []map[string]interface{}{{
+			"quantity":   1,
+			"unit_price": 10,
+		}},
+	})
+	c.Set("user_id", userID)
+	CreatePurchaseReturn(c)
+
+	if rec.Code != 400 {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
 	}
 }
 

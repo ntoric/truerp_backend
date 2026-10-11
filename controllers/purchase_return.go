@@ -62,12 +62,13 @@ func CreatePurchaseReturn(c *gin.Context) {
 		RefundMode     string    `json:"refund_mode"`
 		Notes          string    `json:"notes"`
 		Items          []struct {
-			PurchaseBillItemID uuid.UUID `json:"purchase_bill_item_id"`
-			Description        string    `json:"description" binding:"required"`
-			Quantity           float64   `json:"quantity" binding:"required,gt=0"`
-			UnitPrice          float64   `json:"unit_price" binding:"required"`
-			TaxRate            float64   `json:"tax_rate"`
-			Reason             string    `json:"reason"`
+			PurchaseBillItemID uuid.UUID  `json:"purchase_bill_item_id"`
+			ProductID          *uuid.UUID `json:"product_id"`
+			Description        string     `json:"description"`
+			Quantity           float64    `json:"quantity" binding:"required,gt=0"`
+			UnitPrice          float64    `json:"unit_price" binding:"gte=0"`
+			TaxRate            float64    `json:"tax_rate"`
+			Reason             string     `json:"reason"`
 		} `json:"items" binding:"required,min=1"`
 	}
 
@@ -80,6 +81,20 @@ func CreatePurchaseReturn(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid date format, expected YYYY-MM-DD"})
 		return
+	}
+
+	// A linked bill must exist and belong to the same party — a mismatch would
+	// settle the wrong vendor's balance when the return is processed.
+	if input.PurchaseBillID != uuid.Nil {
+		var bill models.PurchaseBill
+		if err := utils.DB.Where("user_id = ? AND id = ?", userID, input.PurchaseBillID).First(&bill).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid purchase bill"})
+			return
+		}
+		if bill.PartyID != input.PartyID {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Purchase bill does not belong to the selected vendor"})
+			return
+		}
 	}
 
 	var count int64
@@ -100,6 +115,30 @@ func CreatePurchaseReturn(c *gin.Context) {
 
 	var totalAmount float64
 	for _, item := range input.Items {
+		description := item.Description
+		if item.ProductID != nil && *item.ProductID != uuid.Nil {
+			var product models.Product
+			if err := utils.DB.Where("user_id = ? AND id = ?", userID, *item.ProductID).First(&product).Error; err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid product in return items"})
+				return
+			}
+			if description == "" {
+				description = product.Name
+			}
+		} else if item.PurchaseBillItemID != uuid.Nil {
+			var billItem models.PurchaseBillItem
+			if err := utils.DB.Where("id = ?", item.PurchaseBillItemID).First(&billItem).Error; err == nil {
+				if description == "" {
+					description = billItem.Description
+				}
+			}
+		}
+
+		if description == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Item description or product_id is required"})
+			return
+		}
+
 		taxAmount := item.UnitPrice * item.Quantity * (item.TaxRate / 100)
 		total := item.UnitPrice*item.Quantity + taxAmount
 
@@ -107,7 +146,7 @@ func CreatePurchaseReturn(c *gin.Context) {
 			ID:                 uuid.New(),
 			ReturnID:           purchaseReturn.ID,
 			PurchaseBillItemID: item.PurchaseBillItemID,
-			Description:        item.Description,
+			Description:        description,
 			Quantity:           item.Quantity,
 			UnitPrice:          item.UnitPrice,
 			TaxRate:            item.TaxRate,
@@ -120,7 +159,14 @@ func CreatePurchaseReturn(c *gin.Context) {
 
 	purchaseReturn.Amount = totalAmount
 
-	if err := utils.DB.Create(&purchaseReturn).Error; err != nil {
+	// Omit PurchaseBillID when the return is not linked to a bill so NULL is
+	// written — a zero UUID would violate the purchase_returns purchase_bill FK.
+	if purchaseReturn.PurchaseBillID == uuid.Nil {
+		err = utils.DB.Omit("PurchaseBillID", "PurchaseBill").Create(&purchaseReturn).Error
+	} else {
+		err = utils.DB.Create(&purchaseReturn).Error
+	}
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create purchase return"})
 		return
 	}
