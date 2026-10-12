@@ -229,6 +229,7 @@ func openPurchasePaymentTestDB(t *testing.T) *gorm.DB {
 		&models.PurchaseBill{},
 		&models.PaymentOut{},
 		&models.CashTransaction{},
+		&models.BankAccount{},
 		&models.Account{},
 		&models.JournalEntry{},
 		&models.JournalEntryLine{},
@@ -358,5 +359,155 @@ func TestCreateLinkedPurchasePaymentOutCashReducesCashInHand(t *testing.T) {
 	}
 	if summary.InitialInvestment != 0 {
 		t.Fatalf("initial investment = %.2f, want 0", summary.InitialInvestment)
+	}
+}
+
+func TestCreateLinkedPurchasePaymentOutSplitsWritesOneRowPerTender(t *testing.T) {
+	db := openPurchasePaymentTestDB(t)
+	userID := uuid.New()
+	partyID := uuid.New()
+	accountID := uuid.New()
+	now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+
+	if err := db.Create(&models.Party{
+		ID: partyID, UserID: userID, Name: "Split Vendor", PartyType: "vendor", IsActive: true,
+	}).Error; err != nil {
+		t.Fatalf("create party: %v", err)
+	}
+	if err := db.Create(&models.BankAccount{
+		ID: accountID, UserID: userID, AccountName: "HDFC Current", BankName: "HDFC",
+		Balance: 10000, IsActive: true,
+	}).Error; err != nil {
+		t.Fatalf("create bank account: %v", err)
+	}
+
+	bill := models.PurchaseBill{
+		ID:          uuid.New(),
+		UserID:      userID,
+		PartyID:     partyID,
+		BillNumber:  "PINV-SPLIT-1",
+		BillDate:    now,
+		TotalAmount: 1000,
+		PaidAmount:  1000,
+		PaymentMode: "cash",
+		Status:      "paid",
+		PaymentSplits: []models.PaymentSplit{
+			{Mode: "cash", Amount: 300},
+			{Mode: "upi", Amount: 700, BankAccountID: &accountID},
+		},
+	}
+	if err := db.Create(&bill).Error; err != nil {
+		t.Fatalf("create bill: %v", err)
+	}
+
+	if err := createLinkedPurchasePaymentOut(db, userID, &bill, bill.PaidAmount, bill.BillDate, "split pay"); err != nil {
+		t.Fatalf("create payment outs: %v", err)
+	}
+
+	var outs []models.PaymentOut
+	if err := db.Where("user_id = ? AND purchase_bill_id = ?", userID, bill.ID).Find(&outs).Error; err != nil {
+		t.Fatalf("list payment outs: %v", err)
+	}
+	if len(outs) != 2 {
+		t.Fatalf("payment outs = %d, want 2", len(outs))
+	}
+	amountsByMode := map[string]float64{}
+	for _, po := range outs {
+		amountsByMode[po.Mode] += po.AmountPaid
+	}
+	if amountsByMode["cash"] != 300 || amountsByMode["upi"] != 700 {
+		t.Fatalf("payment out amounts = %v, want cash=300 upi=700", amountsByMode)
+	}
+
+	var txns []models.CashTransaction
+	if err := db.Where("user_id = ? AND transaction_type = ?", userID, "reduce").Find(&txns).Error; err != nil {
+		t.Fatalf("list cash txns: %v", err)
+	}
+	if len(txns) != 2 {
+		t.Fatalf("cash txns = %d, want 2", len(txns))
+	}
+	var cashOut, bankOut float64
+	for _, txn := range txns {
+		if txn.AccountID == nil {
+			cashOut += txn.Amount
+		} else if *txn.AccountID == accountID {
+			bankOut += txn.Amount
+		}
+	}
+	if cashOut != 300 || bankOut != 700 {
+		t.Fatalf("cash out = %.2f, bank out = %.2f; want 300 / 700", cashOut, bankOut)
+	}
+
+	var account models.BankAccount
+	if err := db.First(&account, "id = ?", accountID).Error; err != nil {
+		t.Fatalf("load account: %v", err)
+	}
+	if account.Balance != 9300 {
+		t.Fatalf("bank balance = %.2f, want 9300", account.Balance)
+	}
+
+	var party models.Party
+	if err := db.First(&party, "id = ?", partyID).Error; err != nil {
+		t.Fatalf("load party: %v", err)
+	}
+	if party.Balance != 1000 {
+		t.Fatalf("party balance = %.2f, want 1000", party.Balance)
+	}
+
+	// The bill's tender breakdown (incl. per-split account) must round-trip.
+	var reloaded models.PurchaseBill
+	if err := db.First(&reloaded, "id = ?", bill.ID).Error; err != nil {
+		t.Fatalf("reload bill: %v", err)
+	}
+	attachPurchaseBillPaymentSplits(db, &reloaded)
+	if len(reloaded.PaymentSplits) != 2 {
+		t.Fatalf("attached splits = %v, want 2", reloaded.PaymentSplits)
+	}
+	got := map[string]models.PaymentSplit{}
+	for _, s := range reloaded.PaymentSplits {
+		got[s.Mode] = s
+	}
+	if got["cash"].Amount != 300 || got["cash"].BankAccountID != nil {
+		t.Fatalf("cash split = %+v, want amount 300 cash-in-hand", got["cash"])
+	}
+	if got["upi"].Amount != 700 || got["upi"].BankAccountID == nil || *got["upi"].BankAccountID != accountID {
+		t.Fatalf("upi split = %+v, want amount 700 on the bank account", got["upi"])
+	}
+}
+
+func TestAttachPurchaseBillPaymentSplitsLegacyFallback(t *testing.T) {
+	db := openPurchasePaymentTestDB(t)
+	userID := uuid.New()
+	accountID := uuid.New()
+
+	bill := models.PurchaseBill{
+		ID:            uuid.New(),
+		UserID:        userID,
+		PartyID:       uuid.New(),
+		BillNumber:    "PINV-LEGACY-1",
+		TotalAmount:   500,
+		PaidAmount:    200,
+		PaymentMode:   "upi",
+		BankAccountID: &accountID,
+		Status:        "partial",
+	}
+	if err := db.Create(&bill).Error; err != nil {
+		t.Fatalf("create bill: %v", err)
+	}
+
+	var reloaded models.PurchaseBill
+	if err := db.First(&reloaded, "id = ?", bill.ID).Error; err != nil {
+		t.Fatalf("reload bill: %v", err)
+	}
+	attachPurchaseBillPaymentSplits(db, &reloaded)
+	if len(reloaded.PaymentSplits) != 1 {
+		t.Fatalf("attached splits = %v, want 1", reloaded.PaymentSplits)
+	}
+	split := reloaded.PaymentSplits[0]
+	if split.Mode != "upi" || split.Amount != 200 {
+		t.Fatalf("split = %+v, want upi 200", split)
+	}
+	if split.BankAccountID == nil || *split.BankAccountID != accountID {
+		t.Fatalf("split account = %v, want %v", split.BankAccountID, accountID)
 	}
 }

@@ -203,11 +203,17 @@ type Business struct {
 	DeletedAt          gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
-// PaymentSplit is one tender on a sales invoice (cash, UPI, card, …).
-// It is not stored as its own table; linked Payment rows are the source of truth.
+// PaymentSplit is one tender on an invoice or purchase bill (cash, UPI,
+// card, …). On sales invoices it is not stored as its own table; linked
+// Payment rows are the source of truth. Purchase bills persist it as JSON
+// so draft split configurations survive reloads; linked PaymentOut rows
+// remain the source of truth once payments exist.
+// BankAccountID pins the split to a specific bank account (purchase bills);
+// when nil the account is resolved from the payment-method mapping.
 type PaymentSplit struct {
-	Mode   string  `json:"mode"`
-	Amount float64 `json:"amount"`
+	Mode          string     `json:"mode"`
+	Amount        float64    `json:"amount"`
+	BankAccountID *uuid.UUID `json:"bank_account_id,omitempty"`
 }
 
 type Invoice struct {
@@ -313,16 +319,16 @@ type Payment struct {
 }
 
 type PaymentOut struct {
-	ID                 uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID             uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index;index:idx_payment_outs_user_date,priority:1"`
-	PurchaseBillID     *uuid.UUID     `json:"purchase_bill_id,omitempty" gorm:"type:uuid;index"`
-	PurchaseBill       *PurchaseBill  `json:"purchase_bill,omitempty" gorm:"foreignKey:PurchaseBillID"`
+	ID             uuid.UUID     `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID         uuid.UUID     `json:"user_id" gorm:"type:uuid;not null;index;index:idx_payment_outs_user_date,priority:1"`
+	PurchaseBillID *uuid.UUID    `json:"purchase_bill_id,omitempty" gorm:"type:uuid;index"`
+	PurchaseBill   *PurchaseBill `json:"purchase_bill,omitempty" gorm:"foreignKey:PurchaseBillID"`
 	// SalesReturnID links a payment-out to the sales return it refunds in
 	// money — created automatically when a processed return's refund
 	// settles in money, or manually from the payment-out form. Such
 	// payments never moved the party balance.
-	SalesReturnID      *uuid.UUID     `json:"sales_return_id,omitempty" gorm:"type:uuid;index"`
-	SalesReturn        *SalesReturn   `json:"sales_return,omitempty" gorm:"foreignKey:SalesReturnID"`
+	SalesReturnID *uuid.UUID   `json:"sales_return_id,omitempty" gorm:"type:uuid;index"`
+	SalesReturn   *SalesReturn `json:"sales_return,omitempty" gorm:"foreignKey:SalesReturnID"`
 	// CreditNoteID links a payment-out to the credit note it refunds in
 	// money. Unlike sales-return refunds these payments do move the party
 	// balance — the issued note's credit is being paid off.
@@ -989,8 +995,13 @@ type PurchaseBill struct {
 	BalanceDue            float64            `json:"balance_due" gorm:"default:0"`
 	PaymentMode           string             `json:"payment_mode"`
 	BankAccountID         *uuid.UUID         `json:"bank_account_id,omitempty" gorm:"type:uuid;index"`
-	Notes                 string             `json:"notes"`
-	Signature             string             `json:"signature"`
+	// PaymentSplits is the tender breakdown behind PaidAmount (e.g. part
+	// cash, part bank). Persisted as JSON so draft bills keep their split
+	// configuration; for saved bills the linked PaymentOut rows are the
+	// source of truth (see attachPurchaseBillPaymentSplits).
+	PaymentSplits []PaymentSplit `json:"payment_splits,omitempty" gorm:"type:text;serializer:json"`
+	Notes         string         `json:"notes"`
+	Signature     string         `json:"signature"`
 	// SourceURL is the original external bill link (e.g. myBillBook
 	// https://mybillbook.in/cpp/<id>). Populated during migration import so
 	// the source document can be re-opened or re-downloaded later.

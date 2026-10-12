@@ -42,6 +42,12 @@ func resolveBankAccountForPaymentMode(userID uuid.UUID, paymentMode string, expl
 		return nil, nil
 	}
 
+	if utils.DB == nil {
+		// Unit tests without a global DB: trust the explicit account and skip
+		// the mapping/primary lookups.
+		return explicit, nil
+	}
+
 	if explicit != nil {
 		if err := validateUserBankAccount(userID, explicit); err != nil {
 			return nil, err

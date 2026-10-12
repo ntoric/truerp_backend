@@ -754,14 +754,43 @@ func createLinkedPurchasePaymentOutMigration(tx *gorm.DB, userID uuid.UUID, bill
 	return createLinkedPurchasePaymentOutInternal(tx, userID, bill, amount, date, notes, false)
 }
 
+// createLinkedPurchasePaymentOutInternal resolves the bill's payment splits
+// and writes one PaymentOut (plus cash/bank + AP movement) per split, mirroring
+// createLinkedSalePaymentInInternal on the sales side.
 func createLinkedPurchasePaymentOutInternal(tx *gorm.DB, userID uuid.UUID, bill *models.PurchaseBill, amount float64, date time.Time, notes string, adjustPartyBalance bool) error {
+	if amount <= 0 || bill == nil {
+		return nil
+	}
+
+	var resolved []resolvedPaymentSplit
+	var err error
+	if len(mergePaymentSplits(bill.PaymentSplits)) == 0 {
+		resolved, err = resolveInvoicePaymentSplits(userID, nil, bill.PaymentMode, amount, bill.BankAccountID)
+	} else {
+		// adjustPaymentSplitsToAmount guarantees the splits sum to the paid
+		// amount, topping up the last tender when the bill was short-paid.
+		resolved, err = resolveInvoicePaymentSplits(userID, adjustPaymentSplitsToAmount(bill.PaymentSplits, amount), bill.PaymentMode, amount, bill.BankAccountID)
+	}
+	if err != nil {
+		return err
+	}
+
+	for _, split := range resolved {
+		if err := createLinkedPurchasePaymentOutWithModeInternal(tx, userID, bill, split.Amount, split.Mode, split.BankAccountID, date, notes, adjustPartyBalance); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func createLinkedPurchasePaymentOutWithModeInternal(tx *gorm.DB, userID uuid.UUID, bill *models.PurchaseBill, amount float64, mode string, accountID *uuid.UUID, date time.Time, notes string, adjustPartyBalance bool) error {
 	if amount <= 0 || bill == nil {
 		return nil
 	}
 
 	number := allocateUniquePaymentOutNumber(tx, userID, "")
 
-	mode := normalizePaymentMethod(bill.PaymentMode)
+	mode = normalizePaymentMethod(mode)
 
 	billID := bill.ID
 	paymentOut := models.PaymentOut{
@@ -786,7 +815,7 @@ func createLinkedPurchasePaymentOutInternal(tx *gorm.DB, userID uuid.UUID, bill 
 		}
 	} else {
 		desc := fmt.Sprintf("Payment out %s for purchase %s", number, bill.BillNumber)
-		if err := recordPurchasePaymentOut(tx, userID, bill.BankAccountID, amount, date, bill.BillNumber, desc); err != nil {
+		if err := recordPurchasePaymentOut(tx, userID, accountID, amount, date, bill.BillNumber, desc); err != nil {
 			return err
 		}
 	}

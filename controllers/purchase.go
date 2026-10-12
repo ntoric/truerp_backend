@@ -469,6 +469,7 @@ func CreatePurchaseBill(c *gin.Context) {
 		BalanceDue            float64                   `json:"balance_due"`
 		PaymentMode           string                    `json:"payment_mode"`
 		BankAccountID         *uuid.UUID                `json:"bank_account_id"`
+		PaymentSplits         []models.PaymentSplit     `json:"payment_splits"`
 		Status                string                    `json:"status"`
 		Notes                 string                    `json:"notes"`
 		Signature             string                    `json:"signature"`
@@ -514,6 +515,7 @@ func CreatePurchaseBill(c *gin.Context) {
 	}
 	if input.ClientBillID != nil && *input.ClientBillID != uuid.Nil {
 		if existing, ok := findPurchaseBillByClientBillID(userID, *input.ClientBillID); ok {
+			attachPurchaseBillPaymentSplits(utils.DB, existing)
 			c.JSON(http.StatusOK, existing)
 			return
 		}
@@ -546,12 +548,6 @@ func CreatePurchaseBill(c *gin.Context) {
 
 	if err := validateUserBankAccount(userID, input.BankAccountID); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account"})
-		return
-	}
-
-	resolvedBankAccount, err := resolveBankAccountForPaymentMode(userID, input.PaymentMode, input.BankAccountID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account for payment method"})
 		return
 	}
 
@@ -596,9 +592,22 @@ func CreatePurchaseBill(c *gin.Context) {
 			return due
 		}(),
 		PaymentMode:   input.PaymentMode,
-		BankAccountID: resolvedBankAccount,
+		BankAccountID: input.BankAccountID,
 		Notes:         input.Notes,
 		Signature:     input.Signature,
+	}
+
+	// Resolve the paid amount into per-tender splits; for a paid bill the
+	// splits always cover the full total. Sets bill.PaymentSplits,
+	// PaidAmount, PaymentMode and BankAccountID.
+	if err := finalizePurchaseBillPaymentSplits(userID, &bill, input.PaymentSplits, input.PaymentMode, input.BankAccountID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account for payment method"})
+		return
+	}
+	if due := bill.TotalAmount - bill.PaidAmount; due > 0 {
+		bill.BalanceDue = due
+	} else {
+		bill.BalanceDue = 0
 	}
 
 	var subTotal, taxTotal float64
@@ -722,6 +731,7 @@ func GetPurchaseBill(c *gin.Context) {
 		return
 	}
 
+	attachPurchaseBillPaymentSplits(utils.DB, &bill)
 	c.JSON(http.StatusOK, bill)
 }
 
@@ -874,6 +884,10 @@ func UpdatePurchaseBill(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Bill not found"})
 		return
 	}
+	// Rebuild the tender breakdown from linked payment outs (falling back to
+	// the stored splits) so a missing payment_splits in the update body keeps
+	// the existing methods and the mark-as-paid shortcut replays them.
+	attachPurchaseBillPaymentSplits(utils.DB, &bill)
 
 	var input struct {
 		PartyID               uuid.UUID                 `json:"party_id"`
@@ -886,6 +900,7 @@ func UpdatePurchaseBill(c *gin.Context) {
 		BalanceDue            float64                   `json:"balance_due"`
 		PaymentMode           string                    `json:"payment_mode"`
 		BankAccountID         *uuid.UUID                `json:"bank_account_id"`
+		PaymentSplits         []models.PaymentSplit     `json:"payment_splits"`
 		Status                string                    `json:"status"`
 		Notes                 string                    `json:"notes"`
 		Signature             string                    `json:"signature"`
@@ -967,18 +982,13 @@ func UpdatePurchaseBill(c *gin.Context) {
 				return
 			}
 		}
+		attachPurchaseBillPaymentSplits(utils.DB, &bill)
 		c.JSON(http.StatusOK, bill)
 		return
 	}
 
 	if err := validateUserBankAccount(userID, input.BankAccountID); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account"})
-		return
-	}
-
-	resolvedBankAccount, err := resolveBankAccountForPaymentMode(userID, input.PaymentMode, input.BankAccountID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account for payment method"})
 		return
 	}
 
@@ -1020,7 +1030,7 @@ func UpdatePurchaseBill(c *gin.Context) {
 		bill.BalanceDue = 0
 	}
 	bill.PaymentMode = input.PaymentMode
-	bill.BankAccountID = resolvedBankAccount
+	bill.BankAccountID = input.BankAccountID
 	bill.Status = input.Status
 	bill.Notes = input.Notes
 	bill.Signature = input.Signature
@@ -1036,6 +1046,18 @@ func UpdatePurchaseBill(c *gin.Context) {
 		bill.AdditionalCharges = models.SumAdditionalCharges(chargeItems)
 	} else {
 		bill.AdditionalCharges = input.AdditionalCharges
+	}
+
+	// Resolve the paid amount into per-tender splits (one PaymentOut per
+	// split is written below); a "paid" bill always splits the full total.
+	if err := finalizePurchaseBillPaymentSplits(userID, &bill, input.PaymentSplits, input.PaymentMode, input.BankAccountID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account for payment method"})
+		return
+	}
+	if due := bill.TotalAmount - bill.PaidAmount; due > 0 {
+		bill.BalanceDue = due
+	} else {
+		bill.BalanceDue = 0
 	}
 
 	// Validate quantities before opening the transaction so a bad payload
