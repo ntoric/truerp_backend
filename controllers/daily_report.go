@@ -67,7 +67,15 @@ func computeProductProfitForRange(userID uuid.UUID, startDate, endDate string) f
 	`
 	utils.DB.Raw(creditQuery, userID, startDate, endDate).Scan(&creditNoteProfit)
 
-	return salesProfit - returnsProfit - creditNoteProfit
+	// Invoice-linked refund payment outs reverse revenue with no itemized
+	// return doc, so the full refunded amount is lost margin here —
+	// matching how the daily profit report treats the same rows.
+	var invoiceRefunds float64
+	utils.DB.Model(&models.PaymentOut{}).
+		Where("user_id = ? AND DATE(date) >= ? AND DATE(date) <= ? AND invoice_id IS NOT NULL", userID, startDate, endDate).
+		Select("COALESCE(SUM(amount_paid - payment_out_discount), 0)").Scan(&invoiceRefunds)
+
+	return salesProfit - returnsProfit - creditNoteProfit - invoiceRefunds
 }
 
 func computeDailyProductProfit(userID uuid.UUID, date string) float64 {
@@ -228,9 +236,19 @@ func loadReportForRange(userID uuid.UUID, startDate, endDate string) (models.Dai
 		Where("sales_return_id IS NULL AND reason NOT LIKE 'Sales return %'").
 		Select("COALESCE(SUM(total_amount), 0)").Scan(&standaloneCreditNotes)
 
+	// Refund payment outs tagged to a sales invoice reverse revenue with no
+	// return or credit-note document — subtract them once here. Return- and
+	// credit-note-linked payments are already counted through their
+	// documents; bill-linked and standalone payments are not revenue events.
+	var invoiceRefunds float64
+	utils.DB.Model(&models.PaymentOut{}).
+		Where("user_id = ? AND DATE(date) >= ? AND DATE(date) <= ? AND invoice_id IS NOT NULL", userID, startDate, endDate).
+		Select("COALESCE(SUM(amount_paid - payment_out_discount), 0)").Scan(&invoiceRefunds)
+
 	report.DailyProfit = report.Sales.TotalAmount -
 		netSalesReturns -
 		standaloneCreditNotes -
+		invoiceRefunds -
 		report.Expenses.TotalAmount
 
 	report.ProductProfit = computeProductProfitForRange(userID, startDate, endDate)
@@ -538,7 +556,7 @@ func writePeriodReportCSV(c *gin.Context, report models.PeriodReport, filename s
 	_ = writer.Write([]string{""})
 	_ = writer.Write([]string{"Accounts Payable (total outstanding)", "", fmt.Sprintf("%.2f", report.AccountsPayableTotal)})
 	_ = writer.Write([]string{"GST Collected (Sales)", "", fmt.Sprintf("%.2f", report.GSTCollected)})
-	_ = writer.Write([]string{"Period Profit (Sales − Expenses − Sales Returns/Credit Notes)", "", fmt.Sprintf("%.2f", report.DailyProfit)})
+	_ = writer.Write([]string{"Period Profit (Sales − Expenses − Sales Returns/Credit Notes/Refunds)", "", fmt.Sprintf("%.2f", report.DailyProfit)})
 	_ = writer.Write([]string{"Product Profit (sale value − purchase cost on items sold)", "", fmt.Sprintf("%.2f", report.ProductProfit)})
 	_ = writer.Write([]string{"Net Cash Flow (In − Out − Expenses − Profit Distributions)", "", fmt.Sprintf("%.2f", report.NetCashFlow)})
 	if report.Loyalty != nil && report.Loyalty.Enabled {

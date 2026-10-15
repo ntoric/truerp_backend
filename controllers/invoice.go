@@ -759,6 +759,13 @@ func DeleteInvoice(c *gin.Context) {
 		return
 	}
 
+	var linkedPaymentOuts int64
+	utils.DB.Model(&models.PaymentOut{}).Where("user_id = ? AND invoice_id = ?", userID, invoice.ID).Count(&linkedPaymentOuts)
+	if linkedPaymentOuts > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot delete invoice with linked payment outs"})
+		return
+	}
+
 	var party models.Party
 	if err := utils.DB.Where("user_id = ? AND id = ?", userID, invoice.PartyID).First(&party).Error; err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invoice party not found"})

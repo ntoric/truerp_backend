@@ -113,9 +113,12 @@ func loadProfitLossReport(userID uuid.UUID, period, anchorDate, startDate, endDa
 
 	salesReturns := plSumMetric(&models.SalesReturn{}, userID, "date", "amount", "status != 'cancelled'", start, end)
 	creditNotes := plSumMetric(&models.CreditNote{}, userID, "date", "total_amount", "status != 'cancelled'", start, end)
+	// Invoice-linked refund payment outs reverse revenue with no return or
+	// credit-note document — they belong in the same deduction line.
+	invoiceRefunds := plSumMetric(&models.PaymentOut{}, userID, "date", "amount_paid - payment_out_discount", "invoice_id IS NOT NULL", start, end)
 	report.SalesReturns = models.DailyReportMetric{
-		TotalAmount: salesReturns.TotalAmount + creditNotes.TotalAmount,
-		Count:       salesReturns.Count + creditNotes.Count,
+		TotalAmount: salesReturns.TotalAmount + creditNotes.TotalAmount + invoiceRefunds.TotalAmount,
+		Count:       salesReturns.Count + creditNotes.Count + invoiceRefunds.Count,
 	}
 
 	purchaseReturns := plSumMetric(&models.PurchaseReturn{}, userID, "date", "amount", "status != 'cancelled'", start, end)

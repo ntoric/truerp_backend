@@ -26,6 +26,9 @@ func GetPaymentOuts(c *gin.Context) {
 	if purchaseBillID := c.Query("purchase_bill_id"); purchaseBillID != "" {
 		query = query.Where("purchase_bill_id = ?", purchaseBillID)
 	}
+	if invoiceID := c.Query("invoice_id"); invoiceID != "" {
+		query = query.Where("invoice_id = ?", invoiceID)
+	}
 	if mode := c.Query("mode"); mode != "" {
 		query = query.Where("mode = ?", mode)
 	}
@@ -39,8 +42,8 @@ func GetPaymentOuts(c *gin.Context) {
 	if search != "" {
 		like := "%" + strings.ToLower(search) + "%"
 		query = query.Where(
-			"LOWER(payment_outs.payment_out_number) LIKE ? OR LOWER(payment_outs.reference) LIKE ? OR LOWER(payment_outs.notes) LIKE ? OR LOWER(payment_outs.mode) LIKE ? OR payment_outs.party_id IN (SELECT id FROM parties WHERE LOWER(name) LIKE ?) OR payment_outs.purchase_bill_id IN (SELECT id FROM purchase_bills WHERE LOWER(bill_number) LIKE ?) OR payment_outs.sales_return_id IN (SELECT id FROM sales_returns WHERE LOWER(return_number) LIKE ?) OR payment_outs.credit_note_id IN (SELECT id FROM credit_notes WHERE LOWER(credit_note_number) LIKE ?)",
-			like, like, like, like, like, like, like, like,
+			"LOWER(payment_outs.payment_out_number) LIKE ? OR LOWER(payment_outs.reference) LIKE ? OR LOWER(payment_outs.notes) LIKE ? OR LOWER(payment_outs.mode) LIKE ? OR payment_outs.party_id IN (SELECT id FROM parties WHERE LOWER(name) LIKE ?) OR payment_outs.purchase_bill_id IN (SELECT id FROM purchase_bills WHERE LOWER(bill_number) LIKE ?) OR payment_outs.sales_return_id IN (SELECT id FROM sales_returns WHERE LOWER(return_number) LIKE ?) OR payment_outs.credit_note_id IN (SELECT id FROM credit_notes WHERE LOWER(credit_note_number) LIKE ?) OR payment_outs.invoice_id IN (SELECT id FROM invoices WHERE LOWER(invoice_number) LIKE ?)",
+			like, like, like, like, like, like, like, like, like,
 		)
 	}
 	// Order by payment date — covered by idx_payment_outs_user_date, unlike
@@ -64,7 +67,7 @@ func GetPaymentOuts(c *gin.Context) {
 			return
 		}
 
-		pageQuery := query.Preload("Party").Preload("PurchaseBill").Preload("SalesReturn").Preload("CreditNote")
+		pageQuery := query.Preload("Party").Preload("PurchaseBill").Preload("SalesReturn").Preload("CreditNote").Preload("Invoice")
 		if perPage > 0 {
 			pageQuery = pageQuery.Limit(perPage).Offset((page - 1) * perPage)
 		}
@@ -89,7 +92,7 @@ func GetPaymentOuts(c *gin.Context) {
 		return
 	}
 
-	if err := query.Preload("Party").Preload("PurchaseBill").Preload("SalesReturn").Preload("CreditNote").Find(&paymentOuts).Error; err != nil {
+	if err := query.Preload("Party").Preload("PurchaseBill").Preload("SalesReturn").Preload("CreditNote").Preload("Invoice").Find(&paymentOuts).Error; err != nil {
 		// Fall back without preloads so a relation/schema mismatch still returns data.
 		if err2 := query.Session(&gorm.Session{}).Find(&paymentOuts).Error; err2 != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch payment outs"})
@@ -107,6 +110,7 @@ func CreatePaymentOut(c *gin.Context) {
 		PurchaseBillID     *uuid.UUID `json:"purchase_bill_id"`
 		SalesReturnID      *uuid.UUID `json:"sales_return_id"`
 		CreditNoteID       *uuid.UUID `json:"credit_note_id"`
+		InvoiceID          *uuid.UUID `json:"invoice_id"`
 		PartyID            uuid.UUID  `json:"party_id" binding:"required"`
 		AmountPaid         float64    `json:"amount_paid" binding:"required,gt=0"`
 		PaymentOutDiscount float64    `json:"payment_out_discount" binding:"gte=0"`
@@ -136,6 +140,7 @@ func CreatePaymentOut(c *gin.Context) {
 		PurchaseBillID:     input.PurchaseBillID,
 		SalesReturnID:      input.SalesReturnID,
 		CreditNoteID:       input.CreditNoteID,
+		InvoiceID:          input.InvoiceID,
 		PartyID:            input.PartyID,
 		AmountPaid:         input.AmountPaid,
 		PaymentOutDiscount: input.PaymentOutDiscount,
@@ -195,10 +200,32 @@ func CreatePaymentOut(c *gin.Context) {
 		}
 	}
 
+	// A linked sales invoice means the payment refunds money the customer
+	// already paid — the standalone fallback for refunds when no sales
+	// return document exists. Same validation as the other linked docs.
+	// It settles in money like a money-mode return refund: the invoice and
+	// the party balance stay untouched.
+	var linkedInvoice models.Invoice
+	if input.InvoiceID != nil && *input.InvoiceID != uuid.Nil {
+		if err := utils.DB.Where("user_id = ? AND id = ?", userID, *input.InvoiceID).First(&linkedInvoice).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid invoice"})
+			return
+		}
+		if linkedInvoice.PartyID != input.PartyID {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invoice does not belong to the selected party"})
+			return
+		}
+		if paymentOut.Reference == "" {
+			paymentOut.Reference = linkedInvoice.InvoiceNumber
+		}
+	}
+
 	// A payment linked to a money-settled sales return is the refund itself:
 	// it mirrors the auto-created refund payment-outs, which settle in money
-	// and never move the party balance.
+	// and never move the party balance. An invoice-linked payment is the
+	// same kind of money refund — it just lacks the return document.
 	returnRefundInMoney := linkedReturn.ID != uuid.Nil && refundSettlesInMoney(linkedReturn.RefundMode)
+	invoiceRefund := linkedInvoice.ID != uuid.Nil
 
 	// Resolve the destination account up front. Initial-investment payments
 	// settle against owner's equity and never touch cash or bank.
@@ -217,15 +244,23 @@ func CreatePaymentOut(c *gin.Context) {
 			return err
 		}
 
-		// Money-settled return refunds post the refund journal (revenue down)
-		// like the auto-created ones; other payment-outs stay on the generic
-		// payable leg.
-		if returnRefundInMoney {
+		// Money-settled refunds post the refund journal (revenue down) like
+		// the auto-created ones — that covers both sales-return refunds and
+		// refunds tagged straight to a sales invoice. Other payment-outs
+		// stay on the generic payable leg.
+		switch {
+		case returnRefundInMoney:
 			if err := postSalesReturnRefundAccounting(tx, userID, &paymentOut, netAmount); err != nil {
 				return err
 			}
-		} else if err := postStandalonePaymentOutAccounting(tx, userID, &paymentOut, netAmount); err != nil {
-			return err
+		case invoiceRefund:
+			if err := postInvoiceRefundAccounting(tx, userID, &paymentOut, &linkedInvoice, netAmount); err != nil {
+				return err
+			}
+		default:
+			if err := postStandalonePaymentOutAccounting(tx, userID, &paymentOut, netAmount); err != nil {
+				return err
+			}
 		}
 
 		// Record the cash/bank movement so the payment out shows in Cash &
@@ -243,6 +278,9 @@ func CreatePaymentOut(c *gin.Context) {
 			} else if linkedCreditNote.ID != uuid.Nil {
 				cashRef = linkedCreditNote.CreditNoteNumber
 				desc = fmt.Sprintf("Payment out %s for credit note %s", ref, linkedCreditNote.CreditNoteNumber)
+			} else if linkedInvoice.ID != uuid.Nil {
+				cashRef = linkedInvoice.InvoiceNumber
+				desc = fmt.Sprintf("Payment out %s for sales invoice %s", ref, linkedInvoice.InvoiceNumber)
 			}
 			if err := recordPaymentCashTxn(tx, userID, accountID, "out", netAmount, input.Date, cashRef, desc); err != nil {
 				return err
@@ -272,9 +310,10 @@ func CreatePaymentOut(c *gin.Context) {
 		}
 
 		// Update party balance (increase since we paid them). Money-settled
-		// return refunds skip this — the refund settled in money, matching
-		// the auto-created refund payment-outs and their delete path.
-		if !returnRefundInMoney {
+		// refunds skip this — the refund settled in money, matching the
+		// auto-created refund payment-outs and their delete path. The same
+		// goes for a refund tagged straight to a sales invoice.
+		if !returnRefundInMoney && !invoiceRefund {
 			var party models.Party
 			if err := tx.Where("user_id = ? AND id = ?", userID, input.PartyID).First(&party).Error; err == nil {
 				if err := tx.Model(&party).Update("balance", party.Balance+netAmount).Error; err != nil {
@@ -344,15 +383,16 @@ func DeletePaymentOut(c *gin.Context) {
 		}
 
 		// Reverse party balance (decrease since we're reversing the payment).
-		// Payments linked to a money-settled sales return never moved the
-		// party balance — the refund settled in money — so there is nothing
-		// to reverse. All other payments (including ones linked to a
-		// credit-settled return or a credit note) did.
-		skipBalanceReversal := false
+		// Payments that settled a refund in money — a money-mode sales return
+		// refund or a refund tagged to a sales invoice — never moved the
+		// party balance, so there is nothing to reverse. All other payments
+		// (including ones linked to a credit-settled return or a credit
+		// note) did.
+		skipBalanceReversal := paymentOut.InvoiceID != nil
 		if paymentOut.SalesReturnID != nil {
 			var salesReturn models.SalesReturn
 			if err := tx.Where("user_id = ? AND id = ?", userID, *paymentOut.SalesReturnID).First(&salesReturn).Error; err == nil {
-				skipBalanceReversal = refundSettlesInMoney(salesReturn.RefundMode)
+				skipBalanceReversal = skipBalanceReversal || refundSettlesInMoney(salesReturn.RefundMode)
 			}
 		}
 		if !skipBalanceReversal {

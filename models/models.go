@@ -334,6 +334,12 @@ type PaymentOut struct {
 	// balance — the issued note's credit is being paid off.
 	CreditNoteID       *uuid.UUID     `json:"credit_note_id,omitempty" gorm:"type:uuid;index"`
 	CreditNote         *CreditNote    `json:"credit_note,omitempty" gorm:"foreignKey:CreditNoteID"`
+	// InvoiceID links a payment-out to the sales invoice it refunds in
+	// money — the fallback for refunds when no sales return document
+	// exists. Like money-settled return refunds these payments never move
+	// the party balance and leave the invoice untouched.
+	InvoiceID          *uuid.UUID     `json:"invoice_id,omitempty" gorm:"type:uuid;index"`
+	Invoice            *Invoice       `json:"invoice,omitempty" gorm:"foreignKey:InvoiceID"`
 	PartyID            uuid.UUID      `json:"party_id" gorm:"type:uuid;not null;index"`
 	Party              Party          `json:"party,omitempty" gorm:"foreignKey:PartyID"`
 	AmountPaid         float64        `json:"amount_paid" gorm:"default:0"`

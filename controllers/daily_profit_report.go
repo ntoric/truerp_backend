@@ -118,6 +118,17 @@ func loadDailyProfitAggregates(db *gorm.DB, userID uuid.UUID, start, end string)
 		 AND cn.sales_return_id IS NULL AND cn.reason NOT LIKE 'Sales return %'
 		 AND `+dayRange("cn.date")+`
 		 GROUP BY `+utils.SQLDateExpr("cn.date"), userID, start, end))
+	// Refund payment outs tagged to a sales invoice are itemless revenue
+	// reversals — the refund path for invoices with no return document.
+	// Return- and credit-note-linked payments are already counted through
+	// their documents, so only invoice-linked refunds merge in here.
+	mergeDailyProfitSum(salesReturn, scanDailyProfitSum(db,
+		`SELECT `+utils.SQLDateExpr("date")+` AS day,
+			COALESCE(SUM(amount_paid - payment_out_discount), 0) AS value
+		 FROM payment_outs
+		 WHERE user_id = ? AND invoice_id IS NOT NULL AND deleted_at IS NULL
+		 AND `+dayRange("date")+`
+		 GROUP BY `+utils.SQLDateExpr("date"), userID, start, end))
 	for day, v := range salesReturn {
 		at(day).SalesReturn = v
 	}

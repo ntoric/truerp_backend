@@ -503,3 +503,145 @@ func TestCreatePaymentMarksInvoicePartialThenPaid(t *testing.T) {
 		t.Fatalf("after delete: %s paid=%.2f", inv.Status, inv.AmountPaid)
 	}
 }
+
+func TestCreatePaymentOutRefundsInvoice(t *testing.T) {
+	db := openPaymentCashLedgerTestDB(t)
+	userID := uuid.New()
+	customer := models.Party{ID: uuid.New(), UserID: userID, Name: "Customer", PartyType: "customer"}
+	if err := db.Create(&customer).Error; err != nil {
+		t.Fatalf("create party: %v", err)
+	}
+	invoice := models.Invoice{
+		ID:            uuid.New(),
+		UserID:        userID,
+		InvoiceNumber: "INV-REFUND-1",
+		PartyID:       customer.ID,
+		Date:          time.Now(),
+		Status:        "paid",
+		TotalAmount:   1000,
+		AmountPaid:    1000,
+	}
+	if err := db.Create(&invoice).Error; err != nil {
+		t.Fatalf("create invoice: %v", err)
+	}
+
+	c, rec := postJSONContext("POST", "/payment-outs", map[string]interface{}{
+		"party_id":           customer.ID,
+		"invoice_id":         invoice.ID,
+		"amount_paid":        300,
+		"payment_out_number": "POUT-REFUND-1",
+		"mode":               "cash",
+		"date":               time.Now().Format(time.RFC3339),
+	})
+	c.Set("user_id", userID)
+	CreatePaymentOut(c)
+
+	if rec.Code != 201 {
+		t.Fatalf("status = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+
+	var created models.PaymentOut
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode payment out: %v", err)
+	}
+	if created.InvoiceID == nil || *created.InvoiceID != invoice.ID {
+		t.Fatalf("payment out invoice_id = %v, want %s", created.InvoiceID, invoice.ID)
+	}
+	if created.Reference != "INV-REFUND-1" {
+		t.Fatalf("payment out reference = %q, want invoice number", created.Reference)
+	}
+
+	// A money refund settles in cash: the invoice stays fully paid and the
+	// customer's receivable is unchanged — same as a money-settled return.
+	var reloaded models.Invoice
+	if err := db.First(&reloaded, "id = ?", invoice.ID).Error; err != nil {
+		t.Fatalf("reload invoice: %v", err)
+	}
+	if reloaded.AmountPaid != 1000 || reloaded.Status != "paid" {
+		t.Fatalf("invoice after refund: %s paid=%.2f, want paid paid=1000", reloaded.Status, reloaded.AmountPaid)
+	}
+	if got := reloadPartyBalance(t, db, customer.ID); got != 0 {
+		t.Fatalf("party balance = %.2f, want 0", got)
+	}
+
+	var txn models.CashTransaction
+	if err := db.Where("user_id = ? AND transaction_type = ?", userID, "reduce").First(&txn).Error; err != nil {
+		t.Fatalf("cash reduce txn not found: %v", err)
+	}
+	if txn.Amount != 300 || txn.Reference != "INV-REFUND-1" {
+		t.Fatalf("unexpected txn: amount=%.2f ref=%q", txn.Amount, txn.Reference)
+	}
+
+	// Deleting the refund reverses the cash and journal; the invoice and
+	// balance had nothing to restore.
+	dc, drec := deleteContext("/payment-outs/"+created.ID.String(), created.ID.String())
+	dc.Set("user_id", userID)
+	DeletePaymentOut(dc)
+	if drec.Code != 200 {
+		t.Fatalf("delete status = %d, want 200: %s", drec.Code, drec.Body.String())
+	}
+	if err := db.First(&reloaded, "id = ?", invoice.ID).Error; err != nil {
+		t.Fatalf("reload invoice after delete: %v", err)
+	}
+	if reloaded.AmountPaid != 1000 || reloaded.Status != "paid" {
+		t.Fatalf("invoice after delete: %s paid=%.2f, want paid paid=1000", reloaded.Status, reloaded.AmountPaid)
+	}
+	if got := reloadPartyBalance(t, db, customer.ID); got != 0 {
+		t.Fatalf("party balance after delete = %.2f, want 0", got)
+	}
+	if n := countCashTransactions(t, db, userID); n != 0 {
+		t.Fatalf("cash transactions after delete = %d, want 0", n)
+	}
+}
+
+func TestCreatePaymentOutRejectsInvoiceOfAnotherParty(t *testing.T) {
+	db := openPaymentCashLedgerTestDB(t)
+	userID := uuid.New()
+	customerA := models.Party{ID: uuid.New(), UserID: userID, Name: "A", PartyType: "customer"}
+	customerB := models.Party{ID: uuid.New(), UserID: userID, Name: "B", PartyType: "customer"}
+	if err := db.Create(&customerA).Error; err != nil {
+		t.Fatalf("create party: %v", err)
+	}
+	if err := db.Create(&customerB).Error; err != nil {
+		t.Fatalf("create party: %v", err)
+	}
+	invoice := models.Invoice{
+		ID:            uuid.New(),
+		UserID:        userID,
+		InvoiceNumber: "INV-REFUND-2",
+		PartyID:       customerB.ID,
+		Date:          time.Now(),
+		Status:        "paid",
+		TotalAmount:   500,
+		AmountPaid:    500,
+	}
+	if err := db.Create(&invoice).Error; err != nil {
+		t.Fatalf("create invoice: %v", err)
+	}
+
+	c, rec := postJSONContext("POST", "/payment-outs", map[string]interface{}{
+		"party_id":    customerA.ID,
+		"invoice_id":  invoice.ID,
+		"amount_paid": 500,
+		"mode":        "cash",
+		"date":        time.Now().Format(time.RFC3339),
+	})
+	c.Set("user_id", userID)
+	CreatePaymentOut(c)
+
+	if rec.Code != 400 {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var reloaded models.Invoice
+	if err := db.First(&reloaded, "id = ?", invoice.ID).Error; err != nil {
+		t.Fatalf("reload invoice: %v", err)
+	}
+	if reloaded.AmountPaid != 500 || reloaded.Status != "paid" {
+		t.Fatalf("mismatched payment touched the invoice: %s paid=%.2f", reloaded.Status, reloaded.AmountPaid)
+	}
+	var count int64
+	db.Model(&models.PaymentOut{}).Where("user_id = ?", userID).Count(&count)
+	if count != 0 {
+		t.Fatalf("payment out should not be saved for a mismatched invoice")
+	}
+}
