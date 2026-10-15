@@ -3,13 +3,41 @@ package controllers
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"truerp/models"
 	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
+
+// partyFilterQuery builds the list query shared by GetParties and the bulk
+// endpoints so "all matching" bulk actions target the same rows the user sees.
+func partyFilterQuery(userID uuid.UUID, search, category, partyType string) *gorm.DB {
+	query := utils.DB.Model(&models.Party{}).Where("user_id = ?", userID)
+
+	if search != "" {
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where("LOWER(name) LIKE ? OR LOWER(phone) LIKE ? OR LOWER(email) LIKE ? OR LOWER(category) LIKE ?", like, like, like, like)
+	}
+	if category != "" {
+		query = query.Where("category = ?", category)
+	}
+	if partyType != "" {
+		query = query.Where("party_type = ?", partyType)
+	}
+	return query
+}
+
+// PartyBulkFilters lets bulk endpoints apply to every row matching the list
+// filters instead of an explicit id list.
+type PartyBulkFilters struct {
+	Search    string `json:"search"`
+	Category  string `json:"category"`
+	PartyType string `json:"party_type"`
+}
 
 func GetParties(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
@@ -24,22 +52,53 @@ func GetParties(c *gin.Context) {
 	}
 
 	var parties []models.Party
-	query := utils.DB.Where("user_id = ?", userID)
+	query := partyFilterQuery(userID, search, category, partyType).Order("name ASC")
+	parties = make([]models.Party, 0)
 
-	if search != "" {
-		like := "%" + strings.ToLower(search) + "%"
-		query = query.Where("LOWER(name) LIKE ? OR LOWER(phone) LIKE ? OR LOWER(email) LIKE ? OR LOWER(category) LIKE ?", like, like, like, like)
+	// Paginated mode (opt-in via page/per_page); per_page <= 0 returns every
+	// matching row. Unparameterized callers keep the legacy plain array.
+	if c.Query("page") != "" || c.Query("per_page") != "" {
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "25"))
+
+		var total int64
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch parties"})
+			return
+		}
+
+		pageQuery := query
+		if perPage > 0 {
+			pageQuery = pageQuery.Limit(perPage).Offset((page - 1) * perPage)
+		}
+		if err := pageQuery.Find(&parties).Error; err != nil {
+			fmt.Printf("[DEBUG] GetParties - DB error: %v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch parties"})
+			return
+		}
+
+		// The category filter dropdown needs every category, not just the ones
+		// on the current page.
+		categories := make([]string, 0)
+		utils.DB.Model(&models.Party{}).
+			Where("user_id = ? AND category <> ''", userID).
+			Distinct().Pluck("category", &categories)
+
+		fmt.Printf("[DEBUG] GetParties - Page %d, %d of %d parties\n", page, len(parties), total)
+		c.JSON(http.StatusOK, gin.H{
+			"parties":    parties,
+			"total":      total,
+			"page":       page,
+			"per_page":   perPage,
+			"categories": categories,
+		})
+		return
 	}
 
-	if category != "" {
-		query = query.Where("category = ?", category)
-	}
-
-	if partyType != "" {
-		query = query.Where("party_type = ?", partyType)
-	}
-
-	if err := query.Order("name ASC").Find(&parties).Error; err != nil {
+	if err := query.Find(&parties).Error; err != nil {
 		fmt.Printf("[DEBUG] GetParties - DB error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch parties"})
 		return
@@ -304,7 +363,9 @@ func BulkDeleteParties(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		IDs []uuid.UUID `json:"ids" binding:"required"`
+		IDs         []uuid.UUID      `json:"ids"`
+		AllMatching bool             `json:"all_matching"`
+		Filters     PartyBulkFilters `json:"filters"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -312,7 +373,20 @@ func BulkDeleteParties(c *gin.Context) {
 		return
 	}
 
-	if err := utils.DB.Where("user_id = ? AND id IN ?", userID, input.IDs).Delete(&models.Party{}).Error; err != nil {
+	var query *gorm.DB
+	if input.AllMatching {
+		query = partyFilterQuery(userID, input.Filters.Search, input.Filters.Category, input.Filters.PartyType)
+		// Never mass-delete the system default vendor.
+		query = query.Where("NOT (party_type = ? AND LOWER(TRIM(name)) = ?)", "vendor", strings.ToLower(utils.DefaultVendorName))
+	} else {
+		if len(input.IDs) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "ids are required"})
+			return
+		}
+		query = utils.DB.Model(&models.Party{}).Where("user_id = ? AND id IN ?", userID, input.IDs)
+	}
+
+	if err := query.Delete(&models.Party{}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete parties"})
 		return
 	}
@@ -324,8 +398,10 @@ func BulkUpdatePartyCategory(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		IDs      []uuid.UUID `json:"ids" binding:"required"`
-		Category string      `json:"category" binding:"required"`
+		IDs         []uuid.UUID      `json:"ids"`
+		Category    string           `json:"category" binding:"required"`
+		AllMatching bool             `json:"all_matching"`
+		Filters     PartyBulkFilters `json:"filters"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -333,9 +409,18 @@ func BulkUpdatePartyCategory(c *gin.Context) {
 		return
 	}
 
-	if err := utils.DB.Model(&models.Party{}).
-		Where("user_id = ? AND id IN ?", userID, input.IDs).
-		Update("category", input.Category).Error; err != nil {
+	var query *gorm.DB
+	if input.AllMatching {
+		query = partyFilterQuery(userID, input.Filters.Search, input.Filters.Category, input.Filters.PartyType)
+	} else {
+		if len(input.IDs) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "ids are required"})
+			return
+		}
+		query = utils.DB.Model(&models.Party{}).Where("user_id = ? AND id IN ?", userID, input.IDs)
+	}
+
+	if err := query.Update("category", input.Category).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update party categories"})
 		return
 	}
