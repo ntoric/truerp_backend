@@ -140,6 +140,7 @@ func allApplicationModels() []interface{} {
 		&models.NotificationEvent{},
 		&models.NotificationChannelConfig{},
 		&models.NotificationDelivery{},
+		&models.Announcement{},
 		&models.CAReportSharing{},
 		&models.Product{},
 		&models.ProductImage{},

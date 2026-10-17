@@ -991,6 +991,25 @@ func SetupRoutes(r *gin.Engine) {
 		adminNotifications.DELETE("/deliveries", controllers.AdminClearNotificationDeliveries)
 	}
 
+	// In-app announcements — active list readable by any signed-in user.
+	announcements := r.Group("/api/v1/announcements")
+	announcements.Use(middleware.AuthRequired())
+	{
+		announcements.GET("/active", controllers.ListActiveAnnouncements)
+	}
+
+	// Announcement publishing (super admin backoffice): CRUD + image upload.
+	adminAnnouncements := r.Group("/api/v1/admin/announcements")
+	adminAnnouncements.Use(middleware.AuthRequired(), middleware.SuperAdminRequired())
+	{
+		adminAnnouncements.GET("", controllers.AdminListAnnouncements)
+		adminAnnouncements.POST("", controllers.AdminCreateAnnouncement)
+		adminAnnouncements.GET("/:id", controllers.AdminGetAnnouncement)
+		adminAnnouncements.PUT("/:id", controllers.AdminUpdateAnnouncement)
+		adminAnnouncements.DELETE("/:id", controllers.AdminDeleteAnnouncement)
+		adminAnnouncements.POST("/image", controllers.AdminUploadAnnouncementImage)
+	}
+
 	// Public support contact channels (read: any auth user; write: super admin)
 	supportSettings := r.Group("/api/v1/support-settings")
 	supportSettings.Use(middleware.AuthRequired())

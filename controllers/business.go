@@ -293,7 +293,11 @@ func UploadSignature(c *gin.Context) {
 }
 
 func isValidImageFile(file *multipart.FileHeader) bool {
-	ext := strings.ToLower(file.Filename[strings.LastIndex(file.Filename, "."):])
+	dot := strings.LastIndex(file.Filename, ".")
+	if dot < 0 {
+		return false
+	}
+	ext := strings.ToLower(file.Filename[dot:])
 	allowedExts := map[string]bool{
 		".jpg":  true,
 		".jpeg": true,

@@ -1847,6 +1847,28 @@ type NotificationDelivery struct {
 	CreatedAt    time.Time  `json:"created_at"`
 }
 
+// Announcement is a platform-wide message (announcement, reminder, release
+// note, etc.) published by the super admin from the backoffice. Active
+// announcements surface to every signed-in user as a tall toast card on the
+// dashboard; the card styling is driven by Type and its height by the
+// content (body length + optional image).
+type Announcement struct {
+	ID          uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	Title       string         `json:"title" gorm:"not null"`
+	Body        string         `json:"body" gorm:"type:text"`
+	Type        string         `json:"type" gorm:"not null;default:'announcement'"` // announcement, reminder, release_note, maintenance, urgent, note
+	ImageURL    string         `json:"image_url"`
+	LinkURL     string         `json:"link_url"`
+	LinkLabel   string         `json:"link_label"`
+	IsActive    bool           `json:"is_active" gorm:"default:true"`
+	StartsAt    *time.Time     `json:"starts_at,omitempty"`
+	EndsAt      *time.Time     `json:"ends_at,omitempty"`
+	CreatedByID uuid.UUID      `json:"created_by_id" gorm:"type:uuid;index"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
 type CAReportSharing struct {
 	ID           uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID       uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
