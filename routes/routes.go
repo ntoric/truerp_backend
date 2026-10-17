@@ -948,6 +948,34 @@ func SetupRoutes(r *gin.Engine) {
 		pageFeatures.PUT("", middleware.SuperAdminRequired(), controllers.UpdatePageFeatures)
 	}
 
+	// In-app support requests (users → platform super admin)
+	supportRequests := r.Group("/api/v1/support-requests")
+	supportRequests.Use(middleware.AuthRequired())
+	{
+		supportRequests.GET("", controllers.ListMySupportRequests)
+		supportRequests.POST("", controllers.CreateSupportRequest)
+		supportRequests.GET("/:id", controllers.GetSupportRequest)
+		supportRequests.PUT("/:id/close", controllers.CloseSupportRequest)
+		supportRequests.POST("/:id/replies", controllers.CreateSupportRequestReply)
+	}
+
+	adminSupportRequests := r.Group("/api/v1/admin/support-requests")
+	adminSupportRequests.Use(middleware.AuthRequired(), middleware.SuperAdminRequired())
+	{
+		adminSupportRequests.GET("", controllers.AdminListSupportRequests)
+		adminSupportRequests.GET("/:id", controllers.AdminGetSupportRequest)
+		adminSupportRequests.PUT("/:id", controllers.AdminUpdateSupportRequest)
+		adminSupportRequests.POST("/:id/replies", controllers.CreateSupportRequestReply)
+	}
+
+	// Public support contact channels (read: any auth user; write: super admin)
+	supportSettings := r.Group("/api/v1/support-settings")
+	supportSettings.Use(middleware.AuthRequired())
+	{
+		supportSettings.GET("", controllers.GetSupportContactSettings)
+		supportSettings.PUT("", middleware.SuperAdminRequired(), controllers.UpdateSupportContactSettings)
+	}
+
 	// Audit Log routes (super admin only)
 	audit := r.Group("/api/v1/audit")
 	audit.Use(middleware.AuthRequired(), middleware.SuperAdminRequired())

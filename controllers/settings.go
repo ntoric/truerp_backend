@@ -139,18 +139,25 @@ func normalizeCustomHex(hex string) string {
 	return "#c81e3a"
 }
 
+var allowedThemeModes = map[string]bool{
+	"light":  true,
+	"dark":   true,
+	"system": true,
+}
+
 func GetAppearanceSettings(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var settings models.AppearanceSettings
 	if err := utils.DB.Where("user_id = ?", userID).First(&settings).Error; err != nil {
-		c.JSON(http.StatusOK, gin.H{"color_theme": "", "custom_hex": ""})
+		c.JSON(http.StatusOK, gin.H{"color_theme": "", "custom_hex": "", "theme_mode": ""})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"color_theme": settings.ColorTheme,
 		"custom_hex":  settings.CustomHex,
+		"theme_mode":  settings.ThemeMode,
 	})
 }
 
@@ -158,45 +165,75 @@ func UpdateAppearanceSettings(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
-		ColorTheme string `json:"color_theme"`
-		CustomHex  string `json:"custom_hex"`
+		ColorTheme *string `json:"color_theme"`
+		CustomHex  *string `json:"custom_hex"`
+		ThemeMode  *string `json:"theme_mode"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	theme := strings.TrimSpace(strings.ToLower(input.ColorTheme))
-	if !allowedColorThemes[theme] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid colour theme"})
-		return
+	updates := map[string]interface{}{}
+
+	if input.ColorTheme != nil {
+		theme := strings.TrimSpace(strings.ToLower(*input.ColorTheme))
+		if !allowedColorThemes[theme] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid colour theme"})
+			return
+		}
+		updates["color_theme"] = theme
+		if input.CustomHex != nil {
+			updates["custom_hex"] = normalizeCustomHex(*input.CustomHex)
+		}
+	} else if input.CustomHex != nil {
+		updates["custom_hex"] = normalizeCustomHex(*input.CustomHex)
 	}
 
-	customHex := normalizeCustomHex(input.CustomHex)
+	if input.ThemeMode != nil {
+		mode := strings.TrimSpace(strings.ToLower(*input.ThemeMode))
+		if !allowedThemeModes[mode] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid theme mode"})
+			return
+		}
+		updates["theme_mode"] = mode
+	}
+
+	if len(updates) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Nothing to update"})
+		return
+	}
 
 	var settings models.AppearanceSettings
 	if err := utils.DB.Where("user_id = ?", userID).First(&settings).Error; err != nil {
 		settings = models.AppearanceSettings{
 			ID:         uuid.New(),
 			UserID:     userID,
-			ColorTheme: theme,
-			CustomHex:  customHex,
+			ColorTheme: "runerail",
+			ThemeMode:  "light",
+		}
+		if v, ok := updates["color_theme"]; ok {
+			settings.ColorTheme = v.(string)
+		}
+		if v, ok := updates["custom_hex"]; ok {
+			settings.CustomHex = v.(string)
+		}
+		if v, ok := updates["theme_mode"]; ok {
+			settings.ThemeMode = v.(string)
 		}
 		if err := utils.DB.Create(&settings).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save appearance settings"})
 			return
 		}
-	} else if err := utils.DB.Model(&settings).Updates(map[string]interface{}{
-		"color_theme": theme,
-		"custom_hex":  customHex,
-	}).Error; err != nil {
+	} else if err := utils.DB.Model(&settings).Updates(updates).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save appearance settings"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"color_theme": theme,
-		"custom_hex":  customHex,
+		"color_theme": settings.ColorTheme,
+		"custom_hex":  settings.CustomHex,
+		"theme_mode":  settings.ThemeMode,
 	})
 }
 

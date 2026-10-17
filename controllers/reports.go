@@ -478,7 +478,7 @@ func GetCustomerWiseReport(c *gin.Context) {
 		InvoiceCount     int64      `json:"invoice_count"`
 		PaidCount        int64      `json:"paid_count"`
 		AvgInvoiceValue  float64    `json:"avg_invoice_value"`
-		LastInvoiceDate  *time.Time `json:"last_invoice_date,omitempty"`
+		LastInvoiceDate  *string    `json:"last_invoice_date,omitempty"`
 	}
 
 	var results []CustomerRow

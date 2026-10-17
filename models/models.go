@@ -1634,6 +1634,7 @@ type AppearanceSettings struct {
 	UserID     uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
 	ColorTheme string         `json:"color_theme" gorm:"default:'runerail'"`
 	CustomHex  string         `json:"custom_hex"`
+	ThemeMode  string         `json:"theme_mode" gorm:"default:'light'"`
 	CreatedAt  time.Time      `json:"created_at"`
 	UpdatedAt  time.Time      `json:"updated_at"`
 	DeletedAt  gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
@@ -2651,6 +2652,51 @@ type SupportTicket struct {
 	CreatedAt    time.Time      `json:"created_at"`
 	UpdatedAt    time.Time      `json:"updated_at"`
 	DeletedAt    gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// SupportRequest is an in-app help request from a user to the platform
+// super admin. Distinct from SupportTicket, which belongs to the customer
+// portal (parties raising tickets to a business).
+type SupportRequest struct {
+	ID            uuid.UUID             `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	RequestNumber string                `json:"request_number" gorm:"not null;index"`
+	OwnerUserID   uuid.UUID             `json:"owner_user_id" gorm:"type:uuid;not null;index"` // store-owner scope of the requester
+	RequesterID   uuid.UUID             `json:"requester_id" gorm:"type:uuid;not null;index"`
+	Requester     *User                 `json:"requester,omitempty" gorm:"foreignKey:RequesterID"`
+	StoreID       *uuid.UUID            `json:"store_id,omitempty" gorm:"type:uuid;index"`
+	Store         *Store                `json:"store,omitempty" gorm:"foreignKey:StoreID"`
+	Subject       string                `json:"subject" gorm:"not null"`
+	Category      string                `json:"category" gorm:"default:'general'"` // general, billing, bug, feature_request, account
+	Message       string                `json:"message" gorm:"type:text;not null"`
+	Status        string                `json:"status" gorm:"default:'open'"` // open, in_progress, resolved, closed
+	AdminNotes    string                `json:"admin_notes" gorm:"type:text"`
+	Replies       []SupportRequestReply `json:"replies,omitempty" gorm:"foreignKey:SupportRequestID"`
+	LastReplyAt   *time.Time            `json:"last_reply_at,omitempty"`
+	ResolvedAt    *time.Time            `json:"resolved_at,omitempty"`
+	CreatedAt     time.Time             `json:"created_at"`
+	UpdatedAt     time.Time             `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt        `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+type SupportRequestReply struct {
+	ID               uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	SupportRequestID uuid.UUID `json:"support_request_id" gorm:"type:uuid;not null;index"`
+	AuthorID         uuid.UUID `json:"author_id" gorm:"type:uuid;not null"`
+	Author           *User     `json:"author,omitempty" gorm:"foreignKey:AuthorID"`
+	IsAdmin          bool      `json:"is_admin" gorm:"default:false"`
+	Message          string    `json:"message" gorm:"type:text;not null"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+// SupportContactSettings is a singleton row holding the public support
+// contact channels shown on the in-app Support page. Editable by super admin.
+type SupportContactSettings struct {
+	ID             uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	SupportEmail   string         `json:"support_email"`
+	WhatsAppNumber string         `json:"whatsapp_number"` // digits incl. country code, used for wa.me links
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	DeletedAt      gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 // SavedInvoiceTemplate stores reusable invoice line-item / terms presets.
