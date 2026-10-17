@@ -968,6 +968,29 @@ func SetupRoutes(r *gin.Engine) {
 		adminSupportRequests.POST("/:id/replies", controllers.CreateSupportRequestReply)
 	}
 
+	// Backoffice notification module (super admin only): event registry,
+	// external channel configuration (SMTP/Telegram/WhatsApp/SMS/Push),
+	// broadcasts and delivery log.
+	adminNotifications := r.Group("/api/v1/admin/notifications")
+	adminNotifications.Use(middleware.AuthRequired(), middleware.SuperAdminRequired())
+	{
+		adminNotifications.GET("/events", controllers.AdminListNotificationEvents)
+		adminNotifications.POST("/events", controllers.AdminCreateNotificationEvent)
+		adminNotifications.GET("/events/:id", controllers.AdminGetNotificationEvent)
+		adminNotifications.PUT("/events/:id", controllers.AdminUpdateNotificationEvent)
+		adminNotifications.DELETE("/events/:id", controllers.AdminDeleteNotificationEvent)
+		adminNotifications.POST("/events/:id/trigger", controllers.AdminTriggerNotificationEvent)
+
+		adminNotifications.GET("/channels", controllers.AdminListNotificationChannels)
+		adminNotifications.PUT("/channels/:channel", controllers.AdminUpdateNotificationChannel)
+		adminNotifications.POST("/channels/:channel/test", controllers.AdminTestNotificationChannel)
+
+		adminNotifications.POST("/broadcast", controllers.AdminBroadcastNotification)
+
+		adminNotifications.GET("/deliveries", controllers.AdminListNotificationDeliveries)
+		adminNotifications.DELETE("/deliveries", controllers.AdminClearNotificationDeliveries)
+	}
+
 	// Public support contact channels (read: any auth user; write: super admin)
 	supportSettings := r.Group("/api/v1/support-settings")
 	supportSettings.Use(middleware.AuthRequired())

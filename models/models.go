@@ -332,8 +332,8 @@ type PaymentOut struct {
 	// CreditNoteID links a payment-out to the credit note it refunds in
 	// money. Unlike sales-return refunds these payments do move the party
 	// balance — the issued note's credit is being paid off.
-	CreditNoteID       *uuid.UUID     `json:"credit_note_id,omitempty" gorm:"type:uuid;index"`
-	CreditNote         *CreditNote    `json:"credit_note,omitempty" gorm:"foreignKey:CreditNoteID"`
+	CreditNoteID *uuid.UUID  `json:"credit_note_id,omitempty" gorm:"type:uuid;index"`
+	CreditNote   *CreditNote `json:"credit_note,omitempty" gorm:"foreignKey:CreditNoteID"`
 	// InvoiceID links a payment-out to the sales invoice it refunds in
 	// money — the fallback for refunds when no sales return document
 	// exists. Like money-settled return refunds these payments never move
@@ -1775,6 +1775,76 @@ type NotificationPreference struct {
 	LeadDays         int       `json:"lead_days" gorm:"default:0"` // Days before due date to send
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+// NotificationEvent is a platform-level event definition managed by the super
+// admin from the backoffice. When the event is triggered (via the admin API or
+// application code calling utils.DispatchNotificationEvent), a notification is
+// rendered from the templates below and fanned out to every channel enabled
+// both here and in NotificationChannelConfig.
+type NotificationEvent struct {
+	ID          uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	Key         string    `json:"key" gorm:"uniqueIndex;not null"` // slug e.g. invoice.created
+	Name        string    `json:"name" gorm:"not null"`
+	Description string    `json:"description"`
+	Category    string    `json:"category" gorm:"default:'custom'"` // sales, payments, inventory, system, custom
+	IsActive    bool      `json:"is_active" gorm:"default:true"`
+
+	// Per-event channel switches — the matching channel must also be enabled
+	// in NotificationChannelConfig for a delivery to be attempted.
+	EmailEnabled    bool `json:"email_enabled" gorm:"default:true"`
+	SMSEnabled      bool `json:"sms_enabled" gorm:"default:false"`
+	WhatsAppEnabled bool `json:"whatsapp_enabled" gorm:"default:false"`
+	TelegramEnabled bool `json:"telegram_enabled" gorm:"default:false"`
+	PushEnabled     bool `json:"push_enabled" gorm:"default:false"`
+	InternalEnabled bool `json:"internal_enabled" gorm:"default:true"`
+
+	// Static recipients (comma or newline separated). Dynamic recipients can
+	// also be passed in the trigger payload (email, phone, telegram_chat_id,
+	// device_tokens keys).
+	RecipientEmails        string `json:"recipient_emails" gorm:"type:text"`
+	RecipientPhones        string `json:"recipient_phones" gorm:"type:text"`
+	RecipientTelegramChats string `json:"recipient_telegram_chats" gorm:"type:text"`
+	PushDeviceTokens       string `json:"push_device_tokens" gorm:"type:text"`
+	NotifyStoreOwner       bool   `json:"notify_store_owner" gorm:"default:false"` // also email/SMS the store owner in trigger data.user_id
+
+	// Templates support {{variable}} placeholders substituted from trigger data.
+	SubjectTemplate string `json:"subject_template"`
+	BodyTemplate    string `json:"body_template" gorm:"type:text"`
+	Variables       string `json:"variables" gorm:"type:text"` // comma-separated placeholder names, documentation only
+
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// NotificationChannelConfig holds the platform-wide configuration for one
+// external notification channel (smtp, telegram, whatsapp, sms, push). Secrets
+// are stored AES-encrypted in the secrets column as a JSON object and are never
+// returned by the API.
+type NotificationChannelConfig struct {
+	ID        uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	Channel   string    `json:"channel" gorm:"uniqueIndex;not null"` // smtp, telegram, whatsapp, sms, push
+	IsEnabled bool      `json:"is_enabled" gorm:"default:false"`
+	Config    string    `json:"config" gorm:"type:text"` // JSON object of non-secret settings
+	Secrets   string    `json:"-" gorm:"type:text"`      // encrypted JSON object of secret settings
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// NotificationDelivery is an audit row written for each channel send attempt
+// performed by the notification dispatcher.
+type NotificationDelivery struct {
+	ID           uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	EventID      *uuid.UUID `json:"event_id,omitempty" gorm:"type:uuid;index"`
+	EventKey     string     `json:"event_key" gorm:"index"`
+	Channel      string     `json:"channel" gorm:"index"` // email, sms, whatsapp, telegram, push, internal
+	Recipient    string     `json:"recipient"`
+	Subject      string     `json:"subject"`
+	Message      string     `json:"message" gorm:"type:text"`
+	Status       string     `json:"status" gorm:"index"` // sent, failed
+	ErrorMessage string     `json:"error_message"`
+	CreatedAt    time.Time  `json:"created_at"`
 }
 
 type CAReportSharing struct {

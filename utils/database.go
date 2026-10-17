@@ -137,6 +137,9 @@ func allApplicationModels() []interface{} {
 		&models.Notification{},
 		&models.NotificationTemplate{},
 		&models.NotificationPreference{},
+		&models.NotificationEvent{},
+		&models.NotificationChannelConfig{},
+		&models.NotificationDelivery{},
 		&models.CAReportSharing{},
 		&models.Product{},
 		&models.ProductImage{},
@@ -214,6 +217,7 @@ func InitDatabase() *gorm.DB {
 
 	DB = db
 	SeedPermissions(db)
+	SeedDefaultNotificationEvents(db)
 	return db
 }
 

@@ -143,34 +143,58 @@ func SendNotification(c *gin.Context) {
 	}
 
 	var sentChannels []string
+	var sendErrors []string
 	channels := strings.Split(notification.Channels, ",")
+
+	var user models.User
+	userLoaded := utils.DB.First(&user, "id = ?", userID).Error == nil
 
 	for _, channel := range channels {
 		channel = strings.TrimSpace(channel)
 		success := false
 
 		switch channel {
-		case "email":
-			// Send to the store owner's email using their DeveloperSettings SMTP config.
-			var user models.User
-			if err := utils.DB.First(&user, "id = ?", userID).Error; err == nil && user.Email != "" {
-				if err := utils.SendEmailForUser(userID, user.Email, notification.Title, notification.Message); err != nil {
-					notification.ErrorMessage = fmt.Sprintf("email: %v", err)
+		case "email", "smtp":
+			// Prefer the backoffice-configured platform SMTP channel; fall back
+			// to the store owner's DeveloperSettings SMTP config.
+			if userLoaded && user.Email != "" {
+				if err := utils.SendChannelMessage(utils.DB, "smtp", user.Email, notification.Title, notification.Message, nil); err != nil {
+					if fallbackErr := utils.SendEmailForUser(userID, user.Email, notification.Title, notification.Message); fallbackErr != nil {
+						sendErrors = append(sendErrors, fmt.Sprintf("email: %v", fallbackErr))
+					} else {
+						success = true
+					}
 				} else {
 					success = true
 				}
-			} else if err != nil {
-				notification.ErrorMessage = fmt.Sprintf("email: user lookup failed: %v", err)
+			} else {
+				sendErrors = append(sendErrors, "email: user has no email address")
 			}
 		case "sms":
-			// TODO: Implement SMS sending
-			success = true
+			if userLoaded && user.Phone != "" {
+				if err := utils.SendChannelMessage(utils.DB, "sms", user.Phone, notification.Title, notification.Message, nil); err != nil {
+					sendErrors = append(sendErrors, fmt.Sprintf("sms: %v", err))
+				} else {
+					success = true
+				}
+			} else {
+				sendErrors = append(sendErrors, "sms: user has no phone number")
+			}
 		case "whatsapp":
-			// TODO: Implement WhatsApp sending
-			success = true
+			if userLoaded && user.Phone != "" {
+				if err := utils.SendChannelMessage(utils.DB, "whatsapp", user.Phone, notification.Title, notification.Message, nil); err != nil {
+					sendErrors = append(sendErrors, fmt.Sprintf("whatsapp: %v", err))
+				} else {
+					success = true
+				}
+			} else {
+				sendErrors = append(sendErrors, "whatsapp: user has no phone number")
+			}
 		case "internal":
 			// Internal notifications are always successful
 			success = true
+		default:
+			sendErrors = append(sendErrors, fmt.Sprintf("%s: unsupported channel", channel))
 		}
 
 		if success {
@@ -178,10 +202,16 @@ func SendNotification(c *gin.Context) {
 		}
 	}
 
+	notification.ErrorMessage = strings.Join(sendErrors, "; ")
+
 	now := time.Now()
 	notification.SentChannels = strings.Join(sentChannels, ",")
-	notification.Status = "sent"
-	notification.SentAt = &now
+	if len(sentChannels) > 0 {
+		notification.Status = "sent"
+		notification.SentAt = &now
+	} else {
+		notification.Status = "failed"
+	}
 
 	if err := utils.DB.Save(&notification).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update notification"})
