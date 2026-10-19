@@ -198,6 +198,9 @@ func allApplicationModels() []interface{} {
 		&models.DBBackupSettings{},
 		&models.DBBackupRecord{},
 		&models.MigrationJob{},
+		&models.OAuthClient{},
+		&models.OAuthCode{},
+		&models.OAuthRefreshToken{},
 	}
 }
 

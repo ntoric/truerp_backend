@@ -26,6 +26,25 @@ func SetupRoutes(r *gin.Engine) {
 		auth.POST("/app-version", middleware.AuthRequired(), controllers.ReportAppVersion)
 	}
 
+	// OAuth 2.0 Discovery & Endpoints
+	r.GET("/.well-known/oauth-authorization-server", controllers.OAuthDiscovery)
+	r.GET("/.well-known/openid-configuration", controllers.OAuthDiscovery)
+
+	oauth := r.Group("/api/v1/oauth")
+	{
+		oauth.GET("/.well-known/oauth-authorization-server", controllers.OAuthDiscovery)
+		oauth.GET("/authorize", controllers.OAuthAuthorize)
+		oauth.POST("/authorize", controllers.OAuthAuthorize)
+		oauth.POST("/token", controllers.OAuthToken)
+		oauth.POST("/revoke", controllers.OAuthRevoke)
+		oauth.GET("/userinfo", middleware.AuthRequired(), controllers.OAuthUserInfo)
+
+		// OAuth client management (super admin)
+		oauth.GET("/clients", middleware.AuthRequired(), middleware.SuperAdminRequired(), controllers.ListOAuthClients)
+		oauth.POST("/clients", middleware.AuthRequired(), middleware.SuperAdminRequired(), controllers.CreateOAuthClient)
+		oauth.DELETE("/clients/:id", middleware.AuthRequired(), middleware.SuperAdminRequired(), controllers.DeleteOAuthClient)
+	}
+
 	// Store management (super admin)
 	stores := r.Group("/api/v1/stores")
 	stores.Use(middleware.AuthRequired(), middleware.SuperAdminRequired())

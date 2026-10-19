@@ -25,6 +25,7 @@ func main() {
 	utils.InitDatabase()
 	controllers.EnsureDefaultSuperAdmin()
 	controllers.EnsureStoresMigrated()
+	controllers.SeedDefaultOAuthClients(utils.DB)
 	_ = services.GetDefaultStorageService()
 
 	// Register all migration importers with the async job framework so the
