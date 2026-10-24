@@ -1,0 +1,16 @@
+when:
+  - event: push
+    branch: main
+
+steps:
+  - name: build
+    image: debian
+    commands:
+      - echo "This is the build step"
+      - echo "some-data" > some-file.txt
+  - name: a-test-step
+    image: alpine
+    commands:
+      - echo "Testing ..."
+      - cat some-file.txt
+      - echo "Test completed successfully"
