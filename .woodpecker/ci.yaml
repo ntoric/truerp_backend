@@ -1,0 +1,53 @@
+# TruERP backend pipeline: test -> build -> publish image -> staging deploy.
+#
+# Required Woodpecker secrets (Repo -> Settings -> Secrets):
+#   docker_username   Docker Hub user that owns the image repo
+#   docker_password   Docker Hub access token
+#   staging_host      Staging server hostname/IP
+#   staging_user      SSH user on the staging server
+#   staging_ssh_key   Private SSH key for staging_user
+#
+# Server layout expected on staging (see prod-compose.yml header):
+#   /opt/truerp-backend/prod-compose.yml + .env + truerp-uploads/
+
+when:
+  - event: push
+    branch: [staging]
+  - event: pull_request
+    branch: [staging]
+  - event: manual
+
+variables:
+  - &go_image golang:1.26-bookworm
+
+steps:
+  test:
+    image: *go_image
+    commands:
+      - go vet ./...
+      - go test -count=1 ./...
+      - go build -trimpath -ldflags="-s -w" -o /tmp/truerp .
+    when:
+      - event: push
+        branch: [staging]
+      - event: pull_request
+        branch: [staging]
+      - event: manual
+
+
+  build-and-publish:
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      repo: ntoric/truerp-api
+      dockerfile: Dockerfile
+      tags:
+        - staging
+        - ${CI_COMMIT_SHA:0:8}
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+    when:
+      - event: push
+        branch: [staging]
+      - event: manual

@@ -1,0 +1,54 @@
+# TruERP backend pipeline: test -> build -> publish image -> staging deploy.
+#
+# Required Woodpecker secrets (Repo -> Settings -> Secrets):
+#   docker_username   Docker Hub user that owns the image repo
+#   docker_password   Docker Hub access token
+#   staging_host      Staging server hostname/IP
+#   staging_user      SSH user on the staging server
+#   staging_ssh_key   Private SSH key for staging_user
+#
+# Server layout expected on staging (see prod-compose.yml header):
+#   /opt/truerp-backend/prod-compose.yml + .env + truerp-uploads/
+
+when:
+  - event: manual
+
+steps:
+  deploy-staging:
+    image: appleboy/drone-ssh
+    settings:
+      host:
+        from_secret: staging_host
+      username:
+        from_secret: staging_user
+      key:
+        from_secret: staging_ssh_key
+      script_stop: true
+      script:
+        - cd /opt/truerp-backend
+        - export IMAGE_TAG=staging
+        - docker compose -f prod-compose.yml pull api
+        # Recreating the container restarts the application on the new image
+        - docker compose -f prod-compose.yml up -d --remove-orphans --force-recreate api
+        - sleep 10
+        - curl -fsS http://127.0.0.1:8088/health
+    # when:
+    #   - event: manual
+
+
+  restart-api:
+    image: appleboy/drone-ssh
+    settings:
+      host:
+        from_secret: staging_host
+      username:
+        from_secret: staging_user
+      key:
+        from_secret: staging_ssh_key
+      script_stop: true
+      script:
+        - cd /opt/truerp-backend
+        - docker compose -f prod-compose.yml restart api
+        - sleep 5
+        - curl -fsS http://127.0.0.1:8088/health
+

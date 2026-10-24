@@ -1,0 +1,17 @@
+when:
+  - event: push
+    branch: [staging]
+  - event: pull_request
+    branch: [staging]
+  - event: manual
+
+variables:
+  - &go_image golang:1.26-bookworm
+
+steps:
+  test:
+    image: *go_image
+    commands:
+      - go vet ./...
+      - go test -count=1 ./...
+      - go build -trimpath -ldflags="-s -w" -o /tmp/truerp .
