@@ -193,6 +193,8 @@ func SetupRoutes(r *gin.Engine) {
 		dashboard.GET("/daily-profit-report/pdf", controllers.ExportDailyProfitReportPDF)
 		dashboard.POST("/daily-profit-report/refresh", controllers.RefreshDailyProfitReport)
 		dashboard.GET("/stock-report", controllers.GetStockReport)
+		dashboard.GET("/stock-report/excel", controllers.ExportStockReportExcel)
+		dashboard.GET("/stock-report/pdf", controllers.ExportStockReportPDF)
 
 		// Daily report email automation (auto-mail PDF export to configured recipients)
 		dashboard.GET("/report-email-settings", controllers.GetDailyReportEmailSettingsHandler)
