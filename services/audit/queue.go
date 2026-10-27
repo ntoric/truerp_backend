@@ -2,6 +2,7 @@ package audit
 
 import (
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -199,6 +200,12 @@ func writeBatch(batch []models.AuditLog) {
 				CreateInBatches(&rows, batchSize).Error
 			if lastErr == nil {
 				break
+			}
+			// Shard dropped while running (or a stale ensure-cache entry):
+			// evict so the next attempt recreates it.
+			if strings.Contains(strings.ToLower(lastErr.Error()), "no such table") ||
+				strings.Contains(strings.ToLower(lastErr.Error()), "does not exist") {
+				ensuredTables.Delete(table)
 			}
 		}
 		if lastErr != nil {

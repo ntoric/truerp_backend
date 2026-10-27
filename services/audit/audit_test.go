@@ -25,6 +25,13 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Every pooled connection to :memory: gets a private database; pin the
+	// pool to one connection so DDL and inserts see the same DB.
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(1)
 	if err := db.Exec(`CREATE TABLE parties (
 		id TEXT PRIMARY KEY, user_id TEXT, name TEXT, party_type TEXT,
 		opening_balance REAL, balance REAL, password TEXT,
