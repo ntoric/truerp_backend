@@ -467,6 +467,15 @@ func adjustPartyBalance(tx *gorm.DB, userID, partyID uuid.UUID, delta float64) e
 	return tx.Model(&party).Update("balance", party.Balance+delta).Error
 }
 
+// invoicePartyDebit is the receivable leg an invoice contributes to the party
+// balance; a cancelled invoice contributes nothing.
+func invoicePartyDebit(invoice *models.Invoice) float64 {
+	if invoice.Status == "cancelled" {
+		return 0
+	}
+	return invoice.TotalAmount
+}
+
 func reverseCashAddTransaction(tx *gorm.DB, userID uuid.UUID, txn models.CashTransaction) error {
 	if err := adjustBankAccountBalance(tx, userID, txn.AccountID, -txn.Amount, false); err != nil {
 		return err

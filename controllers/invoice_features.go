@@ -475,6 +475,14 @@ func UpdateInvoiceStatus(c *gin.Context) {
 		return
 	}
 
+	// A cancelled invoice carries no receivable leg on the party balance;
+	// reinstating restores it.
+	if prevStatus != "cancelled" && invoice.Status == "cancelled" {
+		_ = adjustPartyBalance(utils.DB, userID, invoice.PartyID, -invoice.TotalAmount)
+	} else if prevStatus == "cancelled" && invoice.Status != "cancelled" {
+		_ = adjustPartyBalance(utils.DB, userID, invoice.PartyID, invoice.TotalAmount)
+	}
+
 	changedBy := userName
 	if changedBy == "" {
 		changedBy = "user"

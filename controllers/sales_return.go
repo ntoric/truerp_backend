@@ -365,7 +365,9 @@ func ProcessSalesReturn(c *gin.Context) {
 		}
 
 		if productID != nil && *productID != uuid.Nil && restoreOutlet != uuid.Nil {
-			updateInventoryStock(userID, *productID, restoreOutlet, "return", item.Quantity, item.UnitPrice, batchNo, nil, expDate)
+			// Cost 0: UnitPrice is the sale price — returned goods come back at
+			// the current average cost, they must not re-rate it upward.
+			updateInventoryStock(userID, *productID, restoreOutlet, "return", item.Quantity, 0, batchNo, nil, expDate)
 		}
 	}
 

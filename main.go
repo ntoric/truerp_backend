@@ -57,6 +57,11 @@ func main() {
 	// daily-profit updates in Developer Settings, plus priority refresh jobs.
 	controllers.StartDailyProfitScheduler()
 
+	// Start the background cron that records the current stock quantity and
+	// value at 1AM IST daily — as the previous day's closing stock and the
+	// current day's opening stock in daily_stock_summary_log.
+	controllers.StartDailyStockSummaryLogScheduler()
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 

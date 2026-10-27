@@ -57,6 +57,7 @@ func SetupRoutes(r *gin.Engine) {
 	{
 		invoices.GET("", controllers.GetInvoices)
 		invoices.POST("", controllers.CreateInvoice)
+		invoices.POST("/check-stock", controllers.CheckInvoiceStock)
 		invoices.POST("/import/csv", controllers.ImportInvoicesCSV)
 		invoices.GET("/stats", controllers.GetInvoiceStats)
 		invoices.GET("/next-number", controllers.GetNextInvoiceNumber)

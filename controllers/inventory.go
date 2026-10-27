@@ -516,7 +516,9 @@ func UpdateStockEntry(c *gin.Context) {
 
 	// Only adjust available stock for already-approved entries
 	if entry.ProductID != nil && stockEntryIsApproved(entry.ApprovalStatus) {
-		updateInventoryStock(userID, *entry.ProductID, entry.OutletID, "adjustment", -oldQty, entry.CostPrice, oldBatch, nil, nil)
+		// Reversal must not re-rate average cost — sale-type entries carry the
+		// selling price in cost_price, not the stock cost.
+		updateInventoryStock(userID, *entry.ProductID, entry.OutletID, "adjustment", -oldQty, 0, oldBatch, nil, nil)
 		updateInventoryStock(userID, *entry.ProductID, entry.OutletID, "adjustment", input.Quantity, input.CostPrice, newBatch, mfgDate, expDate)
 	}
 
@@ -1080,14 +1082,18 @@ func applyInvoiceSaleStock(userID uuid.UUID, invoice *models.Invoice) {
 		}
 
 		batchNo := strings.TrimSpace(item.BatchNo)
+
+		var product models.Product
+		productFound := utils.DB.Where("user_id = ? AND id = ?", userID, *item.ProductID).First(&product).Error == nil
+
 		outletID := resolveSaleWarehouseID(userID, *item.ProductID)
 		if outletID == uuid.Nil {
 			fmt.Printf("[DEBUG] applyInvoiceSaleStock - No warehouse for user %s product %s\n", userID, *item.ProductID)
+			if productFound {
+				snapshotInvoiceItemProductState(userID, item, product.PurchasePrice)
+			}
 			continue
 		}
-
-		var product models.Product
-		_ = utils.DB.Where("user_id = ? AND id = ?", userID, *item.ProductID).First(&product).Error
 
 		if product.EnableBatching && batchNo == "" {
 			if stock, ok := pickFEFOBatch(userID, *item.ProductID, outletID, math.Abs(item.Quantity)); ok {
@@ -1142,6 +1148,30 @@ func applyInvoiceSaleStock(userID uuid.UUID, invoice *models.Invoice) {
 			continue
 		}
 		updateInventoryStock(userID, *item.ProductID, outletID, "sale", qty, 0, batchNo, nil, item.ExpDate)
+		if productFound {
+			snapshotInvoiceItemProductState(userID, item, product.PurchasePrice)
+		}
+	}
+}
+
+// snapshotInvoiceItemProductState records the product's purchase price and the
+// remaining stock balance on the invoice item at the time it was billed.
+func snapshotInvoiceItemProductState(userID uuid.UUID, item *models.InvoiceItem, purchasePrice float64) {
+	var balance float64
+	if err := utils.DB.Model(&models.InventoryStock{}).
+		Where("user_id = ? AND product_id = ?", userID, *item.ProductID).
+		Select("COALESCE(SUM(quantity), 0)").
+		Scan(&balance).Error; err != nil {
+		fmt.Printf("[DEBUG] snapshotInvoiceItemProductState - balance query error: %v\n", err)
+		return
+	}
+	item.PurchasePrice = &purchasePrice
+	item.StockBalance = &balance
+	if err := utils.DB.Model(item).Updates(map[string]interface{}{
+		"purchase_price": purchasePrice,
+		"stock_balance":  balance,
+	}).Error; err != nil {
+		fmt.Printf("[DEBUG] snapshotInvoiceItemProductState - item update error: %v\n", err)
 	}
 }
 
@@ -1159,7 +1189,9 @@ func restoreInvoiceSaleStockQuantities(userID, invoiceID uuid.UUID) {
 	for _, entry := range entries {
 		if entry.ProductID != nil && stockEntryIsApproved(entry.ApprovalStatus) {
 			// Sale entries store negative quantity; -entry.Quantity restores stock.
-			updateInventoryStock(userID, *entry.ProductID, entry.OutletID, "adjustment", -entry.Quantity, entry.CostPrice, entry.BatchNo, entry.MfgDate, entry.ExpDate)
+			// Cost 0: sale entries store the selling price — restoring at it would
+			// re-rate average cost to the sale price on every invoice edit/cancel.
+			updateInventoryStock(userID, *entry.ProductID, entry.OutletID, "adjustment", -entry.Quantity, 0, entry.BatchNo, entry.MfgDate, entry.ExpDate)
 		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 func GetQuotations(c *gin.Context) {
@@ -717,7 +718,7 @@ func ConvertToInvoice(c *gin.Context) {
 	}
 
 	// Update party balance
-	utils.DB.Model(&quotation.Party).Update("balance", quotation.Party.Balance+invoice.TotalAmount)
+	utils.DB.Model(&quotation.Party).Update("balance", gorm.Expr("balance + ?", invoicePartyDebit(&invoice)))
 
 	// Update quotation status
 	now := time.Now()

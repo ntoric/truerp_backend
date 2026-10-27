@@ -295,8 +295,12 @@ type InvoiceItem struct {
 	SACCode     string     `json:"sac_code"`
 	BatchNo     string     `json:"batch_no"`
 	ExpDate     *time.Time `json:"exp_date,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	// PurchasePrice snapshots the product's purchase price when the item was billed.
+	PurchasePrice *float64 `json:"purchase_price,omitempty"`
+	// StockBalance snapshots the product's remaining stock when the item was billed.
+	StockBalance *float64  `json:"stock_balance,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type Payment struct {
@@ -860,6 +864,38 @@ type StockOpeningOverride struct {
 	UpdatedAt     time.Time      `json:"updated_at"`
 	DeletedAt     gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
+
+// DailyStockSummaryLog is the materialized business-wide stock position for
+// one calendar day: the aggregate opening and closing quantity/value across
+// all products and outlets, plus the day's sales, COGS, purchase, and expense
+// totals (all tax-exclusive, matching the daily profit report). Rows are
+// written by the daily 1AM IST scheduler — each run records the current
+// position as the previous day's closing stock and the current day's opening
+// stock — so the table doubles as a frozen audit trail of day-end inventory
+// positions. Each entry is store-specific: StoreID is the store that owns the
+// data (stores.owner_user_id ↔ user_id is 1:1).
+type DailyStockSummaryLog struct {
+	ID      uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID  uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;uniqueIndex:idx_daily_stock_summary_log"`
+	StoreID *uuid.UUID `json:"store_id,omitempty" gorm:"type:uuid;index"`
+	Store   *Store     `json:"store,omitempty" gorm:"foreignKey:StoreID"`
+	LogDate time.Time  `json:"log_date" gorm:"not null;uniqueIndex:idx_daily_stock_summary_log"` // calendar day (IST) at day start
+
+	OpeningQty   float64 `json:"opening_qty" gorm:"not null;default:0"`
+	OpeningValue float64 `json:"opening_value" gorm:"not null;default:0"`
+	ClosingQty   float64 `json:"closing_qty" gorm:"not null;default:0"`
+	ClosingValue float64 `json:"closing_value" gorm:"not null;default:0"`
+
+	Sales    float64 `json:"sales" gorm:"not null;default:0"`
+	COGS     float64 `json:"cogs" gorm:"not null;default:0"`
+	Purchase float64 `json:"purchase" gorm:"not null;default:0"`
+	Expenses float64 `json:"expenses" gorm:"not null;default:0"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (DailyStockSummaryLog) TableName() string { return "daily_stock_summary_log" }
 
 // StockSnapshotMeta stores the fingerprint of the stock source data used by
 // the last snapshot rebuild for a user, so reports rebuild only when the

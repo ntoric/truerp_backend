@@ -21,6 +21,7 @@ func setupProfitLossTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	if err := db.AutoMigrate(
+		&models.Store{},
 		&models.Business{},
 		&models.Product{},
 		&models.StockEntry{},
@@ -28,7 +29,9 @@ func setupProfitLossTestDB(t *testing.T) *gorm.DB {
 		&models.StockDailySnapshot{},
 		&models.StockSnapshotMeta{},
 		&models.StockOpeningOverride{},
+		&models.DailyStockSummaryLog{},
 		&models.Invoice{},
+		&models.InvoiceItem{},
 		&models.PurchaseBill{},
 		&models.Expense{},
 		&models.ExpenseItem{},
@@ -216,9 +219,9 @@ func TestLoadProfitLossReport(t *testing.T) {
 	if got := report.Expenses.TotalAmount; got != 800 {
 		t.Fatalf("expenses = %v, want 800", got)
 	}
-	// Net = 6500 + 2000 − 800 (indirect expenses are no longer deducted)
-	if got := report.NetProfit; got != 7700 {
-		t.Fatalf("net profit = %v, want 7700", got)
+	// Net = 6500 + 2000 − 850 indirect − 800 expenses
+	if got := report.NetProfit; got != 6850 {
+		t.Fatalf("net profit = %v, want 6850", got)
 	}
 	if len(report.IndirectExpenseLines) != 2 {
 		t.Fatalf("indirect expense lines = %d, want 2", len(report.IndirectExpenseLines))

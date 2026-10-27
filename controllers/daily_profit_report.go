@@ -199,11 +199,13 @@ func loadDailyProfitAggregates(db *gorm.DB, userID uuid.UUID, start, end string)
 	return agg
 }
 
-// dailyStockPosition is the business-wide stock value at the start and end of
-// a calendar day, read from the materialized snapshot table.
+// dailyStockPosition is the business-wide stock position at the start and end
+// of a calendar day, read from the materialized snapshot table.
 type dailyStockPosition struct {
-	Opening float64
-	Closing float64
+	OpeningQty float64
+	Opening    float64
+	ClosingQty float64
+	Closing    float64
 }
 
 // loadDailyStockPositions returns opening/closing stock value per day over
@@ -217,14 +219,18 @@ func loadDailyStockPositions(db *gorm.DB, userID uuid.UUID, start, end string) m
 	}
 
 	type stockDayRow struct {
-		Day     string
-		Opening float64
-		Closing float64
+		Day        string
+		OpeningQty float64
+		Opening    float64
+		ClosingQty float64
+		Closing    float64
 	}
 	var stockRows []stockDayRow
 	db.Raw(
 		`SELECT `+utils.SQLDateExpr("snapshot_date")+` AS day,
+			COALESCE(SUM(opening_qty), 0) AS opening_qty,
 			COALESCE(SUM(opening_value), 0) AS opening,
+			COALESCE(SUM(closing_qty), 0) AS closing_qty,
 			COALESCE(SUM(closing_value), 0) AS closing
 		 FROM stock_daily_snapshots
 		 WHERE user_id = ?
@@ -233,7 +239,10 @@ func loadDailyStockPositions(db *gorm.DB, userID uuid.UUID, start, end string) m
 
 	raw := make(map[string]dailyStockPosition, len(stockRows))
 	for _, r := range stockRows {
-		raw[normalizeReportDay(r.Day)] = dailyStockPosition{Opening: r.Opening, Closing: r.Closing}
+		raw[normalizeReportDay(r.Day)] = dailyStockPosition{
+			OpeningQty: r.OpeningQty, Opening: r.Opening,
+			ClosingQty: r.ClosingQty, Closing: r.Closing,
+		}
 	}
 
 	// Baseline: computed stock value at close of the day before the range.
@@ -246,16 +255,18 @@ func loadDailyStockPositions(db *gorm.DB, userID uuid.UUID, start, end string) m
 		return positions
 	}
 	prevDay := startT.AddDate(0, 0, -1).Format("2006-01-02")
-	var prevClosing float64
+	var prevClosingQty, prevClosing float64
 	for _, p := range snapshotPositionsAsOfDB(db, userID, prevDay) {
+		prevClosingQty += p.Qty
 		prevClosing += p.Value
 	}
 
 	// Opening-stock overrides shift every day's computed position by a
 	// constant once their base day (effective_date − 1) is reached.
 	type overrideDelta struct {
-		base  string
-		delta float64
+		base     string
+		deltaQty float64
+		delta    float64
 	}
 	var deltas []overrideDelta
 	if db.Migrator().HasTable(&models.StockOpeningOverride{}) {
@@ -263,11 +274,14 @@ func loadDailyStockPositions(db *gorm.DB, userID uuid.UUID, start, end string) m
 		db.Unscoped().Where("user_id = ?", userID).Order("effective_date").Find(&overrides)
 		for _, o := range overrides {
 			base := o.EffectiveDate.AddDate(0, 0, -1).Format("2006-01-02")
-			var baseValue float64
+			var baseQty, baseValue float64
 			for _, p := range snapshotPositionsAsOfDB(db, userID, base) {
+				baseQty += p.Qty
 				baseValue += p.Value
 			}
-			deltas = append(deltas, overrideDelta{base: base, delta: o.Value - baseValue})
+			deltas = append(deltas, overrideDelta{
+				base: base, deltaQty: o.Quantity - baseQty, delta: o.Value - baseValue,
+			})
 		}
 	}
 
@@ -276,28 +290,35 @@ func loadDailyStockPositions(db *gorm.DB, userID uuid.UUID, start, end string) m
 	// override-adjusted closing so the position carries across range
 	// boundaries (e.g. Oct 1 opening = Sep 30 closing).
 	di := 0
-	var deltaPrev float64
+	var deltaQtyPrev, deltaPrev float64
 	for di < len(deltas) && deltas[di].base <= prevDay {
+		deltaQtyPrev = deltas[di].deltaQty
 		deltaPrev = deltas[di].delta
 		di++
 	}
 	for d := startT; !d.After(endT); d = d.AddDate(0, 0, 1) {
 		day := d.Format("2006-01-02")
-		delta := deltaPrev
+		deltaQty, delta := deltaQtyPrev, deltaPrev
 		for di < len(deltas) && deltas[di].base <= day {
+			deltaQty = deltas[di].deltaQty
 			delta = deltas[di].delta
 			di++
 		}
 		pos := raw[day]
 		if pos.Closing == 0 && pos.Opening == 0 {
 			// No snapshot rows this day: position carries forward unchanged.
+			pos.ClosingQty = prevClosingQty
 			pos.Closing = prevClosing
 		}
 		positions[day] = dailyStockPosition{
-			Opening: prevClosing + deltaPrev,
-			Closing: pos.Closing + delta,
+			OpeningQty: prevClosingQty + deltaQtyPrev,
+			Opening:    prevClosing + deltaPrev,
+			ClosingQty: pos.ClosingQty + deltaQty,
+			Closing:    pos.Closing + delta,
 		}
+		prevClosingQty = pos.ClosingQty
 		prevClosing = pos.Closing
+		deltaQtyPrev = deltaQty
 		deltaPrev = delta
 	}
 	return positions

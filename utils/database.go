@@ -161,6 +161,7 @@ func allApplicationModels() []interface{} {
 		&models.StockDailySnapshot{},
 		&models.StockSnapshotMeta{},
 		&models.StockOpeningOverride{},
+		&models.DailyStockSummaryLog{},
 		&models.TaxPeriod{},
 		&models.InputTaxCredit{},
 		&models.GSTFilingStatus{},
