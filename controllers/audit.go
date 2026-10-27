@@ -6,53 +6,63 @@ import (
 	"strings"
 	"time"
 	"truerp/models"
+	"truerp/services/audit"
 	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
-// GetAuditLogs retrieves audit logs with filtering
-func GetAuditLogs(c *gin.Context) {
-	userID := c.MustGet("user_id").(uuid.UUID)
+// auditUnionDB returns a queryable *gorm.DB backed by a UNION ALL of the
+// legacy audit_logs table and every monthly shard (audit_logs_YYYY_MM). When
+// from/to bounds are provided, out-of-range monthly tables are skipped.
+func auditUnionDB(from, to *time.Time) *gorm.DB {
+	tables := audit.MonthTablesInRange(audit.AuditTables(utils.DB), from, to)
+	return utils.DB.Table("(" + audit.UnionSelect(tables) + ") AS audit_logs")
+}
 
-	var auditLogs []models.AuditLog
-	query := utils.DB.Where("user_id = ?", userID)
+// parseAuditBound parses a from/to query param (YYYY-MM-DD or RFC3339).
+func parseAuditBound(s string, endOfDay bool) *time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	for _, layout := range []string{"2006-01-02", time.RFC3339, "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			if endOfDay && layout == "2006-01-02" {
+				t = t.AddDate(0, 0, 1)
+			}
+			return &t
+		}
+	}
+	return nil
+}
 
-	// Filter by action
+// applyAuditFilters applies the shared filter params used by list/export/delete.
+func applyAuditFilters(query *gorm.DB, c *gin.Context) *gorm.DB {
 	if action := c.Query("action"); action != "" {
 		query = query.Where("action = ?", action)
 	}
-
-	// Filter by entity type
 	if entityType := c.Query("entity_type"); entityType != "" {
 		query = query.Where("entity_type = ?", entityType)
 	}
-
-	// Filter by status
 	if status := c.Query("status"); status != "" {
 		query = query.Where("status = ?", status)
 	}
-
-	// Filter by user name
 	if userName := c.Query("user_name"); userName != "" {
-		query = query.Where("LOWER(user_name) LIKE ?", "%"+strings.ToLower(userName)+"%")
+		query = query.Where("LOWER(user_name) LIKE ? OR LOWER(changed_by_name) LIKE ?",
+			"%"+strings.ToLower(userName)+"%", "%"+strings.ToLower(userName)+"%")
 	}
-
-	// Filter by IP address
 	if ipAddress := c.Query("ip_address"); ipAddress != "" {
 		query = query.Where("LOWER(ip_address) LIKE ?", "%"+strings.ToLower(ipAddress)+"%")
 	}
-
-	// Filter by date range
 	if from := c.Query("from"); from != "" {
 		query = query.Where("created_at >= ?", from)
 	}
 	if to := c.Query("to"); to != "" {
 		query = query.Where("created_at <= ?", to)
 	}
-
-	// Filter by date (today, yesterday, this_week, this_month, this_year)
 	if dateFilter := c.Query("date_filter"); dateFilter != "" {
 		now := time.Now()
 		switch dateFilter {
@@ -72,18 +82,38 @@ func GetAuditLogs(c *gin.Context) {
 			query = query.Where("created_at >= ?", yearStart.Format("2006-01-02"))
 		}
 	}
-
-	// Search in description and entity name
 	if search := c.Query("search"); search != "" {
 		like := "%" + strings.ToLower(search) + "%"
-		query = query.Where("LOWER(description) LIKE ? OR LOWER(entity_name) LIKE ? OR LOWER(user_name) LIKE ? OR LOWER(ip_address) LIKE ?",
-			like, like, like, like)
+		query = query.Where("LOWER(description) LIKE ? OR LOWER(entity_name) LIKE ? OR LOWER(user_name) LIKE ? OR LOWER(changed_by_name) LIKE ? OR LOWER(ip_address) LIKE ?",
+			like, like, like, like, like)
 	}
+	return query
+}
+
+// auditSortColumns prevents SQL injection through the sort_by parameter.
+var auditSortColumns = map[string]bool{
+	"id": true, "created_at": true, "action": true, "entity_type": true,
+	"entity_name": true, "user_name": true, "changed_by_name": true,
+	"ip_address": true, "status": true,
+}
+
+// GetAuditLogs retrieves audit logs with filtering
+func GetAuditLogs(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	from := parseAuditBound(c.Query("from"), false)
+	to := parseAuditBound(c.Query("to"), true)
+
+	var auditLogs []models.AuditLog
+	query := auditUnionDB(from, to).Where("user_id = ?", userID)
+	query = applyAuditFilters(query, c)
 
 	// Sort options
 	sortBy := c.DefaultQuery("sort_by", "created_at")
-	sortOrder := c.DefaultQuery("sort_order", "desc")
-	if sortOrder == "asc" {
+	if !auditSortColumns[sortBy] {
+		sortBy = "created_at"
+	}
+	if c.DefaultQuery("sort_order", "desc") == "asc" {
 		query = query.Order(sortBy + " ASC")
 	} else {
 		query = query.Order(sortBy + " DESC")
@@ -106,7 +136,7 @@ func GetAuditLogs(c *gin.Context) {
 	offset := (page - 1) * perPage
 
 	var total int64
-	query.Model(&models.AuditLog{}).Count(&total)
+	query.Count(&total)
 
 	if err := query.Limit(perPage).Offset(offset).Find(&auditLogs).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch audit logs"})
@@ -128,7 +158,7 @@ func GetAuditLog(c *gin.Context) {
 	id := c.Param("id")
 
 	var auditLog models.AuditLog
-	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).First(&auditLog).Error; err != nil {
+	if err := auditUnionDB(nil, nil).Where("user_id = ? AND id = ?", userID, id).First(&auditLog).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Audit log not found"})
 		return
 	}
@@ -141,24 +171,17 @@ func GetAuditStats(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var stats models.AuditLogStats
+	base := func() *gorm.DB { return auditUnionDB(nil, nil) }
 
-	// Total logs
-	utils.DB.Model(&models.AuditLog{}).Where("user_id = ?", userID).Count(&stats.TotalLogs)
+	base().Where("user_id = ?", userID).Count(&stats.TotalLogs)
 
-	// Today's logs
 	today := time.Now().Format("2006-01-02")
-	utils.DB.Model(&models.AuditLog{}).Where("user_id = ? AND DATE(created_at) = ?", userID, today).Count(&stats.TodayLogs)
+	base().Where("user_id = ? AND DATE(created_at) = ?", userID, today).Count(&stats.TodayLogs)
+	base().Where("user_id = ? AND status = ?", userID, "success").Count(&stats.SuccessCount)
+	base().Where("user_id = ? AND status = ?", userID, "failed").Count(&stats.FailedCount)
 
-	// Success count
-	utils.DB.Model(&models.AuditLog{}).Where("user_id = ? AND status = ?", userID, "success").Count(&stats.SuccessCount)
-
-	// Failed count
-	utils.DB.Model(&models.AuditLog{}).Where("user_id = ? AND status = ?", userID, "failed").Count(&stats.FailedCount)
-
-	// Top actions
 	var topActions []models.ActionCount
-	utils.DB.Model(&models.AuditLog{}).
-		Select("action, COUNT(*) as count").
+	base().Select("action, COUNT(*) as count").
 		Where("user_id = ?", userID).
 		Group("action").
 		Order("count DESC").
@@ -166,43 +189,38 @@ func GetAuditStats(c *gin.Context) {
 		Scan(&topActions)
 	stats.TopActions = topActions
 
-	// Top users
 	var topUsers []models.UserActionCount
-	utils.DB.Model(&models.AuditLog{}).
-		Select("user_name, COUNT(*) as count").
+	base().Select("COALESCE(NULLIF(changed_by_name, ''), user_name) AS user_name, COUNT(*) as count").
 		Where("user_id = ?", userID).
-		Group("user_name").
+		Group("COALESCE(NULLIF(changed_by_name, ''), user_name)").
 		Order("count DESC").
 		Limit(10).
 		Scan(&topUsers)
 	stats.TopUsers = topUsers
 
-	c.JSON(http.StatusOK, stats)
+	c.JSON(http.StatusOK, gin.H{
+		"total_logs":    stats.TotalLogs,
+		"today_logs":    stats.TodayLogs,
+		"success_count": stats.SuccessCount,
+		"failed_count":  stats.FailedCount,
+		"top_actions":   stats.TopActions,
+		"top_users":     stats.TopUsers,
+		"queue_pending": audit.Pending(),
+		"queue_dropped": audit.Dropped(),
+		"queue_written": audit.Written(),
+	})
 }
 
 // ExportAuditLogs exports audit logs to CSV
 func ExportAuditLogs(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
-	var auditLogs []models.AuditLog
-	query := utils.DB.Where("user_id = ?", userID)
+	from := parseAuditBound(c.Query("from"), false)
+	to := parseAuditBound(c.Query("to"), true)
 
-	// Apply same filters as GetAuditLogs
-	if action := c.Query("action"); action != "" {
-		query = query.Where("action = ?", action)
-	}
-	if entityType := c.Query("entity_type"); entityType != "" {
-		query = query.Where("entity_type = ?", entityType)
-	}
-	if status := c.Query("status"); status != "" {
-		query = query.Where("status = ?", status)
-	}
-	if from := c.Query("from"); from != "" {
-		query = query.Where("created_at >= ?", from)
-	}
-	if to := c.Query("to"); to != "" {
-		query = query.Where("created_at <= ?", to)
-	}
+	var auditLogs []models.AuditLog
+	query := auditUnionDB(from, to).Where("user_id = ?", userID)
+	query = applyAuditFilters(query, c)
 
 	if err := query.Order("created_at DESC").Find(&auditLogs).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch audit logs"})
@@ -210,7 +228,7 @@ func ExportAuditLogs(c *gin.Context) {
 	}
 
 	// Generate CSV
-	csv := "ID,User Name,Action,Entity Type,Entity ID,Entity Name,Description,IP Address,Status,Created At\n"
+	csv := "ID,User Name,Changed By,Action,Entity Type,Entity ID,Entity Name,Description,IP Address,Status,Created At\n"
 	for _, log := range auditLogs {
 		entityID := ""
 		if log.EntityID != nil {
@@ -218,6 +236,7 @@ func ExportAuditLogs(c *gin.Context) {
 		}
 		csv += log.ID.String() + "," +
 			log.UserName + "," +
+			log.ChangedByName + "," +
 			log.Action + "," +
 			log.EntityType + "," +
 			entityID + "," +
@@ -233,7 +252,9 @@ func ExportAuditLogs(c *gin.Context) {
 	c.String(http.StatusOK, csv)
 }
 
-// CreateAuditLog creates a new audit log entry (internal use)
+// CreateAuditLog creates a new audit log entry (internal use). Entries are
+// queued and persisted asynchronously into the current month's shard so the
+// call never blocks the request.
 func CreateAuditLog(userID uuid.UUID, userName, action, entityType string, entityID *uuid.UUID, entityName, description, ipAddress, userAgent string, changes interface{}, status string, errorMessage string) error {
 	var changesJSON string
 	if changes != nil {
@@ -242,53 +263,123 @@ func CreateAuditLog(userID uuid.UUID, userName, action, entityType string, entit
 		}
 	}
 
-	auditLog := models.AuditLog{
-		ID:           uuid.New(),
-		UserID:       userID,
-		UserName:     userName,
-		Action:       action,
-		EntityType:   entityType,
-		EntityID:     entityID,
-		EntityName:   entityName,
-		Description:  description,
-		IPAddress:    ipAddress,
-		UserAgent:    userAgent,
-		Changes:      changesJSON,
-		Status:       status,
-		ErrorMessage: errorMessage,
-		CreatedAt:    time.Now(),
+	audit.Enqueue(models.AuditLog{
+		ID:              uuid.New(),
+		UserID:          userID,
+		UserName:        userName,
+		ChangedByUserID: &userID,
+		ChangedByName:   userName,
+		Action:          action,
+		EntityType:      entityType,
+		EntityID:        entityID,
+		EntityName:      entityName,
+		Description:     description,
+		IPAddress:       ipAddress,
+		UserAgent:       userAgent,
+		Changes:         changesJSON,
+		Status:          status,
+		ErrorMessage:    errorMessage,
+		CreatedAt:       time.Now(),
+	})
+	return nil
+}
+
+// LogDataChange queues a data-change audit entry with full previous/new
+// snapshots, pulling actor, IP and request metadata from the gin context.
+func LogDataChange(c *gin.Context, action, entityType string, entityID *uuid.UUID, entityName, description string, previous, newData interface{}) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	userName, _ := c.Get("user_name")
+	name, _ := userName.(string)
+
+	var prevJSON, newJSON string
+	if previous != nil {
+		if b, err := json.Marshal(previous); err == nil {
+			prevJSON = string(b)
+		}
+	}
+	if newData != nil {
+		if b, err := json.Marshal(newData); err == nil {
+			newJSON = string(b)
+		}
 	}
 
-	return utils.DB.Create(&auditLog).Error
+	actorID := actorUserID(c)
+	entry := models.AuditLog{
+		ID:              uuid.New(),
+		UserID:          userID,
+		UserName:        name,
+		ChangedByUserID: &actorID,
+		ChangedByName:   name,
+		Action:          action,
+		EntityType:      entityType,
+		EntityID:        entityID,
+		EntityName:      entityName,
+		Description:     description,
+		IPAddress:       c.ClientIP(),
+		UserAgent:       c.GetHeader("User-Agent"),
+		PreviousData:    prevJSON,
+		NewData:         newJSON,
+		Status:          "success",
+		CreatedAt:       time.Now(),
+	}
+	if rid, ok := c.Get("request_id"); ok {
+		if s, ok := rid.(string); ok {
+			entry.RequestID = s
+		}
+	}
+	audit.Enqueue(entry)
 }
 
 // DeleteAuditLogs deletes audit logs (with optional date range)
 func DeleteAuditLogs(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
-	query := utils.DB.Where("user_id = ?", userID)
-
-	// Optional date range for bulk deletion
-	if from := c.Query("from"); from != "" {
-		query = query.Where("created_at >= ?", from)
-	}
-	if to := c.Query("to"); to != "" {
-		query = query.Where("created_at <= ?", to)
-	}
-
-	if err := query.Delete(&models.AuditLog{}).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete audit logs"})
-		return
+	// Deletes must be applied per physical table.
+	for _, table := range audit.AuditTables(utils.DB) {
+		query := utils.DB.Table(table).Where("user_id = ?", userID)
+		if from := c.Query("from"); from != "" {
+			query = query.Where("created_at >= ?", from)
+		}
+		if to := c.Query("to"); to != "" {
+			query = query.Where("created_at <= ?", to)
+		}
+		if action := c.Query("action"); action != "" {
+			query = query.Where("action = ?", action)
+		}
+		if entityType := c.Query("entity_type"); entityType != "" {
+			query = query.Where("entity_type = ?", entityType)
+		}
+		if err := query.Delete(&models.AuditLog{}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete audit logs"})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Audit logs deleted successfully"})
 }
 
-// CleanupOldAuditLogs deletes audit logs older than specified days (can be called by cron job)
+// CleanupOldAuditLogs deletes audit logs older than the given number of days
+// (can be called by a cron job). Monthly shards fully beyond the retention
+// window are dropped entirely; the boundary month is trimmed by created_at.
 func CleanupOldAuditLogs(retentionDays int) error {
 	cutoffDate := time.Now().AddDate(0, 0, -retentionDays)
-	result := utils.DB.Where("created_at < ?", cutoffDate).Delete(&models.AuditLog{})
-	return result.Error
+
+	for _, table := range audit.AuditTables(utils.DB) {
+		if month, ok := audit.ParseMonthTable(table); ok {
+			// The whole shard lies beyond the cutoff → drop it.
+			if month.AddDate(0, 1, 0).Before(cutoffDate) || month.AddDate(0, 1, 0).Equal(cutoffDate) {
+				if err := utils.DB.Exec("DROP TABLE IF EXISTS " + table).Error; err != nil {
+					return err
+				}
+				audit.InvalidateTableCache()
+				continue
+			}
+		}
+		if err := utils.DB.Table(table).Where("created_at < ?", cutoffDate).Delete(&models.AuditLog{}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // GetAuditRetentionSettings returns the current retention settings
@@ -342,8 +433,8 @@ func ArchiveAuditLogs(c *gin.Context) {
 
 	// Get logs to be archived
 	var auditLogs []models.AuditLog
-	query := utils.DB.Where("user_id = ?", userID).
-		Where("created_at >= ? AND created_at <= ?", input.FromDate, input.ToDate)
+	query := auditUnionDB(parseAuditBound(input.FromDate, false), parseAuditBound(input.ToDate, true)).
+		Where("user_id = ? AND created_at >= ? AND created_at <= ?", userID, input.FromDate, input.ToDate)
 
 	if err := query.Find(&auditLogs).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch audit logs for archiving"})

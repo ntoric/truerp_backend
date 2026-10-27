@@ -2229,20 +2229,25 @@ type WhatsAppRecipient struct {
 }
 
 type AuditLog struct {
-	ID           uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID       uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index"`
-	UserName     string     `json:"user_name"`
-	Action       string     `json:"action" gorm:"not null;index"`      // create, update, delete, view, login, logout, export, etc.
-	EntityType   string     `json:"entity_type" gorm:"not null;index"` // invoice, payment, expense, party, etc.
-	EntityID     *uuid.UUID `json:"entity_id" gorm:"type:uuid;index"`
-	EntityName   string     `json:"entity_name"`                  // Human-readable name of the entity
-	Description  string     `json:"description" gorm:"type:text"` // Detailed description of the action
-	IPAddress    string     `json:"ip_address"`
-	UserAgent    string     `json:"user_agent"`
-	Changes      string     `json:"changes" gorm:"type:text"`        // JSON string of changes made
-	Status       string     `json:"status" gorm:"default:'success'"` // success, failed
-	ErrorMessage string     `json:"error_message"`
-	CreatedAt    time.Time  `json:"created_at" gorm:"index"`
+	ID              uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID          uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index"` // data-scope owner (store owner / tenant)
+	UserName        string     `json:"user_name"`
+	ChangedByUserID *uuid.UUID `json:"changed_by_user_id,omitempty" gorm:"type:uuid;index"` // authenticated user who made the change
+	ChangedByName   string     `json:"changed_by_name"`
+	Action          string     `json:"action" gorm:"not null;index"`      // create, update, delete, view, login, logout, export, etc.
+	EntityType      string     `json:"entity_type" gorm:"not null;index"` // invoice, payment, expense, party, etc.
+	EntityID        *uuid.UUID `json:"entity_id" gorm:"type:uuid;index"`
+	EntityName      string     `json:"entity_name"`                  // Human-readable name of the entity
+	Description     string     `json:"description" gorm:"type:text"` // Detailed description of the action
+	IPAddress       string     `json:"ip_address"`
+	UserAgent       string     `json:"user_agent"`
+	RequestID       string     `json:"request_id,omitempty" gorm:"index"`
+	PreviousData    string     `json:"previous_data,omitempty" gorm:"type:text"` // JSON snapshot before update/delete
+	NewData         string     `json:"new_data,omitempty" gorm:"type:text"`      // JSON snapshot after create/update
+	Changes         string     `json:"changes" gorm:"type:text"`                 // JSON string of changes made
+	Status          string     `json:"status" gorm:"default:'success'"`          // success, failed
+	ErrorMessage    string     `json:"error_message"`
+	CreatedAt       time.Time  `json:"created_at" gorm:"index"`
 }
 
 type AuditLogStats struct {

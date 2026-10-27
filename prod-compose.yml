@@ -56,8 +56,12 @@ services:
       SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-As@12345}
       SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      # Audit crash-spool journal lives on the /app/data volume so queued log
+      # entries survive container crashes and rebuilds.
+      AUDIT_SPOOL_PATH: ${AUDIT_SPOOL_PATH:-/app/data/audit_spool.jsonl}
     volumes:
       - ./truerp-uploads:/app/uploads
+      - ./truerp-data:/app/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8088/health"]

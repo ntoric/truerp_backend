@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"truerp/models"
+	"truerp/services/audit"
 	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
@@ -127,6 +128,25 @@ func AuthRequired() gin.HandlerFunc {
 			// Help clients replace a stale X-Store-ID (e.g. after DB recreate).
 			c.Header("X-Active-Store-ID", activeStoreID.String())
 		}
+
+		// Bind the authenticated actor to this request's goroutine so the
+		// async audit hooks can attribute every DB write it performs.
+		requestID := strings.TrimSpace(c.GetHeader("X-Request-ID"))
+		if requestID == "" {
+			requestID = uuid.New().String()
+		}
+		c.Set("request_id", requestID)
+		c.Header("X-Request-ID", requestID)
+		unbind := audit.BindActor(&audit.Actor{
+			UserID:    actorID,
+			UserName:  claims.UserName,
+			ScopeID:   scopeUserID,
+			IPAddress: c.ClientIP(),
+			UserAgent: c.GetHeader("User-Agent"),
+			RequestID: requestID,
+		})
+		defer unbind()
+
 		c.Next()
 	}
 }

@@ -4,10 +4,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"truerp/controllers"
 	"truerp/routes"
 	"truerp/services"
+	"truerp/services/audit"
 	"truerp/transport"
 	"truerp/utils"
 
@@ -23,6 +26,21 @@ func main() {
 	}
 
 	utils.InitDatabase()
+
+	// Start the async audit pipeline: registers DB change-capture hooks,
+	// creates this/next month's audit shard tables, and launches the queue
+	// workers that persist log batches off the request path.
+	audit.Start(utils.DB)
+
+	// Flush pending audit entries on termination.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		audit.Shutdown()
+		os.Exit(0)
+	}()
+
 	controllers.EnsureDefaultSuperAdmin()
 	controllers.EnsureStoresMigrated()
 	_ = services.GetDefaultStorageService()

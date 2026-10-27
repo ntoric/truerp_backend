@@ -46,6 +46,9 @@ services:
       API_ADDR: ":8088"
       DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-truerp}?sslmode=disable
       # DATABASE_PATH: /app/data/truerp.db
+      # Audit crash-spool journal lives on the /app/data volume so queued log
+      # entries survive container crashes and rebuilds.
+      AUDIT_SPOOL_PATH: ${AUDIT_SPOOL_PATH:-/app/data/audit_spool.jsonl}
       STORAGE_TYPE: ${STORAGE_TYPE:-local}
       LOCAL_STORAGE_PATH: /app/uploads
       # Set to your public API URL so desktop clients can load uploaded assets:
@@ -58,7 +61,9 @@ services:
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
     volumes:
       - ./truerp-uploads:/app/uploads
-      # - ../truerp-data:/app/data
+      # Persistent data dir: audit crash-spool (and SQLite when enabled) must
+      # survive container recreate/rebuild, so keep it on the host filesystem.
+      - ../truerp-data:/app/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8088/health"]

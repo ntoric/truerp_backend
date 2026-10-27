@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"strings"
+	"truerp/services/audit"
 	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
@@ -36,6 +37,22 @@ func PortalAuthRequired() gin.HandlerFunc {
 		c.Set("party_id", claims.PartyID)
 		c.Set("party_name", claims.UserName)
 		c.Set("portal_phone", claims.Email)
+
+		requestID := strings.TrimSpace(c.GetHeader("X-Request-ID"))
+		if requestID == "" {
+			requestID = uuid.New().String()
+		}
+		c.Set("request_id", requestID)
+		unbind := audit.BindActor(&audit.Actor{
+			UserID:    claims.UserID,
+			UserName:  claims.UserName + " (portal)",
+			ScopeID:   claims.UserID,
+			IPAddress: c.ClientIP(),
+			UserAgent: c.GetHeader("User-Agent"),
+			RequestID: requestID,
+		})
+		defer unbind()
+
 		c.Next()
 	}
 }
