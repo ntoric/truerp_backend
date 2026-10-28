@@ -775,6 +775,10 @@ func SetupRoutes(r *gin.Engine) {
 		settings.GET("/weighing-scale", controllers.GetWeighingScaleSettings)
 		settings.PUT("/weighing-scale", controllers.UpdateWeighingScaleSettings)
 
+		// Attendance reminder settings
+		settings.GET("/attendance-reminder", controllers.GetAttendanceReminderSettings)
+		settings.PUT("/attendance-reminder", controllers.UpdateAttendanceReminderSettings)
+
 		// Reminders
 		settings.GET("/reminders", controllers.GetReminders)
 		settings.POST("/reminders", controllers.CreateReminder)

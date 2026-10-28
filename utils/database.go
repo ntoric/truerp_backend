@@ -134,6 +134,7 @@ func allApplicationModels() []interface{} {
 		&models.PrintSettings{},
 		&models.WeighingScaleSettings{},
 		&models.Reminder{},
+		&models.AttendanceReminderSettings{},
 		&models.Notification{},
 		&models.NotificationTemplate{},
 		&models.NotificationPreference{},

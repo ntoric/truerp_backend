@@ -1007,6 +1007,7 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 			&models.AppearanceSettings{},
 			&models.WeighingScaleSettings{},
 			&models.Reminder{},
+			&models.AttendanceReminderSettings{},
 			&models.Notification{},
 			&models.NotificationTemplate{},
 			&models.NotificationPreference{},

@@ -20,10 +20,11 @@ const dailyStockSummaryRunTime = "01:00"
 var dailyStockSummaryMu sync.Mutex
 
 // StartDailyStockSummaryLogScheduler launches the daily stock summary cron.
-// Every day at 01:00 IST it records the current stock quantity and value as
-// the previous day's closing stock and the current day's opening stock in
-// daily_stock_summary_log. An immediate check runs on startup so a run missed
-// while the server was down is still honored (catch-up).
+// Every day at 01:00 IST it writes one daily_stock_summary_log row dated the
+// previous day: the row's opening equals the previous log entry's closing and
+// its closing is the current stock quantity and value at run time. An
+// immediate check runs on startup so a run missed while the server was down
+// is still honored (catch-up).
 func StartDailyStockSummaryLogScheduler() {
 	go func() {
 		defer func() {
@@ -57,8 +58,8 @@ func StartDailyStockSummaryLogScheduler() {
 
 // processDueDailyStockSummaryLogs runs the summary write once the 01:00 IST
 // run time has been reached, for every user with stock data that does not yet
-// have a row for today. The today's-row check makes the job idempotent — it
-// runs once per day no matter how often the tick fires.
+// have a row for yesterday. The yesterday-row check makes the job idempotent —
+// it runs once per day no matter how often the tick fires.
 func processDueDailyStockSummaryLogs() {
 	if !utils.DB.Migrator().HasTable(&models.DailyStockSummaryLog{}) ||
 		!utils.DB.Migrator().HasTable(&models.StockDailySnapshot{}) {
@@ -70,7 +71,7 @@ func processDueDailyStockSummaryLogs() {
 	if now.Format("15:04") < dailyStockSummaryRunTime {
 		return
 	}
-	today := now.Format("2006-01-02")
+	yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
 
 	if !dailyStockSummaryMu.TryLock() {
 		return // a pass is already in progress
@@ -81,12 +82,12 @@ func processDueDailyStockSummaryLogs() {
 		var logged int64
 		utils.DB.Model(&models.DailyStockSummaryLog{}).
 			Where("user_id = ?", userID).
-			Where(utils.SQLDateEquals("log_date"), today).
+			Where(utils.SQLDateEquals("log_date"), yesterday).
 			Count(&logged)
 		if logged > 0 {
 			continue
 		}
-		if err := writeDailyStockSummaryLogs(userID, today); err != nil {
+		if err := writeDailyStockSummaryLogs(userID, now.Format("2006-01-02")); err != nil {
 			log.Printf("daily stock summary scheduler: write failed for user %s: %v", userID, err)
 		}
 	}
@@ -121,13 +122,14 @@ func dailyStockSummaryUsers() []uuid.UUID {
 	return out
 }
 
-// writeDailyStockSummaryLogs upserts one summary row per day for the user:
-// every day from the first unlogged day through yesterday gets both opening
-// and closing positions plus that day's sales, COGS, purchase, and expense
-// totals; today's row gets its opening from yesterday's closing and its
-// closing from the current live position. Positions come from the
-// materialized snapshots (reconciled against live inventory and adjusted by
-// opening-stock overrides), so the log matches the stock and P&L reports.
+// writeDailyStockSummaryLogs upserts one summary row per day for the user,
+// dated from the first unlogged day through yesterday. Each row's opening is
+// the previous day's closing and each row's closing is that day's end-of-day
+// position — for the latest row, exactly the current stock quantity and value
+// at run time — plus that day's sales, COGS, purchase, and expense totals.
+// Positions come from the materialized snapshots (reconciled against live
+// inventory and adjusted by opening-stock overrides), so the log matches the
+// stock and P&L reports.
 func writeDailyStockSummaryLogs(userID uuid.UUID, today string) error {
 	todayT, err := time.Parse("2006-01-02", today)
 	if err != nil {
@@ -147,18 +149,15 @@ func writeDailyStockSummaryLogs(userID uuid.UUID, today string) error {
 	// Roll snapshot coverage forward so today's position is materialized.
 	refreshStockSnapshots(userID, false)
 
-	// The range that still needs rows starts the day after the latest logged
-	// date — but never after yesterday, so the previous day's closing is
-	// always refreshed with the current position. On the first run it starts
-	// at the earliest snapshot day, seeding the log with the full history.
+	// Log entries are dated the day they close, so the range ends at
+	// yesterday. It starts the day after the latest logged date; on the first
+	// run it starts at the earliest snapshot day, seeding the log with the
+	// full history.
 	start := yesterdayT
 	var last models.DailyStockSummaryLog
 	if err := utils.DB.Where("user_id = ?", userID).
 		Order("log_date DESC").Limit(1).First(&last).Error; err == nil {
 		start = dayStart(last.LogDate).AddDate(0, 0, 1)
-		if start.After(yesterdayT) {
-			start = yesterdayT
-		}
 	} else {
 		var first models.StockDailySnapshot
 		if err := utils.DB.Where("user_id = ?", userID).
@@ -167,18 +166,19 @@ func writeDailyStockSummaryLogs(userID uuid.UUID, today string) error {
 			start = dayStart(first.SnapshotDate)
 		}
 	}
-	if start.After(todayT) {
-		return nil
+	if start.After(yesterdayT) {
+		return nil // already logged through yesterday
 	}
 
 	startStr := start.Format("2006-01-02")
-	positions := loadDailyStockPositions(utils.DB, userID, startStr, today)
+	yesterdayStr := yesterdayT.Format("2006-01-02")
+	positions := loadDailyStockPositions(utils.DB, userID, startStr, yesterdayStr)
 	// Day aggregates (sales, COGS, purchases, expenses) come from the same
 	// tax-exclusive queries the daily profit report uses.
-	aggs := loadDailyProfitAggregates(utils.DB, userID, startStr, today)
+	aggs := loadDailyProfitAggregates(utils.DB, userID, startStr, yesterdayStr)
 
-	rows := make([]models.DailyStockSummaryLog, 0, int(todayT.Sub(start).Hours()/24)+1)
-	for d := start; !d.After(todayT); d = d.AddDate(0, 0, 1) {
+	rows := make([]models.DailyStockSummaryLog, 0, int(yesterdayT.Sub(start).Hours()/24)+1)
+	for d := start; !d.After(yesterdayT); d = d.AddDate(0, 0, 1) {
 		day := d.Format("2006-01-02")
 		pos := positions[day]
 		a := aggs[day]

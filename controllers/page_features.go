@@ -45,6 +45,7 @@ var defaultPageFeatureKeys = []string{
 	"/e-invoicing",
 	"/staff",
 	"/attendance",
+	"/attendance-reminder",
 	"/payroll",
 	"/pos",
 	"/pos/sessions",

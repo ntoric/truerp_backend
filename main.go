@@ -76,8 +76,9 @@ func main() {
 	controllers.StartDailyProfitScheduler()
 
 	// Start the background cron that records the current stock quantity and
-	// value at 1AM IST daily — as the previous day's closing stock and the
-	// current day's opening stock in daily_stock_summary_log.
+	// value at 1AM IST daily — one daily_stock_summary_log row dated the
+	// previous day, opening at the prior row's closing and closing at the
+	// current position.
 	controllers.StartDailyStockSummaryLogScheduler()
 
 	gin.SetMode(gin.ReleaseMode)

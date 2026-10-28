@@ -869,11 +869,12 @@ type StockOpeningOverride struct {
 // one calendar day: the aggregate opening and closing quantity/value across
 // all products and outlets, plus the day's sales, COGS, purchase, and expense
 // totals (all tax-exclusive, matching the daily profit report). Rows are
-// written by the daily 1AM IST scheduler — each run records the current
-// position as the previous day's closing stock and the current day's opening
-// stock — so the table doubles as a frozen audit trail of day-end inventory
-// positions. Each entry is store-specific: StoreID is the store that owns the
-// data (stores.owner_user_id ↔ user_id is 1:1).
+// written by the daily 1AM IST scheduler — each run writes one row dated the
+// previous day: its opening equals the previous log row's closing, and its
+// closing is the current stock quantity and value at run time — so the table
+// doubles as a frozen audit trail of day-end inventory positions. Each entry
+// is store-specific: StoreID is the store that owns the data
+// (stores.owner_user_id ↔ user_id is 1:1).
 type DailyStockSummaryLog struct {
 	ID      uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID  uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;uniqueIndex:idx_daily_stock_summary_log"`
@@ -1760,6 +1761,23 @@ type Reminder struct {
 	CreatedAt        time.Time      `json:"created_at"`
 	UpdatedAt        time.Time      `json:"updated_at"`
 	DeletedAt        gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// AttendanceReminderSettings configures the daily on-screen attendance
+// reminder shown in the app. The reminder fires when the wall clock in
+// Timezone reaches ReminderTime ("HH:MM", 24h). An empty Timezone means
+// "use the device's local timezone". RemindLaterMinutes is the snooze
+// interval used by the "Remind me later" action.
+type AttendanceReminderSettings struct {
+	ID                 uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID             uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	Enabled            bool           `json:"enabled" gorm:"default:false"`
+	ReminderTime       string         `json:"reminder_time" gorm:"default:'09:00'"` // HH:MM, 24h, in Timezone
+	Timezone           string         `json:"timezone"`                             // IANA name; empty = device local
+	RemindLaterMinutes int            `json:"remind_later_minutes" gorm:"default:30"`
+	CreatedAt          time.Time      `json:"created_at"`
+	UpdatedAt          time.Time      `json:"updated_at"`
+	DeletedAt          gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type Notification struct {

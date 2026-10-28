@@ -89,8 +89,8 @@ func TestDailyStockSummaryLogWriter(t *testing.T) {
 	if err := db.Where("user_id = ?", userID).Order("log_date").Find(&rows).Error; err != nil {
 		t.Fatalf("load rows: %v", err)
 	}
-	if len(rows) != 32 { // Jan 1 .. Feb 1
-		t.Fatalf("rows = %d, want 32", len(rows))
+	if len(rows) != 31 { // Jan 1 .. Jan 31 — entries are dated the day they close
+		t.Fatalf("rows = %d, want 31", len(rows))
 	}
 	byDay := map[string]models.DailyStockSummaryLog{}
 	for _, r := range rows {
@@ -112,7 +112,12 @@ func TestDailyStockSummaryLogWriter(t *testing.T) {
 	check("2026-01-14", 10, 500, 10, 500)    // quiet day carries forward
 	check("2026-01-15", 10, 500, 20, 1200)   // purchase re-rates avg to 60
 	check("2026-01-20", 20, 1200, 15, 900)   // sale day
-	check("2026-02-01", 15, 900, 15, 900)    // today: opening = prev close, closing = current
+	// Latest row (Jan 31): opening = Jan 30's closing, closing = current
+	// stock at run time.
+	check("2026-01-31", 15, 900, 15, 900)
+	if _, ok := byDay["2026-02-01"]; ok {
+		t.Fatal("unexpected row for 2026-02-01 — entries are dated the previous day")
+	}
 
 	// Every row is store-specific: stamped with the owning store's ID.
 	for _, r := range rows {
@@ -132,25 +137,27 @@ func TestDailyStockSummaryLogWriter(t *testing.T) {
 		t.Fatalf("quiet-day aggregates = %+v, want all zero", quiet)
 	}
 
-	// Re-running for the same day upserts — no duplicates.
+	// Re-running for the same day upserts — no duplicates, and still no
+	// row dated today.
 	if err := writeDailyStockSummaryLogs(userID, "2026-02-01"); err != nil {
 		t.Fatalf("rewrite: %v", err)
 	}
 	var count int64
 	db.Model(&models.DailyStockSummaryLog{}).Where("user_id = ?", userID).Count(&count)
-	if count != 32 {
-		t.Fatalf("rows after rewrite = %d, want 32", count)
+	if count != 31 {
+		t.Fatalf("rows after rewrite = %d, want 31", count)
 	}
 
-	// A backdated sale into Feb 1 must flow into Feb 1's refreshed closing on
-	// the next run — the cron updates "previous day closing" every run.
+	// Next day's run writes the Feb 1 row: its opening equals Jan 31's
+	// recorded closing (15/900) and its closing is the current position
+	// after a sale of 2 on Feb 1 (15 − 2 @ 60 = 13/780).
 	mkEntry("sale", -2, 0, 2026, 2, 1)
 	if err := writeDailyStockSummaryLogs(userID, "2026-02-02"); err != nil {
 		t.Fatalf("next-day write: %v", err)
 	}
 	db.Model(&models.DailyStockSummaryLog{}).Where("user_id = ?", userID).Count(&count)
-	if count != 33 {
-		t.Fatalf("rows after next-day write = %d, want 33", count)
+	if count != 32 {
+		t.Fatalf("rows after next-day write = %d, want 32", count)
 	}
 	if err := db.Where("user_id = ?", userID).Order("log_date").Find(&rows).Error; err != nil {
 		t.Fatalf("reload rows: %v", err)
@@ -158,6 +165,5 @@ func TestDailyStockSummaryLogWriter(t *testing.T) {
 	for _, r := range rows {
 		byDay[r.LogDate.Format("2006-01-02")] = r
 	}
-	check("2026-02-01", 15, 900, 13, 780) // closing refreshed: 15 − 2 @ 60
-	check("2026-02-02", 13, 780, 13, 780) // today: opening = refreshed close
+	check("2026-02-01", 15, 900, 13, 780)
 }
