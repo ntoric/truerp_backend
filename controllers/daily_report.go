@@ -317,6 +317,28 @@ func paymentMethodLabel(method string) string {
 	}
 }
 
+// cashBankMethodTotals aggregates per-method totals into cash vs bank buckets.
+// Bank = UPI, Card, Bank Transfer and Cheque; other modes (e.g. initial
+// investment) are excluded from both rows.
+func cashBankMethodTotals(methods []models.PaymentMethodTotal) (cashIn, cashOut, bankIn, bankOut models.DailyReportMetric) {
+	for _, m := range methods {
+		var in, out *models.DailyReportMetric
+		switch normalizePaymentMethod(m.Method) {
+		case "cash":
+			in, out = &cashIn, &cashOut
+		case "upi", "card", "bank_transfer", "cheque", "check":
+			in, out = &bankIn, &bankOut
+		default:
+			continue
+		}
+		in.TotalAmount += m.In.TotalAmount
+		in.Count += m.In.Count
+		out.TotalAmount += m.Out.TotalAmount
+		out.Count += m.Out.Count
+	}
+	return cashIn, cashOut, bankIn, bankOut
+}
+
 func loadPaymentsByMethod(userID uuid.UUID, startDate, endDate string) []models.PaymentMethodTotal {
 	type agg struct {
 		Method      string
@@ -395,7 +417,13 @@ func loadPaymentsByMethod(userID uuid.UUID, startDate, endDate string) []models.
 	for _, key := range extra {
 		result = append(result, *byMethod[key])
 	}
-	return result
+	filtered := result[:0]
+	for _, row := range result {
+		if row.Method != paymentMethodInitialInvestment {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
 }
 
 func loadDailyReport(userID uuid.UUID, date string) (models.DailyReport, error) {
@@ -588,6 +616,21 @@ func writePeriodReportCSV(c *gin.Context, report models.PeriodReport, filename s
 			fmt.Sprintf("%.2f", method.Out.TotalAmount),
 		})
 	}
+	cashIn, cashOut, bankIn, bankOut := cashBankMethodTotals(report.PaymentsByMethod)
+	_ = writer.Write([]string{
+		"Total Cash",
+		fmt.Sprintf("%d", cashIn.Count),
+		fmt.Sprintf("%.2f", cashIn.TotalAmount),
+		fmt.Sprintf("%d", cashOut.Count),
+		fmt.Sprintf("%.2f", cashOut.TotalAmount),
+	})
+	_ = writer.Write([]string{
+		"Total in Bank",
+		fmt.Sprintf("%d", bankIn.Count),
+		fmt.Sprintf("%.2f", bankIn.TotalAmount),
+		fmt.Sprintf("%d", bankOut.Count),
+		fmt.Sprintf("%.2f", bankOut.TotalAmount),
+	})
 	_ = writer.Write([]string{
 		"Total",
 		fmt.Sprintf("%d", report.PaymentsIn.Count),
@@ -787,6 +830,26 @@ func writePaymentsByMethodPDF(pdf *fpdf.Fpdf, report models.PeriodReport) {
 		pdf.SetTextColor(154, 52, 18)
 		pdf.CellFormat(colOutCount, 7, fmt.Sprintf("%d", method.Out.Count), "1", 0, "R", true, 0, "")
 		pdf.CellFormat(colOutAmt, 7, fmt.Sprintf("%.2f", method.Out.TotalAmount), "1", 1, "R", true, 0, "")
+	}
+
+	cashIn, cashOut, bankIn, bankOut := cashBankMethodTotals(methods)
+	summaryRows := []struct {
+		label string
+		in    models.DailyReportMetric
+		out   models.DailyReportMetric
+	}{
+		{label: "Total Cash", in: cashIn, out: cashOut},
+		{label: "Total in Bank", in: bankIn, out: bankOut},
+	}
+	for _, row := range summaryRows {
+		pdf.SetFillColor(239, 246, 255)
+		pdf.SetFont("Arial", "B", 9)
+		pdf.SetTextColor(30, 64, 175)
+		pdf.CellFormat(colMethod, 7, row.label, "1", 0, "L", true, 0, "")
+		pdf.CellFormat(colInCount, 7, fmt.Sprintf("%d", row.in.Count), "1", 0, "R", true, 0, "")
+		pdf.CellFormat(colInAmt, 7, fmt.Sprintf("%.2f", row.in.TotalAmount), "1", 0, "R", true, 0, "")
+		pdf.CellFormat(colOutCount, 7, fmt.Sprintf("%d", row.out.Count), "1", 0, "R", true, 0, "")
+		pdf.CellFormat(colOutAmt, 7, fmt.Sprintf("%.2f", row.out.TotalAmount), "1", 1, "R", true, 0, "")
 	}
 
 	pdf.SetFillColor(219, 234, 254)
