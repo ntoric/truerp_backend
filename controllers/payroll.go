@@ -845,15 +845,19 @@ func settleStaffDuesTx(tx *gorm.DB, userID uuid.UUID, staff *models.Staff, in pa
 	remaining := amount
 	payDateStr := in.PaymentDate.Format("2006-01-02")
 
-	// Settle unpaid payrolls, oldest first.
-	for i := range payrolls {
-		p := &payrolls[i]
-		if p.Status == "cancelled" {
-			continue
+	// Settle unpaid payrolls, oldest first. The open remainder is recomputed
+	// from attendance exactly like computeStaffBalance, because NetSalary may
+	// have been stored before later attendance corrections moved the payable.
+	paidShare := func(p *models.Payroll) float64 {
+		paid := p.PaidAmount
+		if p.Status == "paid" && paid <= 0 {
+			paid = p.NetSalary
 		}
-		due := p.NetSalary - p.PaidAmount
+		return paid
+	}
+	settlePay := func(p *models.Payroll, due float64) error {
 		if due <= 0 || remaining <= 0 {
-			continue
+			return nil
 		}
 		pay := due
 		if pay > remaining {
@@ -862,12 +866,55 @@ func settleStaffDuesTx(tx *gorm.DB, userID uuid.UUID, staff *models.Staff, in pa
 		payIn := in
 		payIn.Amount = pay
 		if _, err := recordPayrollPaymentTx(tx, userID, p, staff.Name, payIn); err != nil {
-			return 0, nil, err
+			return err
 		}
 		if err := refreshPayrollPaymentState(tx, p); err != nil {
-			return 0, nil, err
+			return err
 		}
 		remaining -= pay
+		return nil
+	}
+	coveredDates := map[string]bool{}
+	markCovered := func(p *models.Payroll) {
+		for d := p.StartDate; !d.After(p.EndDate); d = d.AddDate(0, 0, 1) {
+			coveredDates[d.Format("2006-01-02")] = true
+		}
+	}
+	for i := range payrolls {
+		p := &payrolls[i]
+		if p.IsSettlement || p.Status == "cancelled" {
+			continue
+		}
+		startStr := p.StartDate.Format("2006-01-02")
+		endStr := p.EndDate.Format("2006-01-02")
+		workingDays, payableDays := payableDaysInRange(attendances, startStr, endStr)
+		data := payrollPeriodData{WorkingDays: workingDays, PayableDays: payableDays}
+		due := payableSalary(p.BasicSalary, staff.SalaryType, data) + p.Bonus - p.Deductions - paidShare(p)
+		if err := settlePay(p, due); err != nil {
+			return 0, nil, err
+		}
+		markCovered(p)
+	}
+	for i := range payrolls {
+		p := &payrolls[i]
+		if !p.IsSettlement || p.Status == "cancelled" {
+			continue
+		}
+		startStr := p.StartDate.Format("2006-01-02")
+		endStr := p.EndDate.Format("2006-01-02")
+		var payableDays float64
+		for _, a := range attendances {
+			ds := a.Date.Format("2006-01-02")
+			if coveredDates[ds] || ds < startStr || ds > endStr {
+				continue
+			}
+			payableDays += payableWeight(a.Status)
+		}
+		due := payableDays*staffDailyRate(*staff) + p.Bonus - p.Deductions - paidShare(p)
+		if err := settlePay(p, due); err != nil {
+			return 0, nil, err
+		}
+		markCovered(p)
 	}
 
 	// Anything uncovered by a payroll period is formalized into a settlement

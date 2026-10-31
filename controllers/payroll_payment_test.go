@@ -319,6 +319,115 @@ func TestPayrollPayAllDue(t *testing.T) {
 	}
 }
 
+// Pay-all-due must settle remainders that only exist in the recomputed
+// payable: a payroll fully paid at creation can owe more after attendance
+// inside its period is corrected later.
+func TestPayAllDueSettlesRecomputedRemainder(t *testing.T) {
+	db := openPayrollPaymentTestDB(t)
+	userID := uuid.New()
+	payDate := time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)
+
+	staff := models.Staff{
+		ID:         uuid.New(),
+		UserID:     userID,
+		Name:       "Kunhali AK",
+		Salary:     900,
+		SalaryType: "daily",
+	}
+	if err := db.Create(&staff).Error; err != nil {
+		t.Fatalf("create staff: %v", err)
+	}
+
+	// Oct 17-30 attendance: 17-18 absent, 19-30 present → 12 payable days.
+	for day := 17; day <= 30; day++ {
+		status := "present"
+		if day == 17 || day == 18 {
+			status = "absent"
+		}
+		att := models.Attendance{
+			ID:      uuid.New(),
+			UserID:  userID,
+			StaffID: staff.ID,
+			Date:    time.Date(2026, 10, day, 0, 0, 0, 0, time.UTC),
+			Status:  status,
+		}
+		if err := db.Create(&att).Error; err != nil {
+			t.Fatalf("create attendance: %v", err)
+		}
+	}
+
+	// Payroll created when only 11 days were payable: stored net 9900, fully
+	// paid. The recomputed payable is now 10800 → 900 still due.
+	payroll := models.Payroll{
+		ID:            uuid.New(),
+		UserID:        userID,
+		StaffID:       staff.ID,
+		PaymentNumber: "PAY-011",
+		PaymentDate:   time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC),
+		StartDate:     time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC),
+		EndDate:       time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC),
+		BasicSalary:   900,
+		NetSalary:     9900,
+		PaymentMode:   "cash",
+		Status:        "pending",
+	}
+	if err := db.Create(&payroll).Error; err != nil {
+		t.Fatalf("create payroll: %v", err)
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if _, err := recordPayrollPaymentTx(tx, userID, &payroll, staff.Name, payrollPaymentInput{
+			Amount:      9900,
+			PaymentDate: payroll.PaymentDate,
+			PaymentMode: "cash",
+		}); err != nil {
+			return err
+		}
+		return refreshPayrollPaymentState(tx, &payroll)
+	}); err != nil {
+		t.Fatalf("record initial payment: %v", err)
+	}
+
+	var totalPaid float64
+	var settle *models.Payroll
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		totalPaid, settle, err = settleStaffDuesTx(tx, userID, &staff, payrollPaymentInput{
+			PaymentDate: payDate,
+			PaymentMode: "cash",
+		}, "PAY-012")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("settle dues: %v", err)
+	}
+	if totalPaid != 900 {
+		t.Fatalf("expected total paid 900, got %.2f", totalPaid)
+	}
+	if settle != nil {
+		t.Fatalf("expected no settlement payroll, got %+v", settle)
+	}
+
+	var reloaded models.Payroll
+	if err := db.First(&reloaded, payroll.ID).Error; err != nil {
+		t.Fatalf("reload payroll: %v", err)
+	}
+	if reloaded.PaidAmount != 10800 || reloaded.Status != "paid" {
+		t.Fatalf("expected paid 10800, got paid=%.2f status=%s", reloaded.PaidAmount, reloaded.Status)
+	}
+
+	var payrolls []models.Payroll
+	db.Where("user_id = ? AND staff_id = ?", userID, staff.ID).Order("start_date ASC").Find(&payrolls)
+	var attendances []models.Attendance
+	db.Where("user_id = ? AND staff_id = ?", userID, staff.ID).Find(&attendances)
+	var deductions []models.StaffDeduction
+	db.Where("user_id = ? AND staff_id = ? AND status = ?", userID, staff.ID, "active").Find(&deductions)
+	extrasAdd, extrasDeduct := pendingExtras(userID, staff.ID)
+	bal := computeStaffBalance(staff, payrolls, attendances, pendingAdvances(userID, staff.ID), deductions, extrasAdd, extrasDeduct)
+	if bal.Balance != 0 {
+		t.Fatalf("expected zero balance, got %.2f", bal.Balance)
+	}
+}
+
 func TestCancelPayrollRefundsPayments(t *testing.T) {
 	db := openPayrollPaymentTestDB(t)
 	userID := uuid.New()
