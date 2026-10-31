@@ -153,6 +153,7 @@ func allApplicationModels() []interface{} {
 		&models.MediaFile{},
 		&models.DeveloperSettings{},
 		&models.PageFeatureSettings{},
+		&models.SaleDiscountSettings{},
 		&models.AuditLog{},
 		&models.Role{},
 		&models.Permission{},

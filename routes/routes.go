@@ -955,6 +955,14 @@ func SetupRoutes(r *gin.Engine) {
 		pageFeatures.PUT("", middleware.SuperAdminRequired(), controllers.UpdatePageFeatures)
 	}
 
+	// Sale discount mode + auto-discount rule (read: any auth user; write: super admin)
+	saleDiscountSettings := r.Group("/api/v1/sale-discount-settings")
+	saleDiscountSettings.Use(middleware.AuthRequired())
+	{
+		saleDiscountSettings.GET("", controllers.GetSaleDiscountSettings)
+		saleDiscountSettings.PUT("", middleware.SuperAdminRequired(), controllers.UpdateSaleDiscountSettings)
+	}
+
 	// In-app support requests (users → platform super admin)
 	supportRequests := r.Group("/api/v1/support-requests")
 	supportRequests.Use(middleware.AuthRequired())

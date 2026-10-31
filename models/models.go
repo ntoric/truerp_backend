@@ -2904,6 +2904,26 @@ type PageFeatureSettings struct {
 	DeletedAt gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
+// SaleDiscountSettings picks which invoice-level discount style a store uses.
+// "manual" keeps the free-form amount/percent entry; "auto" computes the
+// discount automatically as DiscountValue percent (discount_type="percent") or
+// a flat amount (discount_type="amount") once the sale total reaches
+// MinSaleAmount — the player then applies it with an explicit Apply button.
+// StoreID scopes the row to a store; rows with a NULL store_id act as the
+// global fallback (the pre-store-scoping singleton) used when the active
+// store has no row of its own.
+type SaleDiscountSettings struct {
+	ID            uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	StoreID       *uuid.UUID     `json:"store_id,omitempty" gorm:"type:uuid;uniqueIndex:idx_sale_discount_store"`
+	Mode          string         `json:"mode" gorm:"default:'manual'"`           // manual, auto
+	DiscountType  string         `json:"discount_type" gorm:"default:'percent'"` // percent, amount
+	DiscountValue float64        `json:"discount_value" gorm:"default:0"`
+	MinSaleAmount float64        `json:"min_sale_amount" gorm:"default:0"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
 // DailyReportEmailSettings stores per-user configuration for automatically
 // emailing a daily/periodic report PDF export to a list of recipients.
 // One row per user (UserID is unique). The scheduler reads these rows and
