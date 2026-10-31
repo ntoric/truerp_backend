@@ -1028,6 +1028,13 @@ type PurchaseBill struct {
 	SubTotal          float64    `json:"sub_total" gorm:"default:0"`
 	TaxTotal          float64    `json:"tax_total" gorm:"default:0"`
 	TaxExempt         bool       `json:"tax_exempt" gorm:"default:false"`
+	// ReverseCharge marks bills where GST is payable by the recipient under
+	// the reverse charge mechanism. RCMTaxableValue / RCMTaxAmount may be
+	// recorded explicitly; when zero the GST reports derive them from the
+	// bill's taxable value and item tax rates.
+	ReverseCharge     bool       `json:"reverse_charge" gorm:"default:false"`
+	RCMTaxableValue   float64    `json:"rcm_taxable_value" gorm:"default:0"`
+	RCMTaxAmount      float64    `json:"rcm_tax_amount" gorm:"default:0"`
 	InvoiceDiscount   float64    `json:"invoice_discount" gorm:"default:0"`
 	AdditionalCharges float64    `json:"additional_charges" gorm:"default:0"`
 	// AdditionalChargeItems is the labelled breakdown behind

@@ -405,6 +405,59 @@ func SetupRoutes(r *gin.Engine) {
 		// Tax Calculation
 		gst.POST("/calculate", controllers.CalculateTax)
 		gst.POST("/convert-price", controllers.ConvertPrice)
+
+		// GST Composition reporting module
+		comp := gst.Group("/composition")
+		{
+			// Registration configuration
+			comp.GET("/registrations", controllers.ListGSTRegistrations)
+			comp.POST("/registrations", controllers.CreateGSTRegistration)
+			comp.GET("/registrations/:id", controllers.GetGSTRegistration)
+			comp.PUT("/registrations/:id", controllers.UpdateGSTRegistration)
+			comp.DELETE("/registrations/:id", controllers.DeleteGSTRegistration)
+
+			// Return periods + workflow
+			comp.GET("/periods", controllers.ListGSTReturnPeriods)
+			comp.POST("/periods", controllers.CreateGSTReturnPeriod)
+			comp.GET("/periods/:id", controllers.GetGSTReturnPeriod)
+			comp.PUT("/periods/:id/status", controllers.UpdateGSTReturnPeriodStatus)
+			comp.GET("/periods/:id/snapshots", controllers.ListGSTSnapshots)
+			comp.GET("/periods/:id/snapshots/diff", controllers.GetGSTSnapshotDiff)
+			comp.POST("/periods/:id/validate", controllers.RunGSTValidation)
+			comp.GET("/periods/:id/issues", controllers.ListGSTValidationIssues)
+			comp.PUT("/issues/:id/resolve", controllers.ResolveGSTValidationIssue)
+
+			// Payments + reconciliation
+			comp.GET("/periods/:id/payments", controllers.ListGSTTaxPayments)
+			comp.POST("/periods/:id/payments", controllers.CreateGSTTaxPayment)
+			comp.PUT("/payments/:id", controllers.UpdateGSTTaxPayment)
+			comp.DELETE("/payments/:id", controllers.DeleteGSTTaxPayment)
+			comp.GET("/periods/:id/reconciliation", controllers.ListGSTReconciliation)
+			comp.POST("/periods/:id/reconciliation", controllers.UpsertGSTReconciliation)
+			comp.PUT("/reconciliation/:id/resolve", controllers.ResolveGSTReconciliation)
+
+			// Reports (JSON)
+			comp.GET("/dashboard", controllers.GetGSTDashboard)
+			comp.GET("/sales-summary", controllers.GetGSTSalesSummary)
+			comp.GET("/sales-register", controllers.GetGSTSalesRegister)
+			comp.GET("/purchase-summary", controllers.GetGSTPurchaseSummary)
+			comp.GET("/purchase-register", controllers.GetGSTPurchaseRegister)
+			comp.GET("/tax-liability", controllers.GetGSTTaxLiability)
+			comp.GET("/cmp08", controllers.GetGSTCMP08)
+			comp.GET("/gstr4", controllers.GetGSTGSTR4)
+
+			// Exports
+			comp.GET("/export/filing-summary/excel", controllers.ExportGSTFilingSummaryExcel)
+			comp.GET("/export/filing-summary/pdf", controllers.ExportGSTFilingSummaryPDF)
+			comp.GET("/export/sales-register/excel", controllers.ExportGSTSalesRegisterExcel)
+			comp.GET("/export/sales-register/csv", controllers.ExportGSTSalesRegisterCSV)
+			comp.GET("/export/purchase-register/excel", controllers.ExportGSTPurchaseRegisterExcel)
+			comp.GET("/export/purchase-register/csv", controllers.ExportGSTPurchaseRegisterCSV)
+			comp.GET("/export/cmp08/excel", controllers.ExportGSTCMP08Excel)
+			comp.GET("/export/cmp08/pdf", controllers.ExportGSTCMP08PDF)
+			comp.GET("/export/gstr4/excel", controllers.ExportGSTGSTR4Excel)
+			comp.GET("/exports", controllers.ListGSTReportExports)
+		}
 	}
 
 	// HSN Semantic Search routes (public, no auth required)

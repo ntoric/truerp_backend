@@ -30,6 +30,14 @@ var defaultPermissions = []models.Permission{
 	{Name: "users.update", Resource: "users", Action: "update", Description: "Update users"},
 	{Name: "users.delete", Resource: "users", Action: "delete", Description: "Delete users"},
 	{Name: "audit.read", Resource: "audit", Action: "read", Description: "View audit logs"},
+	{Name: "gst.reports.view", Resource: "gst", Action: "view", Description: "View GST compliance reports"},
+	{Name: "gst.reports.export", Resource: "gst", Action: "export", Description: "Export GST reports"},
+	{Name: "gst.reports.validate", Resource: "gst", Action: "validate", Description: "Run GST validations"},
+	{Name: "gst.reports.finalize", Resource: "gst", Action: "finalize", Description: "Finalize GST report periods"},
+	{Name: "gst.reports.reconcile", Resource: "gst", Action: "reconcile", Description: "Reconcile GST returns and payments"},
+	{Name: "gst.configuration.view", Resource: "gst", Action: "config_view", Description: "View GST registration configuration"},
+	{Name: "gst.configuration.manage", Resource: "gst", Action: "config_manage", Description: "Manage GST registration configuration"},
+	{Name: "gst.filing_status.manage", Resource: "gst", Action: "filing_manage", Description: "Record GST filing status"},
 }
 
 func SeedPermissions(db *gorm.DB) {
