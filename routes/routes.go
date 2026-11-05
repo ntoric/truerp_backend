@@ -1106,6 +1106,45 @@ func SetupRoutes(r *gin.Engine) {
 		portal.POST("/tickets", controllers.PortalCreateTicket)
 	}
 
+	// Subscription packages (plan catalog) — list for all signed-in users,
+	// management restricted to super admin.
+	subscriptionPackages := r.Group("/api/v1/subscription-packages")
+	subscriptionPackages.Use(middleware.AuthRequired())
+	{
+		subscriptionPackages.GET("", controllers.ListSubscriptionPackages)
+		subscriptionPackages.POST("", middleware.SuperAdminRequired(), controllers.CreateSubscriptionPackage)
+		subscriptionPackages.PUT("/:id", middleware.SuperAdminRequired(), controllers.UpdateSubscriptionPackage)
+		subscriptionPackages.DELETE("/:id", middleware.SuperAdminRequired(), controllers.DeleteSubscriptionPackage)
+	}
+
+	// Store subscriptions — store users read their own scope; super admin
+	// manages subscriptions across all stores.
+	subscriptions := r.Group("/api/v1/subscriptions")
+	subscriptions.Use(middleware.AuthRequired())
+	{
+		subscriptions.GET("/current", controllers.GetCurrentSubscription)
+		subscriptions.GET("/history", controllers.GetSubscriptionHistory)
+		subscriptions.GET("", middleware.SuperAdminRequired(), controllers.AdminListSubscriptions)
+		subscriptions.GET("/history/all", middleware.SuperAdminRequired(), controllers.AdminSubscriptionHistory)
+		subscriptions.POST("", middleware.SuperAdminRequired(), controllers.AdminCreateSubscription)
+		subscriptions.PUT("/:id", middleware.SuperAdminRequired(), controllers.AdminUpdateSubscription)
+		subscriptions.POST("/:id/renew", middleware.SuperAdminRequired(), controllers.AdminRenewSubscription)
+		subscriptions.POST("/:id/cancel", middleware.SuperAdminRequired(), controllers.AdminCancelSubscription)
+	}
+
+	// Subscription change requests — stores file cancel/upgrade/downgrade
+	// requests; super admin approves or rejects them.
+	subscriptionRequests := r.Group("/api/v1/subscription-requests")
+	subscriptionRequests.Use(middleware.AuthRequired())
+	{
+		subscriptionRequests.GET("", controllers.ListMySubscriptionRequests)
+		subscriptionRequests.POST("", controllers.CreateSubscriptionRequest)
+		subscriptionRequests.DELETE("/:id", controllers.WithdrawSubscriptionRequest)
+		subscriptionRequests.GET("/all", middleware.SuperAdminRequired(), controllers.AdminListSubscriptionRequests)
+		subscriptionRequests.POST("/:id/approve", middleware.SuperAdminRequired(), controllers.AdminApproveSubscriptionRequest)
+		subscriptionRequests.POST("/:id/reject", middleware.SuperAdminRequired(), controllers.AdminRejectSubscriptionRequest)
+	}
+
 	// Migration routes (myBillBook and other source imports) — super admin only
 	migration := r.Group("/api/v1/migration")
 	migration.Use(middleware.AuthRequired(), middleware.SuperAdminRequired())

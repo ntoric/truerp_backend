@@ -2983,8 +2983,8 @@ type PageFeatureSettings struct {
 // global fallback (the pre-store-scoping singleton) used when the active
 // store has no row of its own.
 type SaleDiscountSettings struct {
-	ID            uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	StoreID       *uuid.UUID     `json:"store_id,omitempty" gorm:"type:uuid;uniqueIndex:idx_sale_discount_store"`
+	ID      uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	StoreID *uuid.UUID `json:"store_id,omitempty" gorm:"type:uuid;uniqueIndex:idx_sale_discount_store"`
 	// IsEnabled is the master switch for discounting across the whole app.
 	// When false, every discount input (line discounts, invoice-level
 	// discounts, payment in/out discounts, product default discounts) is
@@ -3176,4 +3176,98 @@ type ProfitDistribution struct {
 	CreatedAt          time.Time      `json:"created_at"`
 	UpdatedAt          time.Time      `json:"updated_at"`
 	DeletedAt          gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// SubscriptionPackage is one plan in the global catalog managed by the super
+// admin. Stores subscribe to a package; ShowPrice/ShowFeatures control whether
+// non-admin users see the price and feature list on their subscription page.
+type SubscriptionPackage struct {
+	ID           uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	Name         string    `json:"name" gorm:"not null"`
+	Description  string    `json:"description"`
+	Price        float64   `json:"price" gorm:"default:0"`
+	FeaturesJSON string    `json:"-" gorm:"column:features_json;type:text"` // JSON array of strings
+	// No `default` tags on these bools: GORM omits zero-value fields that have
+	// a default on insert, which would silently force false back to true.
+	// Defaults are applied by the controller instead.
+	ShowPrice    bool `json:"show_price"`
+	ShowFeatures bool `json:"show_features"`
+	IsActive     bool `json:"is_active"`
+	// IsComplimentary marks a free plan: subscriptions on it renew at no cost
+	// and it is hidden from the customer-facing available plans list.
+	IsComplimentary bool           `json:"is_complimentary" gorm:"default:false"`
+	SortOrder       int            `json:"sort_order" gorm:"default:0"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+	DeletedAt       gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// StoreSubscription is a store's subscription to a package. It is keyed by
+// store_id (not user_id) so it survives store data resets. EndDate is both the
+// expiry date and the next renewal date for an active subscription.
+type StoreSubscription struct {
+	ID           uuid.UUID            `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	StoreID      uuid.UUID            `json:"store_id" gorm:"type:uuid;not null;index"`
+	Store        *Store               `json:"store,omitempty" gorm:"foreignKey:StoreID"`
+	PackageID    *uuid.UUID           `json:"package_id,omitempty" gorm:"type:uuid;index"`
+	Package      *SubscriptionPackage `json:"package,omitempty" gorm:"foreignKey:PackageID"`
+	PackageName  string               `json:"package_name"`                         // snapshot of the plan name at grant time
+	Price        float64              `json:"price" gorm:"default:0"`               // price per billing period (snapshot)
+	Status       string               `json:"status" gorm:"default:'active';index"` // active, cancelled
+	StartDate    time.Time            `json:"start_date" gorm:"not null"`
+	EndDate      time.Time            `json:"end_date" gorm:"not null"`
+	Frequency    string               `json:"frequency" gorm:"default:'monthly'"` // monthly, quarterly, half_yearly, yearly, custom
+	PeriodMonths int                  `json:"period_months" gorm:"default:1"`     // billing period length in months
+	AutoRenew    bool                 `json:"auto_renew" gorm:"default:false"`
+	Notes        string               `json:"notes"`
+	CreatedBy    *uuid.UUID           `json:"created_by,omitempty" gorm:"type:uuid"`
+	CreatedAt    time.Time            `json:"created_at"`
+	UpdatedAt    time.Time            `json:"updated_at"`
+	DeletedAt    gorm.DeletedAt       `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// SubscriptionHistory records every lifecycle event for a store subscription:
+// creation, renewal, upgrade, downgrade, plan change, cancellation. Package
+// names are stored as text snapshots so history survives package deletion.
+type SubscriptionHistory struct {
+	ID             uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	StoreID        uuid.UUID  `json:"store_id" gorm:"type:uuid;not null;index"`
+	Store          *Store     `json:"store,omitempty" gorm:"foreignKey:StoreID"`
+	SubscriptionID *uuid.UUID `json:"subscription_id,omitempty" gorm:"type:uuid;index"`
+	EventType      string     `json:"event_type" gorm:"not null;index"` // created, renewed, upgraded, downgraded, changed, cancelled, superseded
+	FromPackage    string     `json:"from_package"`
+	ToPackage      string     `json:"to_package"`
+	StartDate      *time.Time `json:"start_date,omitempty"`
+	EndDate        *time.Time `json:"end_date,omitempty"`
+	Price          float64    `json:"price" gorm:"default:0"`
+	Notes          string     `json:"notes"`
+	ActorUserID    *uuid.UUID `json:"actor_user_id,omitempty" gorm:"type:uuid"`
+	ActorName      string     `json:"actor_name"`
+	CreatedAt      time.Time  `json:"created_at"`
+}
+
+// SubscriptionRequest is a store-initiated request to cancel or change its
+// subscription plan. Super admins approve (which applies the change) or reject
+// the request; the owning store can withdraw it while pending.
+type SubscriptionRequest struct {
+	ID                 uuid.UUID            `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	StoreID            uuid.UUID            `json:"store_id" gorm:"type:uuid;not null;index"`
+	Store              *Store               `json:"store,omitempty" gorm:"foreignKey:StoreID"`
+	SubscriptionID     *uuid.UUID           `json:"subscription_id,omitempty" gorm:"type:uuid;index"`
+	RequestType        string               `json:"request_type" gorm:"not null;index"` // cancel, upgrade, downgrade, change
+	TargetPackageID    *uuid.UUID           `json:"target_package_id,omitempty" gorm:"type:uuid;index"`
+	TargetPackage      *SubscriptionPackage `json:"target_package,omitempty" gorm:"foreignKey:TargetPackageID"`
+	TargetPackageName  string               `json:"target_package_name"`  // snapshot
+	CurrentPackageName string               `json:"current_package_name"` // snapshot
+	Reason             string               `json:"reason"`
+	Status             string               `json:"status" gorm:"default:'pending';index"` // pending, approved, rejected, withdrawn
+	RequestedByID      *uuid.UUID           `json:"requested_by_id,omitempty" gorm:"type:uuid"`
+	RequestedByName    string               `json:"requested_by_name"`
+	ResolvedByID       *uuid.UUID           `json:"resolved_by_id,omitempty" gorm:"type:uuid"`
+	ResolvedByName     string               `json:"resolved_by_name"`
+	ResolvedAt         *time.Time           `json:"resolved_at,omitempty"`
+	ResolutionNotes    string               `json:"resolution_notes"`
+	CreatedAt          time.Time            `json:"created_at"`
+	UpdatedAt          time.Time            `json:"updated_at"`
+	DeletedAt          gorm.DeletedAt       `json:"deleted_at,omitempty" gorm:"index"`
 }

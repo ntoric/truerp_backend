@@ -204,6 +204,10 @@ func allApplicationModels() []interface{} {
 		&models.DBBackupSettings{},
 		&models.DBBackupRecord{},
 		&models.MigrationJob{},
+		&models.SubscriptionPackage{},
+		&models.StoreSubscription{},
+		&models.SubscriptionHistory{},
+		&models.SubscriptionRequest{},
 	}
 }
 

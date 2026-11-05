@@ -53,6 +53,7 @@ var defaultPageFeatureKeys = []string{
 	"/email-marketing",
 	"/whatsapp-marketing",
 	"/loyalty",
+	"/subscription",
 	"/stores",
 	"/user-management",
 	"/audit",
