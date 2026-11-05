@@ -1150,7 +1150,7 @@ func GetBusinessUsers(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Select a store to manage users"})
 			return
 		}
-		if err := utils.DB.Where("store_id = ? AND is_store_owner = ?", storeID, false).
+		if err := usersAssignedToStoreQuery(storeID).
 			Order("created_at ASC").Find(&users).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch users"})
 			return
@@ -1192,12 +1192,13 @@ func CreateBusinessUser(c *gin.Context) {
 	}
 
 	var input struct {
-		Name     string  `json:"name"`
-		Email    string  `json:"email"`
-		Password string  `json:"password"`
-		Phone    string  `json:"phone"`
-		Role     string  `json:"role"`
-		StoreID  *string `json:"store_id"`
+		Name     string   `json:"name"`
+		Email    string   `json:"email"`
+		Password string   `json:"password"`
+		Phone    string   `json:"phone"`
+		Role     string   `json:"role"`
+		StoreID  *string  `json:"store_id"`
+		StoreIDs []string `json:"store_ids"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request data", "fields": gin.H{"_form": "Invalid request data"}})
@@ -1221,31 +1222,59 @@ func CreateBusinessUser(c *gin.Context) {
 	}
 
 	var storeID uuid.UUID
+	var extraStoreIDs []uuid.UUID
 	if !utils.IsSuperAdminRole(actor.Role) {
-		// Store admins always create users in their own store.
-		if actor.StoreID == nil {
+		// Store admins always create users in their currently selected store.
+		sid, ok := resolveManagedStoreID(c, actor)
+		if !ok {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Your account has no store assignment"})
 			return
 		}
-		storeID = *actor.StoreID
-	} else if input.StoreID != nil && strings.TrimSpace(*input.StoreID) != "" {
-		parsed, err := uuid.Parse(strings.TrimSpace(*input.StoreID))
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid store_id", "fields": gin.H{"store_id": "Invalid store"}})
-			return
-		}
-		if _, err := utils.FindStoreByID(utils.DB, parsed); err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Store not found", "fields": gin.H{"store_id": "Store not found"}})
-			return
-		}
-		storeID = parsed
-	} else {
-		sid, ok := resolveManagedStoreID(c, actor)
-		if !ok {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Select a store to create users"})
-			return
-		}
 		storeID = sid
+	} else if len(input.StoreIDs) > 0 {
+		seen := map[uuid.UUID]bool{}
+		parsedIDs := []uuid.UUID{}
+		for _, raw := range input.StoreIDs {
+			parsed, err := uuid.Parse(strings.TrimSpace(raw))
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid store_ids", "fields": gin.H{"store_ids": "Invalid store"}})
+				return
+			}
+			if seen[parsed] {
+				continue
+			}
+			if _, err := utils.FindStoreByID(utils.DB, parsed); err != nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "Store not found", "fields": gin.H{"store_ids": "Store not found"}})
+				return
+			}
+			seen[parsed] = true
+			parsedIDs = append(parsedIDs, parsed)
+		}
+		if len(parsedIDs) > 0 {
+			storeID = parsedIDs[0]
+			extraStoreIDs = parsedIDs[1:]
+		}
+	}
+	if storeID == uuid.Nil {
+		if input.StoreID != nil && strings.TrimSpace(*input.StoreID) != "" {
+			parsed, err := uuid.Parse(strings.TrimSpace(*input.StoreID))
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid store_id", "fields": gin.H{"store_id": "Invalid store"}})
+				return
+			}
+			if _, err := utils.FindStoreByID(utils.DB, parsed); err != nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "Store not found", "fields": gin.H{"store_id": "Store not found"}})
+				return
+			}
+			storeID = parsed
+		} else {
+			sid, ok := resolveManagedStoreID(c, actor)
+			if !ok {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Select a store to create users"})
+				return
+			}
+			storeID = sid
+		}
 	}
 
 	var existingUser models.User
@@ -1278,6 +1307,12 @@ func CreateBusinessUser(c *gin.Context) {
 	if err := utils.DB.Create(&newUser).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
 		return
+	}
+	if len(extraStoreIDs) > 0 {
+		if err := utils.ReplaceExtraStoreAssignments(utils.DB, newUser.ID, extraStoreIDs); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to assign stores"})
+			return
+		}
 	}
 
 	CreateAuditLog(
@@ -1323,7 +1358,7 @@ func DeleteBusinessUser(c *gin.Context) {
 		return
 	}
 
-	if !actorCanAccessUser(actor, targetUser) {
+	if !actorCanAccessUser(c, actor, targetUser) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "User does not belong to your store"})
 		return
 	}

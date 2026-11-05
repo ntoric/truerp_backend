@@ -591,7 +591,17 @@ func GetProfile(c *gin.Context) {
 		resp["stores"] = list
 		resp["can_switch_stores"] = true
 	} else {
-		resp["can_switch_stores"] = false
+		ids := utils.AssignedStoreIDs(utils.DB, user.ID, user.StoreID)
+		var stores []models.Store
+		if len(ids) > 0 {
+			utils.DB.Where("id IN ? AND is_active = ?", ids, true).Order("name ASC").Find(&stores)
+		}
+		list := make([]gin.H, 0, len(stores))
+		for _, s := range stores {
+			list = append(list, gin.H(utils.StorePublicJSON(s)))
+		}
+		resp["stores"] = list
+		resp["can_switch_stores"] = len(stores) > 1
 	}
 
 	c.JSON(http.StatusOK, resp)

@@ -79,6 +79,7 @@ func allApplicationModels() []interface{} {
 	return []interface{}{
 		&models.User{},
 		&models.Store{},
+		&models.UserStore{},
 		&models.Business{},
 		&models.Invoice{},
 		&models.InvoiceItem{},
@@ -113,6 +114,8 @@ func allApplicationModels() []interface{} {
 		&models.Party{},
 		&models.LoyaltySettings{},
 		&models.LoyaltyTransaction{},
+		&models.LoyaltyCardDesign{},
+		&models.LoyaltyCard{},
 		&models.SalesReturn{},
 		&models.SalesReturnItem{},
 		&models.PurchaseReturn{},

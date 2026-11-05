@@ -153,12 +153,26 @@ type Store struct {
 	Email       string    `json:"email"`
 	OwnerUserID uuid.UUID `json:"owner_user_id" gorm:"type:uuid;not null;uniqueIndex"`
 	IsActive    bool      `json:"is_active" gorm:"default:true"`
+	// When set by a super admin, desktop clients for this store automatically
+	// download and install available app updates without prompting.
+	ForceUpdate bool `json:"force_update" gorm:"default:false"`
 	// Last Tauri desktop app version reported by this store's clients.
 	AppVersion       string         `json:"app_version"`
 	AppVersionSeenAt *time.Time     `json:"app_version_seen_at"`
 	CreatedAt        time.Time      `json:"created_at"`
 	UpdatedAt        time.Time      `json:"updated_at"`
 	DeletedAt        gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// UserStore assigns a user to stores beyond their primary store
+// (users.store_id). Each extra row lets the user switch into that
+// store's data scope from the backoffice store selector.
+type UserStore struct {
+	ID        uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID    uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex:idx_user_stores_pair"`
+	StoreID   uuid.UUID `json:"store_id" gorm:"type:uuid;not null;uniqueIndex:idx_user_stores_pair"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type Business struct {
@@ -1304,6 +1318,62 @@ type LoyaltyStats struct {
 	TotalPointsOutstanding  int64 `json:"total_points_outstanding"`
 	PointsEarnedThisMonth   int64 `json:"points_earned_this_month"`
 	PointsRedeemedThisMonth int64 `json:"points_redeemed_this_month"`
+}
+
+// LoyaltyCardDesign holds the per-store artwork configuration used when a
+// store generates printable PVC loyalty cards. StoreID scopes the row to a
+// store; rows with a NULL store_id are the fallback for scopes that have no
+// store record. NextSerial is the running counter for the card number series
+// and is only advanced inside GenerateLoyaltyCards' transaction.
+type LoyaltyCardDesign struct {
+	ID           uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID       uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index"`
+	StoreID      *uuid.UUID `json:"store_id,omitempty" gorm:"type:uuid;index"`
+	Theme        string     `json:"theme" gorm:"default:'midnight'"`
+	PrimaryColor string     `json:"primary_color" gorm:"default:'#0f172a'"`
+	AccentColor  string     `json:"accent_color" gorm:"default:'#f59e0b'"`
+	CardPrefix   string     `json:"card_prefix" gorm:"default:'LC'"`
+	CardTitle    string     `json:"card_title"`
+	Tagline      string     `json:"tagline" gorm:"default:'LOYALTY REWARDS'"`
+	FooterText   string     `json:"footer_text"`
+	ShowLogo     bool       `json:"show_logo" gorm:"default:true"`
+	ShowChip     bool       `json:"show_chip" gorm:"default:true"`
+	IncludeBack  bool       `json:"include_back" gorm:"default:true"`
+	BackTerms    string     `json:"back_terms"`
+	// ContentJSON holds the full card content configuration (labels, texts and
+	// per-element visibility) as JSON. CardTitle/Tagline/FooterText/BackTerms
+	// are the legacy single-purpose fields and seed the defaults.
+	ContentJSON string `json:"-" gorm:"column:content_json;type:text"`
+	// Typography & artwork selections (whitelisted keys resolved client-side).
+	FontFamily   string `json:"font_family" gorm:"default:'sans'"`
+	NumberFont   string `json:"number_font" gorm:"default:'mono'"`
+	Decor        string `json:"decor" gorm:"default:'orbits'"`
+	FrontGraphic string `json:"front_graphic" gorm:"default:'none'"`
+	BackGraphic  string `json:"back_graphic" gorm:"default:'none'"`
+	// LayoutJSON stores per-element geometry {front:{el:{x,y,w,h,size}},back:{…}}
+	// in 0.1mm viewBox units, produced by the drag/resize designer.
+	LayoutJSON string         `json:"-" gorm:"column:layout_json;type:text"`
+	NextSerial int64          `json:"next_serial" gorm:"default:1"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+	DeletedAt  gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// LoyaltyCard is one generated card in a store's loyalty card series. Cards
+// are created in batches by GenerateLoyaltyCards; PartyID is reserved for
+// assigning a card to a customer later.
+type LoyaltyCard struct {
+	ID         uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID     uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
+	StoreID    *uuid.UUID     `json:"store_id,omitempty" gorm:"type:uuid;index;uniqueIndex:idx_loyalty_cards_store_number,priority:1"`
+	BatchID    uuid.UUID      `json:"batch_id" gorm:"type:uuid;not null;index"`
+	CardNumber string         `json:"card_number" gorm:"not null;index;uniqueIndex:idx_loyalty_cards_store_number,priority:2"`
+	Serial     int64          `json:"serial"`
+	Status     string         `json:"status" gorm:"default:'active'"` // active, void
+	PartyID    *uuid.UUID     `json:"party_id,omitempty" gorm:"type:uuid"`
+	Party      *Party         `json:"party,omitempty" gorm:"foreignKey:PartyID"`
+	CreatedAt  time.Time      `json:"created_at"`
+	DeletedAt  gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type PartyStats struct {
@@ -2915,6 +2985,11 @@ type PageFeatureSettings struct {
 type SaleDiscountSettings struct {
 	ID            uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	StoreID       *uuid.UUID     `json:"store_id,omitempty" gorm:"type:uuid;uniqueIndex:idx_sale_discount_store"`
+	// IsEnabled is the master switch for discounting across the whole app.
+	// When false, every discount input (line discounts, invoice-level
+	// discounts, payment in/out discounts, product default discounts) is
+	// hidden from the UI — only the dedicated Discount page stays reachable.
+	IsEnabled     bool           `json:"is_enabled" gorm:"default:true"`
 	Mode          string         `json:"mode" gorm:"default:'manual'"`           // manual, auto
 	DiscountType  string         `json:"discount_type" gorm:"default:'percent'"` // percent, amount
 	DiscountValue float64        `json:"discount_value" gorm:"default:0"`

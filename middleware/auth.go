@@ -102,24 +102,45 @@ func AuthRequired() gin.HandlerFunc {
 			if storeID == nil && claims.StoreID != nil {
 				storeID = claims.StoreID
 			}
-			if storeID == nil {
-				c.JSON(http.StatusForbidden, gin.H{"error": "No store assigned. Contact your administrator."})
-				c.Abort()
-				return
+			resolved := false
+			headerStore := strings.TrimSpace(c.GetHeader("X-Store-ID"))
+			if headerStore != "" {
+				if storeUUID, parseErr := uuid.Parse(headerStore); parseErr == nil && (storeID == nil || *storeID != storeUUID) {
+					// Users with multiple assigned stores may switch between
+					// them — but only into stores they are assigned to.
+					for _, id := range utils.AssignedStoreIDs(utils.DB, actor.ID, actor.StoreID) {
+						if id != storeUUID {
+							continue
+						}
+						if store, storeErr := utils.FindStoreByID(utils.DB, storeUUID); storeErr == nil && store.IsActive {
+							scopeUserID = store.OwnerUserID
+							activeStoreID = &store.ID
+							resolved = true
+						}
+						break
+					}
+				}
 			}
-			store, storeErr := utils.FindStoreByID(utils.DB, *storeID)
-			if storeErr != nil {
-				c.JSON(http.StatusForbidden, gin.H{"error": "Assigned store not found"})
-				c.Abort()
-				return
+			if !resolved {
+				if storeID == nil {
+					c.JSON(http.StatusForbidden, gin.H{"error": "No store assigned. Contact your administrator."})
+					c.Abort()
+					return
+				}
+				store, storeErr := utils.FindStoreByID(utils.DB, *storeID)
+				if storeErr != nil {
+					c.JSON(http.StatusForbidden, gin.H{"error": "Assigned store not found"})
+					c.Abort()
+					return
+				}
+				if !store.IsActive {
+					c.JSON(http.StatusForbidden, gin.H{"error": "Assigned store is inactive"})
+					c.Abort()
+					return
+				}
+				scopeUserID = store.OwnerUserID
+				activeStoreID = &store.ID
 			}
-			if !store.IsActive {
-				c.JSON(http.StatusForbidden, gin.H{"error": "Assigned store is inactive"})
-				c.Abort()
-				return
-			}
-			scopeUserID = store.OwnerUserID
-			activeStoreID = &store.ID
 		}
 
 		c.Set("user_id", scopeUserID)

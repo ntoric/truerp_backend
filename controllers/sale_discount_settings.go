@@ -13,6 +13,7 @@ import (
 
 func defaultSaleDiscountSettings() models.SaleDiscountSettings {
 	return models.SaleDiscountSettings{
+		IsEnabled:    true,
 		Mode:         "manual",
 		DiscountType: "percent",
 	}
@@ -47,6 +48,7 @@ func GetSaleDiscountSettings(c *gin.Context) {
 // (no stores exist), the global fallback row is updated instead.
 func UpdateSaleDiscountSettings(c *gin.Context) {
 	var input struct {
+		IsEnabled     *bool   `json:"is_enabled"`
 		Mode          string  `json:"mode"`
 		DiscountType  string  `json:"discount_type"`
 		DiscountValue float64 `json:"discount_value"`
@@ -80,6 +82,7 @@ func UpdateSaleDiscountSettings(c *gin.Context) {
 		settings = models.SaleDiscountSettings{
 			ID:            uuid.New(),
 			StoreID:       storeID,
+			IsEnabled:     input.IsEnabled == nil || *input.IsEnabled,
 			Mode:          input.Mode,
 			DiscountType:  input.DiscountType,
 			DiscountValue: input.DiscountValue,
@@ -89,16 +92,28 @@ func UpdateSaleDiscountSettings(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save sale discount settings"})
 			return
 		}
+		// GORM omits default-tagged fields whose value is the zero value on
+		// INSERT, so an explicit "off" must be written with a column update.
+		if input.IsEnabled != nil && !*input.IsEnabled {
+			if err := utils.DB.Model(&settings).Update("is_enabled", false).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update sale discount settings"})
+				return
+			}
+		}
 	} else if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load sale discount settings"})
 		return
 	} else {
-		if err := utils.DB.Model(&settings).Updates(map[string]interface{}{
+		updates := map[string]interface{}{
 			"mode":            input.Mode,
 			"discount_type":   input.DiscountType,
 			"discount_value":  input.DiscountValue,
 			"min_sale_amount": input.MinSaleAmount,
-		}).Error; err != nil {
+		}
+		if input.IsEnabled != nil {
+			updates["is_enabled"] = *input.IsEnabled
+		}
+		if err := utils.DB.Model(&settings).Updates(updates).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update sale discount settings"})
 			return
 		}

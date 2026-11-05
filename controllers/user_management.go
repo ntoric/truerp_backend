@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 func canManageUsers(role string) bool {
@@ -33,17 +34,34 @@ func isStoreAdminAssignableRole(role string) bool {
 	return role == "admin" || role == "staff"
 }
 
-func actorCanAccessUser(actor models.User, target models.User) bool {
+func actorCanAccessUser(c *gin.Context, actor models.User, target models.User) bool {
 	if utils.IsSuperAdminRole(actor.Role) {
 		return true
 	}
 	if actor.Role != "admin" {
 		return false
 	}
-	if actor.StoreID == nil || target.StoreID == nil {
+	storeID, ok := resolveManagedStoreID(c, actor)
+	if !ok {
 		return false
 	}
-	return *actor.StoreID == *target.StoreID
+	if target.StoreID != nil && *target.StoreID == storeID {
+		return true
+	}
+	var count int64
+	utils.DB.Model(&models.UserStore{}).
+		Where("user_id = ? AND store_id = ?", target.ID, storeID).
+		Count(&count)
+	return count > 0
+}
+
+// usersAssignedToStoreQuery selects non-owner users assigned to a store,
+// either as their primary store (users.store_id) or as an extra assignment
+// (user_stores).
+func usersAssignedToStoreQuery(storeID uuid.UUID) *gorm.DB {
+	extra := utils.DB.Model(&models.UserStore{}).Select("user_id").Where("store_id = ?", storeID)
+	return utils.DB.Model(&models.User{}).
+		Where("is_store_owner = ? AND (store_id = ? OR id IN (?))", false, storeID, extra)
 }
 
 func resolveManagedStoreID(c *gin.Context, actor models.User) (uuid.UUID, bool) {
@@ -52,6 +70,11 @@ func resolveManagedStoreID(c *gin.Context, actor models.User) (uuid.UUID, bool) 
 			return storeID, true
 		}
 		return uuid.Nil, false
+	}
+	// Follow the actor's currently selected store so multi-store admins
+	// manage the store they switched into.
+	if storeID, ok := currentStoreID(c); ok {
+		return storeID, true
 	}
 	if actor.StoreID != nil {
 		return *actor.StoreID, true
@@ -94,7 +117,7 @@ func GetUserManagementOverview(c *gin.Context) {
 		if c.Query("all") == "true" {
 			utils.DB.Where("is_store_owner = ?", false).Find(&users)
 		} else if storeID, ok := currentStoreID(c); ok {
-			utils.DB.Where("store_id = ? AND is_store_owner = ?", storeID, false).Find(&users)
+			usersAssignedToStoreQuery(storeID).Find(&users)
 		} else {
 			utils.DB.Where("is_store_owner = ?", false).Find(&users)
 		}
@@ -104,7 +127,7 @@ func GetUserManagementOverview(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Store assignment required"})
 			return
 		}
-		utils.DB.Where("store_id = ? AND is_store_owner = ?", storeID, false).Find(&users)
+		usersAssignedToStoreQuery(storeID).Find(&users)
 	}
 
 	countByRole := map[string]int64{}
@@ -155,7 +178,7 @@ func UpdateBusinessUser(c *gin.Context) {
 		return
 	}
 
-	if !actorCanAccessUser(actor, target) {
+	if !actorCanAccessUser(c, actor, target) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "User does not belong to your store"})
 		return
 	}
@@ -166,12 +189,13 @@ func UpdateBusinessUser(c *gin.Context) {
 	}
 
 	var input struct {
-		Name     string  `json:"name"`
-		Phone    string  `json:"phone"`
-		Role     string  `json:"role"`
-		IsActive *bool   `json:"is_active"`
-		Password string  `json:"password"`
-		StoreID  *string `json:"store_id"`
+		Name     string    `json:"name"`
+		Phone    string    `json:"phone"`
+		Role     string    `json:"role"`
+		IsActive *bool     `json:"is_active"`
+		Password string    `json:"password"`
+		StoreID  *string   `json:"store_id"`
+		StoreIDs *[]string `json:"store_ids"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -224,6 +248,7 @@ func UpdateBusinessUser(c *gin.Context) {
 		}
 		updates["password"] = string(hashed)
 	}
+	var singleStoreID *uuid.UUID
 	if input.StoreID != nil {
 		if !utils.IsSuperAdminRole(actor.Role) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Only super admins can change user stores"})
@@ -242,15 +267,88 @@ func UpdateBusinessUser(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Store not found"})
 			return
 		}
+		singleStoreID = &storeID
 		updates["store_id"] = storeID
 	}
 
-	if len(updates) == 0 {
+	var newExtraIDs []uuid.UUID
+	if input.StoreIDs != nil {
+		if !utils.IsSuperAdminRole(actor.Role) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Only super admins can change user stores"})
+			return
+		}
+		if isProtectedRole(target.Role) || target.IsStoreOwner {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot change store for super admin accounts"})
+			return
+		}
+		newStoreIDs := []uuid.UUID{}
+		seen := map[uuid.UUID]bool{}
+		for _, raw := range *input.StoreIDs {
+			storeID, err := uuid.Parse(strings.TrimSpace(raw))
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid store_ids"})
+				return
+			}
+			if seen[storeID] {
+				continue
+			}
+			if _, err := utils.FindStoreByID(utils.DB, storeID); err != nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "Store not found"})
+				return
+			}
+			seen[storeID] = true
+			newStoreIDs = append(newStoreIDs, storeID)
+		}
+		// Keep the current primary store when it's still assigned; otherwise
+		// the first listed store becomes primary and the rest become extras.
+		primary := uuid.Nil
+		for _, id := range newStoreIDs {
+			if target.StoreID != nil && id == *target.StoreID {
+				primary = id
+				break
+			}
+		}
+		if primary == uuid.Nil && len(newStoreIDs) > 0 {
+			primary = newStoreIDs[0]
+		}
+		if primary == uuid.Nil {
+			updates["store_id"] = nil
+		} else {
+			updates["store_id"] = primary
+		}
+		for _, id := range newStoreIDs {
+			if id != primary {
+				newExtraIDs = append(newExtraIDs, id)
+			}
+		}
+	}
+
+	if len(updates) == 0 && input.StoreIDs == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No updates provided"})
 		return
 	}
 
-	if err := utils.DB.Model(&target).Updates(updates).Error; err != nil {
+	err = utils.DB.Transaction(func(tx *gorm.DB) error {
+		if len(updates) > 0 {
+			if err := tx.Model(&target).Updates(updates).Error; err != nil {
+				return err
+			}
+		}
+		if input.StoreIDs != nil {
+			if err := utils.ReplaceExtraStoreAssignments(tx, target.ID, newExtraIDs); err != nil {
+				return err
+			}
+		} else if singleStoreID != nil {
+			// Primary store changed via the legacy field — drop any duplicate
+			// extra assignment pointing at the new primary.
+			if err := tx.Where("user_id = ? AND store_id = ?", target.ID, *singleStoreID).
+				Delete(&models.UserStore{}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user"})
 		return
 	}

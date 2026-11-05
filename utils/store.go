@@ -67,6 +67,43 @@ func FindStoreByOwnerUserID(db *gorm.DB, ownerUserID uuid.UUID) (models.Store, e
 	return store, err
 }
 
+// AssignedStoreIDs returns every store a user can operate in: their primary
+// store (users.store_id) plus extra assignments from the user_stores table.
+// The primary store always comes first; duplicates are removed.
+func AssignedStoreIDs(db *gorm.DB, userID uuid.UUID, primaryStoreID *uuid.UUID) []uuid.UUID {
+	ids := []uuid.UUID{}
+	seen := map[uuid.UUID]bool{}
+	if primaryStoreID != nil && *primaryStoreID != uuid.Nil {
+		seen[*primaryStoreID] = true
+		ids = append(ids, *primaryStoreID)
+	}
+	var extras []uuid.UUID
+	db.Model(&models.UserStore{}).Where("user_id = ?", userID).Pluck("store_id", &extras)
+	for _, id := range extras {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// ReplaceExtraStoreAssignments rewrites a user's user_stores rows to exactly
+// the given set. Callers pass only extra stores; the primary store lives on
+// users.store_id.
+func ReplaceExtraStoreAssignments(db *gorm.DB, userID uuid.UUID, storeIDs []uuid.UUID) error {
+	if err := db.Where("user_id = ?", userID).Delete(&models.UserStore{}).Error; err != nil {
+		return err
+	}
+	for _, storeID := range storeIDs {
+		row := models.UserStore{ID: uuid.New(), UserID: userID, StoreID: storeID}
+		if err := db.Create(&row).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func StorePublicJSON(store models.Store) map[string]interface{} {
 	return map[string]interface{}{
 		"id":                  store.ID,
@@ -80,6 +117,7 @@ func StorePublicJSON(store models.Store) map[string]interface{} {
 		"phone":               store.Phone,
 		"email":               store.Email,
 		"is_active":           store.IsActive,
+		"force_update":        store.ForceUpdate,
 		"app_version":         store.AppVersion,
 		"app_version_seen_at": store.AppVersionSeenAt,
 		"created_at":          store.CreatedAt,

@@ -550,6 +550,13 @@ func SetupRoutes(r *gin.Engine) {
 		loyalty.GET("/parties/:party_id", controllers.GetPartyLoyaltyBalance)
 		loyalty.POST("/parties/:party_id/adjust", controllers.AdjustPartyLoyalty)
 		loyalty.POST("/calculate-redemption", controllers.CalculateLoyaltyRedemption)
+		loyalty.GET("/card-design", controllers.GetLoyaltyCardDesign)
+		loyalty.PUT("/card-design", controllers.UpdateLoyaltyCardDesign)
+		loyalty.GET("/cards", controllers.ListLoyaltyCards)
+		loyalty.GET("/cards/lookup", controllers.LookupLoyaltyCard)
+		loyalty.POST("/cards/generate", controllers.GenerateLoyaltyCards)
+		loyalty.POST("/cards/:id/assign", controllers.AssignLoyaltyCard)
+		loyalty.DELETE("/cards/:id", controllers.DeleteLoyaltyCard)
 	}
 
 	// Party routes
@@ -961,6 +968,13 @@ func SetupRoutes(r *gin.Engine) {
 	{
 		saleDiscountSettings.GET("", controllers.GetSaleDiscountSettings)
 		saleDiscountSettings.PUT("", middleware.SuperAdminRequired(), controllers.UpdateSaleDiscountSettings)
+	}
+
+	// Discount transaction history for the dedicated Discount page.
+	discounts := r.Group("/api/v1/discounts")
+	discounts.Use(middleware.AuthRequired())
+	{
+		discounts.GET("/transactions", controllers.GetDiscountTransactions)
 	}
 
 	// In-app support requests (users → platform super admin)
