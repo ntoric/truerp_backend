@@ -747,6 +747,15 @@ func UpdateInvoice(c *gin.Context) {
 	}
 	normalizeInvoicePaymentStatus(&invoice)
 
+	// A PUT can also flip the invoice to cancelled (PATCH /status is the
+	// preferred path because it collects a reason); stamp it the same way
+	// so reports and previews can tell who cancelled and when.
+	if previousStatus != "cancelled" && invoice.Status == "cancelled" && invoice.CancelledAt == nil {
+		now := time.Now()
+		invoice.CancelledAt = &now
+		invoice.CancelledBy = userName
+	}
+
 	if err := utils.DB.Save(&invoice).Error; err != nil {
 		fmt.Printf("[DEBUG] UpdateInvoice - DB update error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update invoice"})
@@ -755,7 +764,17 @@ func UpdateInvoice(c *gin.Context) {
 
 	applyInvoiceSaleStock(userID, &invoice)
 
-	if err := resyncLinkedInvoicePayments(utils.DB, userID, &previousInvoice, &invoice); err != nil {
+	// A status flip to cancelled reverses the linked payments the same way
+	// PATCH /status does; resyncing on top would rewrite the rows that were
+	// just cancelled.
+	if previousStatus != "cancelled" && invoice.Status == "cancelled" {
+		if err := cancelLinkedInvoicePayments(userID, &invoice, invoice.CancelReason, userName); err != nil {
+			fmt.Printf("[DEBUG] UpdateInvoice - cancel payments error: %v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Invoice updated but failed to cancel linked payments"})
+			return
+		}
+		invoice.AmountPaid = 0
+	} else if err := resyncLinkedInvoicePayments(utils.DB, userID, &previousInvoice, &invoice); err != nil {
 		fmt.Printf("[DEBUG] UpdateInvoice - payment resync error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invoice updated but failed to update cash/bank"})
 		return

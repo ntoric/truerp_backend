@@ -489,9 +489,16 @@ func UpdateInvoiceStatus(c *gin.Context) {
 	}
 
 	// A cancelled invoice no longer counts anywhere — return its items to
-	// stock and drop its sale ledger rows; reinstating deducts them again.
+	// stock, cancel its linked payments so they stop counting too, and drop
+	// its sale ledger rows; reinstating deducts stock again but leaves the
+	// payments cancelled, so the invoice comes back unpaid.
 	if prevStatus != "cancelled" && invoice.Status == "cancelled" {
 		reverseInvoiceSaleStock(userID, invoice.ID)
+		if err := cancelLinkedInvoicePayments(userID, &invoice, invoice.CancelReason, userName); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Status updated but failed to cancel linked payments"})
+			return
+		}
+		invoice.AmountPaid = 0
 	} else if prevStatus == "cancelled" && invoice.Status != "cancelled" {
 		var items []models.InvoiceItem
 		utils.DB.Where("invoice_id = ?", invoice.ID).Find(&items)
@@ -499,9 +506,13 @@ func UpdateInvoiceStatus(c *gin.Context) {
 		applyInvoiceSaleStock(userID, &invoice)
 	}
 
-	if err := resyncLinkedInvoicePayments(utils.DB, userID, &previousInvoice, &invoice); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Status updated but failed to update cash/bank"})
-		return
+	// Cancelling already reversed the linked payments; resyncing on top of
+	// that would rewrite the rows that were just cancelled.
+	if invoice.Status != "cancelled" {
+		if err := resyncLinkedInvoicePayments(utils.DB, userID, &previousInvoice, &invoice); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Status updated but failed to update cash/bank"})
+			return
+		}
 	}
 
 	// A cancelled invoice carries no receivable leg on the party balance;
