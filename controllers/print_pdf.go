@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 	"truerp/models"
+	"truerp/utils"
 
 	"github.com/go-pdf/fpdf"
 )
@@ -26,7 +27,6 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 	}
 
 	pdf := fpdf.New(orientation, "mm", paper, "")
-	pdf.SetAutoPageBreak(true, 15)
 	pdf.SetMargins(mmFromInches(ps.MarginLeft), mmFromInches(ps.MarginTop), mmFromInches(ps.MarginRight))
 	pdf.SetAutoPageBreak(true, mmFromInches(ps.MarginBottom))
 	pdf.AddPage()
@@ -36,167 +36,505 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 		fontSize = 12
 	}
 
-	if ps.PrintHeader {
-		if business != nil && business.Name != "" {
-			pdf.SetFont("Arial", "B", fontSize+4)
-			pdf.SetTextColor(30, 30, 30)
-			pdf.CellFormat(0, 8, sanitizePDFText(business.Name), "", 1, "L", false, 0, "")
-			pdf.SetFont("Arial", "", fontSize-1)
-			pdf.SetTextColor(80, 80, 80)
-			if business.Address != "" {
-				pdf.MultiCell(0, 5, sanitizePDFText(business.Address), "", "L", false)
-			}
-			loc := strings.TrimSpace(strings.Join([]string{business.City, business.State, business.Pincode}, ", "))
-			if loc != "" && loc != ", ," {
-				pdf.CellFormat(0, 5, sanitizePDFText(loc), "", 1, "L", false, 0, "")
-			}
-			if business.Phone != "" {
-				pdf.CellFormat(0, 5, "Ph: "+sanitizePDFText(business.Phone), "", 1, "L", false, 0, "")
-			}
-			if business.GSTIN != "" {
-				pdf.CellFormat(0, 5, "GSTIN: "+sanitizePDFText(business.GSTIN), "", 1, "L", false, 0, "")
-			}
-			pdf.Ln(4)
-		}
-	}
+	invSettings := loadInvoiceSettings(invoice.UserID)
+	custom := utils.ParseInvoiceTemplateCustomization(invSettings.Customization)
 
-	pdf.SetFont("Arial", "B", fontSize+6)
-	pdf.SetTextColor(37, 99, 235)
-	pdf.CellFormat(0, 10, "TAX INVOICE", "", 1, "L", false, 0, "")
-	pdf.SetFont("Arial", "", fontSize)
-	pdf.SetTextColor(80, 80, 80)
-	pdf.CellFormat(0, 6, sanitizePDFText(invoice.InvoiceNumber), "", 1, "L", false, 0, "")
-	pdf.SetFont("Arial", "B", fontSize-1)
-	pdf.CellFormat(0, 6, strings.ToUpper(invoice.Status), "", 1, "L", false, 0, "")
-	pdf.Ln(4)
-
-	// Bill To
-	pdf.SetFont("Arial", "B", fontSize)
-	pdf.SetTextColor(50, 50, 50)
-	pdf.CellFormat(95, 6, "Bill To", "", 0, "L", false, 0, "")
-	pdf.CellFormat(0, 6, "Invoice Details", "", 1, "L", false, 0, "")
-	pdf.SetFont("Arial", "", fontSize-1)
-	pdf.SetTextColor(60, 60, 60)
-
-	leftY := pdf.GetY()
-	pdf.MultiCell(95, 5, sanitizePDFText(invoice.Party.Name), "", "L", false)
-	if invoice.Party.Address != "" {
-		pdf.MultiCell(95, 5, sanitizePDFText(invoice.Party.Address), "", "L", false)
-	}
-	partyLoc := strings.TrimSpace(fmt.Sprintf("%s, %s - %s", invoice.Party.City, invoice.Party.State, invoice.Party.Pincode))
-	if partyLoc != ",  - " && partyLoc != "" {
-		pdf.MultiCell(95, 5, sanitizePDFText(partyLoc), "", "L", false)
-	}
-	if invoice.Party.GSTIN != "" {
-		pdf.MultiCell(95, 5, "GSTIN: "+sanitizePDFText(invoice.Party.GSTIN), "", "L", false)
-	}
-	leftBottom := pdf.GetY()
-
-	pdf.SetXY(pdf.GetX()+95, leftY)
-	pdf.CellFormat(0, 5, "Date: "+invoice.Date.Format("02-01-2006"), "", 1, "L", false, 0, "")
-	pdf.SetX(pdf.GetX() + 95)
-	due := "N/A"
-	if invoice.DueDate != nil {
-		due = invoice.DueDate.Format("02-01-2006")
-	}
-	pdf.CellFormat(0, 5, "Due: "+due, "", 1, "L", false, 0, "")
-	if invoice.PlaceOfSupply != "" {
-		pdf.SetX(pdf.GetX() + 95)
-		pdf.CellFormat(0, 5, "Place of Supply: "+sanitizePDFText(invoice.PlaceOfSupply), "", 1, "L", false, 0, "")
-	}
-	rightBottom := pdf.GetY()
-	if leftBottom > rightBottom {
-		pdf.SetY(leftBottom)
-	} else {
-		pdf.SetY(rightBottom)
-	}
-	pdf.Ln(6)
-
-	// Items table
 	pageW, _ := pdf.GetPageSize()
 	leftM, _, rightM, _ := pdf.GetMargins()
 	usable := pageW - leftM - rightM
-	colDesc := usable * 0.42
-	colQty := usable * 0.10
-	colRate := usable * 0.16
-	colTax := usable * 0.12
-	colTotal := usable - colDesc - colQty - colRate - colTax
+	rightX := leftM + usable*0.52
+	rightW := pageW - rightM - rightX
 
-	pdf.SetFillColor(243, 244, 246)
-	pdf.SetDrawColor(200, 200, 200)
-	pdf.SetFont("Arial", "B", fontSize-2)
-	pdf.SetTextColor(40, 40, 40)
-	pdf.CellFormat(colDesc, 8, "Description", "1", 0, "L", true, 0, "")
-	pdf.CellFormat(colQty, 8, "Qty", "1", 0, "R", true, 0, "")
-	pdf.CellFormat(colRate, 8, "Rate", "1", 0, "R", true, 0, "")
-	pdf.CellFormat(colTax, 8, "Tax%", "1", 0, "R", true, 0, "")
-	pdf.CellFormat(colTotal, 8, "Total", "1", 1, "R", true, 0, "")
+	docTitle := invoiceDocumentTitle(invoice.InvoiceType)
+	isTaxInvoice := docTitle == "TAX INVOICE"
 
-	pdf.SetFont("Arial", "", fontSize-2)
-	pdf.SetTextColor(50, 50, 50)
-	for _, item := range invoice.Items {
-		rowH := 7.0
-		pdf.CellFormat(colDesc, rowH, truncatePDF(item.Description, 42), "1", 0, "L", false, 0, "")
-		pdf.CellFormat(colQty, rowH, fmt.Sprintf("%.2f", item.Quantity), "1", 0, "R", false, 0, "")
-		pdf.CellFormat(colRate, rowH, fmt.Sprintf("%.2f", item.UnitPrice), "1", 0, "R", false, 0, "")
-		pdf.CellFormat(colTax, rowH, fmt.Sprintf("%.1f", item.TaxRate), "1", 0, "R", false, 0, "")
-		pdf.CellFormat(colTotal, rowH, fmt.Sprintf("%.2f", item.Total), "1", 1, "R", false, 0, "")
+	// Document head: document type + boxed ORIGINAL FOR RECIPIENT, logo right.
+	pdf.SetFont("Arial", "B", fontSize+1)
+	pdf.SetTextColor(20, 20, 20)
+	pdf.CellFormat(pdf.GetStringWidth(docTitle)+4, 7, docTitle, "", 0, "L", false, 0, "")
+	pdf.SetFont("Arial", "B", fontSize-3)
+	pdf.SetTextColor(90, 90, 90)
+	pdf.SetDrawColor(150, 150, 150)
+	pdf.SetLineWidth(0.3)
+	pdf.CellFormat(pdf.GetStringWidth(" ORIGINAL FOR RECIPIENT ")+2, 5.5, " ORIGINAL FOR RECIPIENT ", "1", 1, "L", false, 0, "")
+
+	if ps.PrintHeader && business != nil && business.LogoURL != "" {
+		if data, imgType := fetchThermalLogoBytes(business.LogoURL); len(data) > 0 {
+			name := "invoice-logo"
+			if info := pdf.RegisterImageOptionsReader(name, fpdf.ImageOptions{ImageType: imgType, ReadDpi: true}, bytes.NewReader(data)); info != nil {
+				imgW := 30.0
+				imgH := imgW
+				if info.Width() > 0 {
+					imgH = imgW * info.Height() / info.Width()
+				}
+				if imgH > 20 {
+					imgH = 20
+					imgW = imgH * info.Width() / info.Height()
+				}
+				pdf.ImageOptions(name, pageW-rightM-imgW, mmFromInches(ps.MarginTop), imgW, imgH, false, fpdf.ImageOptions{}, 0, "")
+			}
+		}
 	}
 	pdf.Ln(4)
 
-	pdf.SetFont("Arial", "", fontSize-1)
-	writeTotalRow(pdf, usable, "Sub Total", fmt.Sprintf("Rs. %.2f", invoice.SubTotal), false)
-	disc := invoice.DiscountTotal + invoice.InvoiceDiscount
-	if disc > 0 {
-		writeTotalRow(pdf, usable, "Discount", fmt.Sprintf("-Rs. %.2f", disc), false)
+	// Composition dealers must declare this prominently on a bill of supply.
+	if docTitle == "BILL OF SUPPLY" {
+		pdf.SetFont("Arial", "B", fontSize)
+		pdf.SetTextColor(20, 20, 20)
+		pdf.MultiCell(0, 6, compositionDeclaration, "", "C", false)
+		pdf.Ln(2)
 	}
-	if invoice.IsInterState {
-		writeTotalRow(pdf, usable, "IGST", fmt.Sprintf("Rs. %.2f", invoice.IGSTTotal), false)
-	} else {
-		writeTotalRow(pdf, usable, "CGST", fmt.Sprintf("Rs. %.2f", invoice.CGSTTotal), false)
-		writeTotalRow(pdf, usable, "SGST", fmt.Sprintf("Rs. %.2f", invoice.SGSTTotal), false)
-	}
-	for _, charge := range additionalChargeRows(invoice.AdditionalChargeItems, invoice.AdditionalCharges) {
-		writeTotalRow(pdf, usable, sanitizePDFText(charge.Label), fmt.Sprintf("Rs. %.2f", charge.Amount), false)
-	}
-	if invoice.RoundOff != 0 {
-		writeTotalRow(pdf, usable, "Round Off", fmt.Sprintf("Rs. %.2f", invoice.RoundOff), false)
-	}
-	pdf.SetFont("Arial", "B", fontSize)
-	writeTotalRow(pdf, usable, "Grand Total", fmt.Sprintf("Rs. %.2f", invoice.TotalAmount), true)
-	if label := formatPaymentSplitsLabel(invoice.PaymentSplits, invoice.PaymentMode); label != "" {
+
+	// Supplier (seller) block.
+	if business != nil && business.Name != "" {
+		pdf.SetFont("Arial", "B", fontSize+6)
+		pdf.SetTextColor(15, 15, 15)
+		pdf.MultiCell(0, 8, sanitizePDFText(business.Name), "", "L", false)
 		pdf.SetFont("Arial", "", fontSize-1)
-		writeTotalRow(pdf, usable, "Payment", sanitizePDFText(label), false)
+		pdf.SetTextColor(45, 45, 45)
+		var addrParts []string
+		if strings.TrimSpace(business.Address) != "" {
+			addrParts = append(addrParts, strings.TrimSpace(business.Address))
+		}
+		if loc := strings.Trim(strings.TrimSpace(fmt.Sprintf("%s, %s, %s", business.City, business.State, business.Pincode)), ", "); loc != "" {
+			addrParts = append(addrParts, loc)
+		}
+		if len(addrParts) > 0 {
+			pdf.MultiCell(0, 4.8, sanitizePDFText(strings.Join(addrParts, ", ")), "", "L", false)
+		}
+		var idLine []string
+		if business.GSTIN != "" {
+			idLine = append(idLine, "GSTIN: "+business.GSTIN)
+		}
+		if pan := sellerPAN(business); pan != "" {
+			idLine = append(idLine, "PAN Number: "+pan)
+		}
+		if len(idLine) > 0 {
+			pdf.MultiCell(0, 4.8, sanitizePDFText(strings.Join(idLine, "   ")), "", "L", false)
+		}
+		if business.Email != "" {
+			pdf.MultiCell(0, 4.8, "Email: "+sanitizePDFText(business.Email), "", "L", false)
+		}
+		if business.Phone != "" {
+			pdf.MultiCell(0, 4.8, "MOBILE : "+sanitizePDFText(business.Phone), "", "L", false)
+		}
 	}
-	if invoice.AmountPaid > 0 {
-		pdf.SetFont("Arial", "", fontSize-1)
-		writeTotalRow(pdf, usable, "Paid", fmt.Sprintf("Rs. %.2f", invoice.AmountPaid), false)
-		bal := invoice.TotalAmount - invoice.AmountPaid
-		if bal > 0 {
-			writeTotalRow(pdf, usable, "Balance", fmt.Sprintf("Rs. %.2f", bal), false)
+	pdf.Ln(3)
+
+	// Grey band with invoice number and date over a thick rule.
+	bandY := pdf.GetY()
+	pdf.SetDrawColor(26, 26, 26)
+	pdf.SetLineWidth(1.0)
+	pdf.Line(leftM, bandY, pageW-rightM, bandY)
+	pdf.SetXY(leftM, bandY+0.4)
+	pdf.SetFillColor(236, 236, 236)
+	pdf.SetFont("Arial", "B", fontSize-1)
+	pdf.SetTextColor(15, 15, 15)
+	pdf.CellFormat(usable*0.5, 8, "Invoice No.: "+sanitizePDFText(invoice.InvoiceNumber), "", 0, "L", true, 0, "")
+	pdf.CellFormat(usable*0.5, 8, "Invoice Date: "+invoice.Date.Format("02/01/2006"), "", 1, "R", true, 0, "")
+	pdf.Ln(5)
+
+	// BILL TO / SHIP TO columns.
+	colW := usable * 0.5
+	billY := pdf.GetY()
+	pdf.SetFont("Arial", "B", fontSize-1)
+	pdf.SetTextColor(30, 30, 30)
+	pdf.CellFormat(colW, 5, "BILL TO", "", 0, "L", false, 0, "")
+	pdf.CellFormat(0, 5, "SHIP TO", "", 1, "L", false, 0, "")
+	pdf.SetFont("Arial", "B", fontSize-1)
+	pdf.SetTextColor(40, 40, 40)
+	pdf.SetX(leftM)
+	pdf.MultiCell(colW, 5, sanitizePDFText(invoice.Party.Name), "", "L", false)
+	pdf.SetFont("Arial", "", fontSize-2)
+	pdf.SetTextColor(60, 60, 60)
+	if invoice.Party.Address != "" {
+		pdf.SetX(leftM)
+		pdf.MultiCell(colW, 4.5, sanitizePDFText(invoice.Party.Address), "", "L", false)
+	}
+	partyLoc := strings.Trim(strings.TrimSpace(fmt.Sprintf("%s, %s - %s", invoice.Party.City, invoice.Party.State, invoice.Party.Pincode)), ", -")
+	if partyLoc != "" {
+		pdf.SetX(leftM)
+		pdf.MultiCell(colW, 4.5, sanitizePDFText(partyLoc), "", "L", false)
+	}
+	if st := stateNameAndCode(invoice.Party.State, partyStateCode(invoice.Party)); st != "" {
+		pdf.SetX(leftM)
+		pdf.MultiCell(colW, 4.5, "State: "+sanitizePDFText(st), "", "L", false)
+	}
+	if invoice.Party.GSTIN != "" {
+		pdf.SetX(leftM)
+		pdf.MultiCell(colW, 4.5, "GSTIN/UIN: "+sanitizePDFText(invoice.Party.GSTIN), "", "L", false)
+	}
+	if pos := placeOfSupplyText(invoice); pos != "" {
+		pdf.Ln(1.5)
+		pdf.SetX(leftM)
+		pdf.MultiCell(colW, 4.5, "Place of Supply: "+sanitizePDFText(pos), "", "L", false)
+	}
+	billBottom := pdf.GetY()
+
+	shipContent := strings.TrimSpace(invoice.ShippingAddress)
+	shipIsAddress := shipContent != ""
+	if !shipIsAddress {
+		shipContent = invoice.Party.Name
+	}
+	pdf.SetXY(rightX, billY+5)
+	pdf.SetFont("Arial", "B", fontSize-1)
+	pdf.SetTextColor(40, 40, 40)
+	pdf.MultiCell(rightW, 5, sanitizePDFText(shipContent), "", "L", false)
+	if shipIsAddress && invoice.Party.Name != "" {
+		pdf.SetX(rightX)
+		pdf.SetFont("Arial", "", fontSize-2)
+		pdf.SetTextColor(60, 60, 60)
+		pdf.MultiCell(rightW, 4.5, sanitizePDFText(invoice.Party.Name), "", "L", false)
+	}
+	if pdf.GetY() > billBottom {
+		billBottom = pdf.GetY()
+	}
+	pdf.SetY(billBottom)
+	pdf.Ln(3)
+
+	// GST meta (tax invoices only): FY, reverse charge, original reference.
+	if isTaxInvoice {
+		pdf.SetFont("Arial", "", fontSize-3)
+		pdf.SetTextColor(60, 60, 60)
+		meta := financialYearLabel(invoice.Date)
+		reverseCharge := "No"
+		if invoice.ReverseCharge {
+			reverseCharge = "Yes"
+		}
+		meta += "   |   Reverse Charge: " + reverseCharge
+		if invoice.OriginalInvoiceNumber != "" {
+			meta += "   |   Original Inv: " + invoice.OriginalInvoiceNumber
+			if invoice.OriginalInvoiceDate != nil {
+				meta += " dated " + invoice.OriginalInvoiceDate.Format("02/01/2006")
+			}
+		}
+		pdf.CellFormat(0, 4.5, sanitizePDFText(meta), "", 1, "L", false, 0, "")
+		pdf.Ln(2)
+	}
+
+	// Items table — borderless with thick rules (myBillBook style).
+	type pdfCol struct {
+		label string
+		w     float64
+		align string
+	}
+	cols := custom.ItemColumns
+	hasGST := invoiceHasGST(invoice)
+	hasCess := invoiceHasCess(invoice)
+	colDefs := []pdfCol{{"ITEMS", -1, "L"}}
+	if cols.HSN && (hasGST || anyItemHasHSN(invoice.Items)) {
+		colDefs = append(colDefs, pdfCol{"HSN/SAC", usable * 0.085, "L"})
+	}
+	if cols.Qty {
+		colDefs = append(colDefs, pdfCol{"QTY.", usable * 0.075, "R"})
+	}
+	if cols.MRP || !hasGST {
+		colDefs = append(colDefs, pdfCol{"MRP", usable * 0.075, "R"})
+	}
+	if cols.Rate {
+		colDefs = append(colDefs, pdfCol{"RATE", usable * 0.08, "R"})
+	}
+	if hasGST {
+		if cols.Gross {
+			colDefs = append(colDefs, pdfCol{"GROSS", usable * 0.085, "R"})
+		}
+		if cols.Disc {
+			colDefs = append(colDefs, pdfCol{"DISC%", usable * 0.055, "R"})
+		}
+		if cols.Taxable {
+			colDefs = append(colDefs, pdfCol{"TAXABLE", usable * 0.09, "R"})
+		}
+		if cols.Tax {
+			colDefs = append(colDefs, pdfCol{"GST%", usable * 0.055, "R"})
+		}
+		if invoice.IsInterState {
+			colDefs = append(colDefs, pdfCol{"IGST", usable * 0.07, "R"})
+		} else {
+			colDefs = append(colDefs, pdfCol{"CGST", usable * 0.065, "R"}, pdfCol{"SGST", usable * 0.065, "R"})
+		}
+		if hasCess {
+			colDefs = append(colDefs, pdfCol{"CESS", usable * 0.06, "R"})
+		}
+	}
+	if cols.Amount {
+		colDefs = append(colDefs, pdfCol{"AMOUNT", usable * 0.095, "R"})
+	}
+	fixed := 0.0
+	for _, c := range colDefs {
+		if c.w > 0 {
+			fixed += c.w
+		}
+	}
+	colDefs[0].w = usable - fixed
+
+	cellSize := fontSize - 3
+	if cellSize < 6 {
+		cellSize = 6
+	}
+
+	// Header row: bold with thick top/bottom rules.
+	pdf.SetDrawColor(34, 34, 34)
+	pdf.SetLineWidth(0.55)
+	pdf.SetFont("Arial", "B", cellSize)
+	pdf.SetTextColor(30, 30, 30)
+	for i, c := range colDefs {
+		ln := 0
+		if i == len(colDefs)-1 {
+			ln = 1
+		}
+		pdf.CellFormat(c.w, 7, c.label, "TB", ln, c.align, false, 0, "")
+	}
+
+	// Body rows: thin grey bottom separators.
+	pdf.SetLineWidth(0.15)
+	pdf.SetDrawColor(225, 225, 225)
+	pdf.SetFont("Arial", "", cellSize)
+	pdf.SetTextColor(45, 45, 45)
+	rowH := 6.5
+	for _, item := range invoice.Items {
+		var values []string
+		descW := colDefs[0].w - 2
+		values = append(values, truncateToWidthPDF(pdf, item.Description, descW))
+		if cols.HSN && (hasGST || anyItemHasHSN(invoice.Items)) {
+			hsn := item.HSNCode
+			if hsn == "" {
+				hsn = item.SACCode
+			}
+			values = append(values, hsn)
+		}
+		if cols.Qty {
+			values = append(values, fmt.Sprintf("%s %s", formatINR(item.Quantity), item.Unit))
+		}
+		if cols.MRP || !hasGST {
+			mrp := "-"
+			if itemMRP(item) > 0 {
+				mrp = formatINR(itemMRP(item))
+			}
+			values = append(values, mrp)
+		}
+		if cols.Rate {
+			values = append(values, formatINR(item.UnitPrice))
+		}
+		if hasGST {
+			if cols.Gross {
+				values = append(values, formatINR(itemGrossAmount(item)))
+			}
+			if cols.Disc {
+				values = append(values, formatINR(item.Discount))
+			}
+			if cols.Taxable {
+				values = append(values, formatINR(itemTaxableValue(item)))
+			}
+			if cols.Tax {
+				values = append(values, formatINR(item.TaxRate))
+			}
+			if invoice.IsInterState {
+				values = append(values, formatINR(item.IGST))
+			} else {
+				values = append(values, formatINR(item.CGST), formatINR(item.SGST))
+			}
+			if hasCess {
+				values = append(values, formatINR(item.CessAmount))
+			}
+		}
+		if cols.Amount {
+			values = append(values, formatINR(item.Total))
+		}
+		for j, c := range colDefs {
+			ln := 0
+			if j == len(colDefs)-1 {
+				ln = 1
+			}
+			v := ""
+			if j < len(values) {
+				v = values[j]
+			}
+			pdf.CellFormat(c.w, rowH, sanitizePDFText(v), "B", ln, c.align, false, 0, "")
 		}
 	}
 
-	if invoice.Terms != "" {
-		pdf.Ln(6)
+	// SUBTOTAL row: thick rules, total qty + total amount.
+	pdf.SetDrawColor(34, 34, 34)
+	pdf.SetLineWidth(0.55)
+	pdf.SetFont("Arial", "B", cellSize+0.5)
+	pdf.SetTextColor(20, 20, 20)
+	for i, c := range colDefs {
+		ln := 0
+		if i == len(colDefs)-1 {
+			ln = 1
+		}
+		v := ""
+		switch c.label {
+		case "ITEMS":
+			v = "SUBTOTAL"
+		case "QTY.":
+			v = invoiceQtyTotal(invoice)
+		case "AMOUNT":
+			v = "Rs. " + formatINR(invoice.SubTotal)
+		}
+		pdf.CellFormat(c.w, 8, v, "TB", ln, c.align, false, 0, "")
+	}
+	pdf.SetLineWidth(0.2)
+	pdf.Ln(5)
+
+	bottomTop := pdf.GetY()
+
+	// Bottom left: bank details, payment QR, terms.
+	pdf.SetXY(leftM, bottomTop)
+	leftEnd := bottomTop
+	if invSettings.ShowBankDetails && custom.Miscellaneous.ShowBankDetails && business != nil &&
+		(business.BankName != "" || business.AccountNumber != "" || business.IFSCCode != "") {
 		pdf.SetFont("Arial", "B", fontSize-1)
-		pdf.CellFormat(0, 6, "Terms & Conditions", "", 1, "L", false, 0, "")
+		pdf.SetTextColor(30, 30, 30)
+		pdf.MultiCell(colW, 5, "BANK DETAILS", "", "L", false)
 		pdf.SetFont("Arial", "", fontSize-2)
+		pdf.SetTextColor(55, 55, 55)
+		kv := func(k, v string) {
+			if v == "" {
+				return
+			}
+			pdf.SetX(leftM)
+			pdf.CellFormat(30, 4.6, k+":", "", 0, "L", false, 0, "")
+			pdf.MultiCell(colW-30, 4.6, sanitizePDFText(v), "", "L", false)
+		}
+		kv("Name", business.Name)
+		kv("IFSC Code", business.IFSCCode)
+		kv("Account No", business.AccountNumber)
+		kv("Bank", business.BankName)
+		leftEnd = pdf.GetY()
+	}
+	if custom.Miscellaneous.ShowQRCode && business != nil && strings.TrimSpace(business.UPIID) != "" {
+		pdf.SetXY(leftM, leftEnd+3)
+		pdf.SetFont("Arial", "B", fontSize-1)
+		pdf.SetTextColor(30, 30, 30)
+		pdf.MultiCell(colW, 5, "PAYMENT QR CODE", "", "L", false)
+		pdf.SetX(leftM)
+		pdf.SetFont("Arial", "", fontSize-2)
+		pdf.SetTextColor(55, 55, 55)
+		pdf.MultiCell(colW, 4.6, "UPI ID: "+sanitizePDFText(business.UPIID), "", "L", false)
+		if png := upiQRPNG(business.UPIID, business.Name, invoice.TotalAmount); png != nil {
+			name := "upi-qr"
+			if pdf.RegisterImageOptionsReader(name, fpdf.ImageOptions{ImageType: "PNG", ReadDpi: true}, bytes.NewReader(png)) != nil {
+				qrSize := 26.0
+				pdf.ImageOptions(name, leftM, pdf.GetY()+1, qrSize, qrSize, false, fpdf.ImageOptions{}, 0, "")
+				pdf.SetY(pdf.GetY() + qrSize + 1)
+			}
+		}
+		leftEnd = pdf.GetY()
+	}
+	if invoice.Terms != "" && invSettings.ShowTerms && custom.InvoiceDetails.ShowTermsAndConditions {
+		pdf.SetXY(leftM, leftEnd+3)
+		pdf.SetFont("Arial", "B", fontSize-2)
+		pdf.SetTextColor(30, 30, 30)
+		pdf.MultiCell(colW, 4.6, "TERMS AND CONDITIONS", "", "L", false)
+		pdf.SetX(leftM)
+		pdf.SetFont("Arial", "", fontSize-3)
 		pdf.SetTextColor(80, 80, 80)
-		pdf.MultiCell(0, 5, sanitizePDFText(invoice.Terms), "", "L", false)
+		pdf.MultiCell(colW, 4.2, sanitizePDFText(invoice.Terms), "", "L", false)
+		leftEnd = pdf.GetY()
+	}
+	if label := formatPaymentSplitsLabel(invoice.PaymentSplits, invoice.PaymentMode); label != "" {
+		pdf.SetXY(leftM, leftEnd+2)
+		pdf.SetFont("Arial", "", fontSize-2)
+		pdf.SetTextColor(55, 55, 55)
+		pdf.MultiCell(colW, 4.6, "Payment: "+sanitizePDFText(label), "", "L", false)
+		leftEnd = pdf.GetY()
 	}
 
-	pdfDrawSignature(pdf, invoice.Signature)
+	// Bottom right: totals, amount in words, authorised signatory.
+	pdf.SetY(bottomTop)
+	pdf.SetFont("Arial", "", fontSize-1)
+	pdf.SetTextColor(50, 50, 50)
+	totRow := func(label string, value float64, bold bool) {
+		if bold {
+			pdf.SetFont("Arial", "B", fontSize-1)
+			pdf.SetTextColor(25, 25, 25)
+		} else {
+			pdf.SetFont("Arial", "", fontSize-1)
+			pdf.SetTextColor(50, 50, 50)
+		}
+		pdf.SetX(rightX)
+		pdf.CellFormat(rightW*0.55, 5.4, label, "", 0, "R", false, 0, "")
+		pdf.CellFormat(rightW*0.45, 5.4, "Rs. "+formatINR(value), "", 1, "R", false, 0, "")
+	}
+	if hasGST {
+		totRow("Total Taxable Value", invoiceTaxableTotal(invoice), false)
+		if invoice.IsInterState {
+			totRow("IGST", invoice.IGSTTotal, false)
+		} else {
+			totRow("CGST", invoice.CGSTTotal, false)
+			totRow("SGST", invoice.SGSTTotal, false)
+		}
+	}
+	if hasCess {
+		totRow("Cess", invoice.CessTotal, false)
+	}
+	if disc := invoice.DiscountTotal + invoice.InvoiceDiscount; disc > 0 {
+		totRow("Discount", -disc, false)
+	}
+	for _, charge := range additionalChargeRows(invoice.AdditionalChargeItems, invoice.AdditionalCharges) {
+		totRow(charge.Label, charge.Amount, false)
+	}
+	if invoice.RoundOff != 0 {
+		totRow("Round Off", invoice.RoundOff, false)
+	}
+	totRow("Total Amount", invoice.TotalAmount, true)
+	if custom.InvoiceDetails.ShowReceivedAmount && invoice.AmountPaid > 0 {
+		totRow("Received Amount", invoice.AmountPaid, false)
+	}
+	if custom.InvoiceDetails.ShowBalanceDue {
+		totRow("Balance", invoice.TotalAmount-invoice.AmountPaid, false)
+	}
+	if custom.InvoiceDetails.ShowAmountInWords {
+		pdf.Ln(2)
+		pdf.SetFont("Arial", "B", fontSize-2)
+		pdf.SetTextColor(40, 40, 40)
+		pdf.SetX(rightX)
+		pdf.MultiCell(rightW, 4.8, "Total Amount (in words)", "", "R", false)
+		pdf.SetX(rightX)
+		pdf.SetFont("Arial", "", fontSize-2)
+		pdf.SetTextColor(50, 50, 50)
+		pdf.MultiCell(rightW, 4.8, sanitizePDFText(amountWordsRupees(invoice.TotalAmount)), "", "R", false)
+	}
+	rightEnd := pdf.GetY()
+
+	endY := leftEnd
+	if rightEnd > endY {
+		endY = rightEnd
+	}
+	pdf.SetY(endY)
+
+	// Authorised signatory: invoice signature image, else business signature.
+	sigType, sigData, sigOK := decodeSignatureImage(invoice.Signature)
+	bizName := ""
+	if business != nil {
+		bizName = business.Name
+		if !sigOK && custom.Miscellaneous.ShowSignature && business.SignatureURL != "" {
+			if data, typ := fetchThermalLogoBytes(business.SignatureURL); len(data) > 0 {
+				sigType, sigData, sigOK = typ, data, true
+			}
+		}
+	}
+	if sigOK {
+		name := fmt.Sprintf("invoice-sig-%d", time.Now().UnixNano())
+		if pdf.RegisterImageOptionsReader(name, fpdf.ImageOptions{ImageType: sigType, ReadDpi: true}, bytes.NewReader(sigData)) != nil {
+			pdf.Ln(6)
+			imgW := 45.0
+			imgH := 15.0
+			pdf.ImageOptions(name, pageW-rightM-imgW, pdf.GetY(), imgW, imgH, false, fpdf.ImageOptions{}, 0, "")
+			pdf.SetY(pdf.GetY() + imgH + 1)
+		}
+	}
+	pdf.Ln(2)
+	pdf.SetFont("Arial", "B", fontSize-2)
+	pdf.SetTextColor(40, 40, 40)
+	pdf.CellFormat(0, 5, sanitizePDFText("AUTHORISED SIGNATORY FOR "+strings.ToUpper(bizName)), "", 1, "R", false, 0, "")
 
 	if ps.PrintFooter {
 		pdf.Ln(8)
 		pdf.SetFont("Arial", "I", 8)
 		pdf.SetTextColor(140, 140, 140)
-		footer := "Generated by TruERP"
-		if business != nil && business.Name != "" {
-			footer = sanitizePDFText(business.Name) + " · " + footer
-		}
-		pdf.CellFormat(0, 6, footer, "", 1, "C", false, 0, "")
+		pdf.CellFormat(0, 6, "Invoice created using TruERP", "", 1, "C", false, 0, "")
 	}
 
 	var buf bytes.Buffer
@@ -204,6 +542,19 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// truncateToWidthPDF shortens text so it fits inside w millimetres at the
+// current font, appending "..." when truncated.
+func truncateToWidthPDF(pdf *fpdf.Fpdf, s string, w float64) string {
+	s = sanitizePDFText(s)
+	if pdf.GetStringWidth(s) <= w {
+		return s
+	}
+	for len(s) > 0 && pdf.GetStringWidth(s+"...") > w {
+		s = s[:len(s)-1]
+	}
+	return s + "..."
 }
 
 func parseThermalLineMarkers(line string) (center, bold bool, text string) {

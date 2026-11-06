@@ -178,7 +178,8 @@ func GetDiscountTransactions(c *gin.Context) {
 		var payments []models.Payment
 		query := utils.DB.Preload("Party").Preload("Invoice").Model(&models.Payment{}).
 			Where("user_id = ?", userID).
-			Where("payment_in_discount > 0")
+			Where("payment_in_discount > 0").
+			Where("COALESCE(status, '') != ?", "cancelled")
 		if from != "" {
 			query = query.Where(utils.SQLDateGTE("date"), from)
 		}
@@ -213,7 +214,8 @@ func GetDiscountTransactions(c *gin.Context) {
 		var paymentOuts []models.PaymentOut
 		query := utils.DB.Preload("Party").Preload("PurchaseBill").Model(&models.PaymentOut{}).
 			Where("user_id = ?", userID).
-			Where("payment_out_discount > 0")
+			Where("payment_out_discount > 0").
+			Where("COALESCE(status, '') != ?", "cancelled")
 		if from != "" {
 			query = query.Where(utils.SQLDateGTE("date"), from)
 		}

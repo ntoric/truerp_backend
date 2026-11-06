@@ -17,17 +17,24 @@ import (
 )
 
 type storeInput struct {
-	Name        string `json:"name"`
-	Code        string `json:"code"`
-	Description string `json:"description"`
-	Address     string `json:"address"`
-	City        string `json:"city"`
-	State       string `json:"state"`
-	Pincode     string `json:"pincode"`
-	Phone       string `json:"phone"`
-	Email       string `json:"email"`
-	IsActive    *bool  `json:"is_active"`
-	ForceUpdate *bool  `json:"force_update"`
+	Name          string `json:"name"`
+	Code          string `json:"code"`
+	Description   string `json:"description"`
+	Address       string `json:"address"`
+	City          string `json:"city"`
+	State         string `json:"state"`
+	Pincode       string `json:"pincode"`
+	Phone         string `json:"phone"`
+	Email         string `json:"email"`
+	GSTIN         string `json:"gstin"`
+	PAN           string `json:"pan"`
+	StateCode     string `json:"state_code"`
+	BankName      string `json:"bank_name"`
+	AccountNumber string `json:"account_number"`
+	IFSCCode      string `json:"ifsc_code"`
+	UPIID         string `json:"upi_id"`
+	IsActive      *bool  `json:"is_active"`
+	ForceUpdate   *bool  `json:"force_update"`
 }
 
 type storeUserInput struct {
@@ -391,14 +398,21 @@ func UpdateStore(c *gin.Context) {
 	}
 
 	updates := map[string]interface{}{
-		"name":        form.Name,
-		"description": form.Description,
-		"address":     form.Address,
-		"city":        form.City,
-		"state":       form.State,
-		"pincode":     form.Pincode,
-		"phone":       form.Phone,
-		"email":       form.Email,
+		"name":           form.Name,
+		"description":    form.Description,
+		"address":        form.Address,
+		"city":           form.City,
+		"state":          form.State,
+		"pincode":        form.Pincode,
+		"phone":          form.Phone,
+		"email":          form.Email,
+		"gstin":          input.GSTIN,
+		"pan":            input.PAN,
+		"state_code":     input.StateCode,
+		"bank_name":      input.BankName,
+		"account_number": input.AccountNumber,
+		"ifsc_code":      input.IFSCCode,
+		"upi_id":         input.UPIID,
 	}
 	if form.Code != "" {
 		updates["code"] = form.Code

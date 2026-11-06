@@ -127,6 +127,7 @@ func loadDailyProfitAggregates(db *gorm.DB, userID uuid.UUID, start, end string)
 			COALESCE(SUM(amount_paid - payment_out_discount), 0) AS value
 		 FROM payment_outs
 		 WHERE user_id = ? AND invoice_id IS NOT NULL AND deleted_at IS NULL
+		 AND COALESCE(status, '') != 'cancelled'
 		 AND `+dayRange("date")+`
 		 GROUP BY `+utils.SQLDateExpr("date"), userID, start, end))
 	for day, v := range salesReturn {
@@ -191,6 +192,7 @@ func loadDailyProfitAggregates(db *gorm.DB, userID uuid.UUID, start, end string)
 		`SELECT `+utils.SQLDateExpr("date")+` AS day, COALESCE(SUM(amount), 0) AS value
 		 FROM expenses
 		 WHERE user_id = ? AND deleted_at IS NULL
+		 AND COALESCE(status, '') != 'cancelled'
 		 AND `+dayRange("date")+`
 		 GROUP BY `+utils.SQLDateExpr("date"), userID, start, end) {
 		at(day).Expenses = v

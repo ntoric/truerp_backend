@@ -32,6 +32,9 @@ func GetPaymentOuts(c *gin.Context) {
 	if mode := c.Query("mode"); mode != "" {
 		query = query.Where("mode = ?", mode)
 	}
+	if status := c.Query("status"); status != "" {
+		query = query.Where("status = ?", status)
+	}
 	// Day-inclusive range: payment_outs.date is a timestamp.
 	if from := c.Query("from"); from != "" {
 		query = query.Where(utils.SQLDateGTE("payment_outs.date"), from)
@@ -330,6 +333,76 @@ func CreatePaymentOut(c *gin.Context) {
 	c.JSON(http.StatusCreated, paymentOut)
 }
 
+// reversePaymentOutEffects undoes every side effect a payment-out created:
+// the GL journal, the cash/bank ledger row, the linked bill's paid amount,
+// and the party balance. Shared by delete and cancel — the caller decides
+// whether the row is then removed or kept as cancelled.
+func reversePaymentOutEffects(tx *gorm.DB, userID uuid.UUID, paymentOut *models.PaymentOut) error {
+	// Calculate net amount (amount paid minus discount)
+	netAmount := paymentOut.AmountPaid - paymentOut.PaymentOutDiscount
+
+	// Reverse the standalone journal and the linked cash/bank ledger row.
+	if err := reverseAccountingByRef(tx, userID, "payment_out_record", paymentOut.ID); err != nil {
+		return err
+	}
+	txns, err := findPaymentCashTransactions(tx, userID, "out", paymentOutCashRef(paymentOut))
+	if err != nil {
+		return err
+	}
+	for _, txn := range txns {
+		if err := reverseCashReduceTransaction(tx, userID, txn); err != nil {
+			return err
+		}
+	}
+
+	// Reverse purchase bill payment
+	if paymentOut.PurchaseBillID != nil {
+		var bill models.PurchaseBill
+		if err := tx.Where("user_id = ? AND id = ?", userID, *paymentOut.PurchaseBillID).First(&bill).Error; err == nil {
+			newPaid := bill.PaidAmount - netAmount
+			if newPaid < 0 {
+				newPaid = 0
+			}
+			status := "unpaid"
+			if bill.TotalAmount > 0 && newPaid+0.01 >= bill.TotalAmount {
+				status = "paid"
+			} else if newPaid > 0 {
+				status = "partial"
+			}
+			if err := tx.Model(&bill).Updates(map[string]interface{}{
+				"paid_amount": newPaid,
+				"balance_due": bill.TotalAmount - newPaid,
+				"status":      status,
+			}).Error; err != nil {
+				return err
+			}
+		}
+	}
+
+	// Reverse party balance (decrease since we're reversing the payment).
+	// Payments that settled a refund in money — a money-mode sales return
+	// refund or a refund tagged to a sales invoice — never moved the
+	// party balance, so there is nothing to reverse. All other payments
+	// (including ones linked to a credit-settled return or a credit
+	// note) did.
+	skipBalanceReversal := paymentOut.InvoiceID != nil
+	if paymentOut.SalesReturnID != nil {
+		var salesReturn models.SalesReturn
+		if err := tx.Where("user_id = ? AND id = ?", userID, *paymentOut.SalesReturnID).First(&salesReturn).Error; err == nil {
+			skipBalanceReversal = skipBalanceReversal || refundSettlesInMoney(salesReturn.RefundMode)
+		}
+	}
+	if !skipBalanceReversal {
+		var party models.Party
+		if err := tx.Where("user_id = ? AND id = ?", userID, paymentOut.PartyID).First(&party).Error; err == nil {
+			if err := tx.Model(&party).Update("balance", party.Balance-netAmount).Error; err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func DeletePaymentOut(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 	id := c.Param("id")
@@ -339,71 +412,15 @@ func DeletePaymentOut(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Payment out not found"})
 		return
 	}
-
-	// Calculate net amount (amount paid minus discount)
-	netAmount := paymentOut.AmountPaid - paymentOut.PaymentOutDiscount
+	if paymentOut.Status == "cancelled" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Payment out is already cancelled"})
+		return
+	}
 
 	if err := utils.DB.Transaction(func(tx *gorm.DB) error {
-		// Reverse the standalone journal and the linked cash/bank ledger row.
-		if err := reverseAccountingByRef(tx, userID, "payment_out_record", paymentOut.ID); err != nil {
+		if err := reversePaymentOutEffects(tx, userID, &paymentOut); err != nil {
 			return err
 		}
-		txns, err := findPaymentCashTransactions(tx, userID, "out", paymentOutCashRef(&paymentOut))
-		if err != nil {
-			return err
-		}
-		for _, txn := range txns {
-			if err := reverseCashReduceTransaction(tx, userID, txn); err != nil {
-				return err
-			}
-		}
-
-		// Reverse purchase bill payment
-		if paymentOut.PurchaseBillID != nil {
-			var bill models.PurchaseBill
-			if err := tx.Where("user_id = ? AND id = ?", userID, *paymentOut.PurchaseBillID).First(&bill).Error; err == nil {
-				newPaid := bill.PaidAmount - netAmount
-				if newPaid < 0 {
-					newPaid = 0
-				}
-				status := "unpaid"
-				if bill.TotalAmount > 0 && newPaid+0.01 >= bill.TotalAmount {
-					status = "paid"
-				} else if newPaid > 0 {
-					status = "partial"
-				}
-				if err := tx.Model(&bill).Updates(map[string]interface{}{
-					"paid_amount": newPaid,
-					"balance_due": bill.TotalAmount - newPaid,
-					"status":      status,
-				}).Error; err != nil {
-					return err
-				}
-			}
-		}
-
-		// Reverse party balance (decrease since we're reversing the payment).
-		// Payments that settled a refund in money — a money-mode sales return
-		// refund or a refund tagged to a sales invoice — never moved the
-		// party balance, so there is nothing to reverse. All other payments
-		// (including ones linked to a credit-settled return or a credit
-		// note) did.
-		skipBalanceReversal := paymentOut.InvoiceID != nil
-		if paymentOut.SalesReturnID != nil {
-			var salesReturn models.SalesReturn
-			if err := tx.Where("user_id = ? AND id = ?", userID, *paymentOut.SalesReturnID).First(&salesReturn).Error; err == nil {
-				skipBalanceReversal = skipBalanceReversal || refundSettlesInMoney(salesReturn.RefundMode)
-			}
-		}
-		if !skipBalanceReversal {
-			var party models.Party
-			if err := tx.Where("user_id = ? AND id = ?", userID, paymentOut.PartyID).First(&party).Error; err == nil {
-				if err := tx.Model(&party).Update("balance", party.Balance-netAmount).Error; err != nil {
-					return err
-				}
-			}
-		}
-
 		return tx.Delete(&paymentOut).Error
 	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete payment out"})
@@ -411,4 +428,64 @@ func DeletePaymentOut(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Payment out deleted successfully"})
+}
+
+// CancelPaymentOut reverses a payment-out like a delete but keeps the row
+// with a mandatory cancellation reason, so the document stays on file
+// without counting in balances or reports.
+func CancelPaymentOut(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	userName := actorName(c)
+	id := c.Param("id")
+
+	reason, ok := paymentCancellationRequested(c)
+	if !ok {
+		return
+	}
+
+	var paymentOut models.PaymentOut
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).First(&paymentOut).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Payment out not found"})
+		return
+	}
+	if paymentOut.Status == "cancelled" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Payment out is already cancelled"})
+		return
+	}
+
+	now := time.Now()
+	if err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		if err := reversePaymentOutEffects(tx, userID, &paymentOut); err != nil {
+			return err
+		}
+		return tx.Model(&paymentOut).Updates(map[string]interface{}{
+			"status":        "cancelled",
+			"cancel_reason": reason,
+			"cancelled_at":  now,
+			"cancelled_by":  userName,
+		}).Error
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to cancel payment out"})
+		return
+	}
+
+	CreateAuditLog(
+		userID,
+		userName,
+		"cancel",
+		"payment_out",
+		&paymentOut.ID,
+		paymentOut.PaymentOutNumber,
+		fmt.Sprintf("Cancelled payment out: %.2f - %s", paymentOut.AmountPaid-paymentOut.PaymentOutDiscount, reason),
+		c.ClientIP(),
+		c.GetHeader("User-Agent"),
+		map[string]interface{}{
+			"amount":        paymentOut.AmountPaid - paymentOut.PaymentOutDiscount,
+			"cancel_reason": reason,
+		},
+		"success",
+		"",
+	)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Payment out cancelled successfully"})
 }

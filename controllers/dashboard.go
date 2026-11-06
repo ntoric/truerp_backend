@@ -123,7 +123,7 @@ func GetRecentPayments(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var payments []models.Payment
-	if err := utils.DB.Where("user_id = ?", userID).Order("created_at DESC").Limit(5).Find(&payments).Error; err != nil {
+	if err := utils.DB.Where("user_id = ? AND COALESCE(status, '') != ?", userID, "cancelled").Order("created_at DESC").Limit(5).Find(&payments).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch recent payments"})
 		return
 	}

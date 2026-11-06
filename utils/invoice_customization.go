@@ -39,13 +39,14 @@ func DefaultInvoiceTemplateCustomization() models.InvoiceTemplateCustomization {
 			ShowShippingAddress: false,
 		},
 		ItemColumns: models.ItemTableColumnVisibility{
-			Items: true, HSN: true, Qty: true, Rate: true, Disc: true, Tax: true, Amount: true,
+			Items: true, HSN: true, Qty: true, Rate: true, Disc: true,
+			Gross: true, Taxable: true, Tax: true, Amount: true,
 			Batch: false, MRP: false,
 		},
 		Miscellaneous: models.InvoiceMiscVisibility{
 			ShowBankDetails: true,
 			ShowSignature:   false,
-			ShowQRCode:      false,
+			ShowQRCode:      true,
 			ShowEwayBill:    false,
 		},
 	}

@@ -504,7 +504,7 @@ func PortalInvoicePDF(c *gin.Context) {
 
 	var invoice models.Invoice
 	if err := utils.DB.Where("user_id = ? AND party_id = ? AND id = ?", userID, partyID, id).
-		Preload("Party").Preload("Items").
+		Preload("Party").Preload("Items").Preload("Items.Product").
 		First(&invoice).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Invoice not found"})
 		return
@@ -518,7 +518,7 @@ func PortalListPayments(c *gin.Context) {
 	partyID := c.MustGet("party_id").(uuid.UUID)
 
 	var payments []models.Payment
-	if err := utils.DB.Where("user_id = ? AND party_id = ?", userID, partyID).
+	if err := utils.DB.Where("user_id = ? AND party_id = ? AND COALESCE(status, '') != ?", userID, partyID, "cancelled").
 		Order("date DESC").
 		Find(&payments).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load payments"})

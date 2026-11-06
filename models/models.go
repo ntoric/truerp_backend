@@ -141,18 +141,25 @@ type User struct {
 
 // Store is a multi-tenant business unit. Operational data is scoped to OwnerUserID.
 type Store struct {
-	ID          uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	Name        string    `json:"name" gorm:"not null"`
-	Code        string    `json:"code" gorm:"uniqueIndex;not null"`
-	Description string    `json:"description"`
-	Address     string    `json:"address"`
-	City        string    `json:"city"`
-	State       string    `json:"state"`
-	Pincode     string    `json:"pincode"`
-	Phone       string    `json:"phone"`
-	Email       string    `json:"email"`
-	OwnerUserID uuid.UUID `json:"owner_user_id" gorm:"type:uuid;not null;uniqueIndex"`
-	IsActive    bool      `json:"is_active" gorm:"default:true"`
+	ID            uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	Name          string    `json:"name" gorm:"not null"`
+	Code          string    `json:"code" gorm:"uniqueIndex;not null"`
+	Description   string    `json:"description"`
+	Address       string    `json:"address"`
+	City          string    `json:"city"`
+	State         string    `json:"state"`
+	Pincode       string    `json:"pincode"`
+	Phone         string    `json:"phone"`
+	Email         string    `json:"email"`
+	GSTIN         string    `json:"gstin"`
+	PAN           string    `json:"pan"`
+	StateCode     string    `json:"state_code"`
+	BankName      string    `json:"bank_name"`
+	AccountNumber string    `json:"account_number"`
+	IFSCCode      string    `json:"ifsc_code"`
+	UPIID         string    `json:"upi_id"`
+	OwnerUserID   uuid.UUID `json:"owner_user_id" gorm:"type:uuid;not null;uniqueIndex"`
+	IsActive      bool      `json:"is_active" gorm:"default:true"`
 	// When set by a super admin, desktop clients for this store automatically
 	// download and install available app updates without prompting.
 	ForceUpdate bool `json:"force_update" gorm:"default:false"`
@@ -180,6 +187,7 @@ type Business struct {
 	UserID          uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
 	Name            string    `json:"name" gorm:"not null"`
 	GSTIN           string    `json:"gstin"`
+	PAN             string    `json:"pan"`
 	Address         string    `json:"address"`
 	City            string    `json:"city"`
 	State           string    `json:"state"`
@@ -265,29 +273,36 @@ type Invoice struct {
 	// https://mybillbook.in/csi/<id>). Populated during migration import so
 	// the source document can be re-opened later. Kept out of Notes so it is
 	// rendered as a link instead of note text.
-	SourceURL           string         `json:"source_url" gorm:"type:text"`
-	Terms               string         `json:"terms"`
-	IsInterState        bool           `json:"is_inter_state" gorm:"default:false"`
-	EWayBillRequired    bool           `json:"eway_bill_required" gorm:"default:false"`
-	EWayBillNumber      string         `json:"eway_bill_number"`
-	EWayBillStatus      string         `json:"eway_bill_status" gorm:"default:'pending'"` // pending, generated, cancelled
-	EWayBillValidUntil  *time.Time     `json:"eway_bill_valid_until,omitempty"`
-	Signature           string         `json:"signature"`                                 // Base64 encoded signature
-	CustomFields        string         `json:"custom_fields" gorm:"type:text"`            // JSON map of custom field key -> value
-	PDFTemplate         string         `json:"pdf_template"`                              // optional per-invoice layout: classic, modern, minimal
-	PlaceOfSupply       string         `json:"place_of_supply"`                           // State code for GST compliance
-	ReverseCharge       bool           `json:"reverse_charge" gorm:"default:false"`       // Reverse charge mechanism
-	IRN                 string         `json:"irn"`                                       // Invoice Reference Number for e-invoicing
-	EInvoiceStatus      string         `json:"e_invoice_status" gorm:"default:'pending'"` // pending, generated, cancelled
-	EInvoiceGeneratedAt *time.Time     `json:"e_invoice_generated_at,omitempty"`
-	IsPOS               bool           `json:"is_pos" gorm:"default:false"`
-	ClientSaleID        *uuid.UUID     `json:"client_sale_id,omitempty" gorm:"type:uuid;index;uniqueIndex:idx_invoice_user_client_sale"`
-	PosSessionID        *uuid.UUID     `json:"pos_session_id,omitempty" gorm:"type:uuid;index"`
-	Party               Party          `json:"party,omitempty" gorm:"foreignKey:PartyID"`
-	Items               []InvoiceItem  `json:"items" gorm:"foreignKey:InvoiceID;constraint:OnDelete:CASCADE;"`
-	CreatedAt           time.Time      `json:"created_at"`
-	UpdatedAt           time.Time      `json:"updated_at"`
-	DeletedAt           gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+	SourceURL             string         `json:"source_url" gorm:"type:text"`
+	Terms                 string         `json:"terms"`
+	IsInterState          bool           `json:"is_inter_state" gorm:"default:false"`
+	EWayBillRequired      bool           `json:"eway_bill_required" gorm:"default:false"`
+	EWayBillNumber        string         `json:"eway_bill_number"`
+	EWayBillStatus        string         `json:"eway_bill_status" gorm:"default:'pending'"` // pending, generated, cancelled
+	EWayBillValidUntil    *time.Time     `json:"eway_bill_valid_until,omitempty"`
+	Signature             string         `json:"signature"`                                 // Base64 encoded signature
+	CustomFields          string         `json:"custom_fields" gorm:"type:text"`            // JSON map of custom field key -> value
+	PDFTemplate           string         `json:"pdf_template"`                              // optional per-invoice layout: classic, modern, minimal
+	PlaceOfSupply         string         `json:"place_of_supply"`                           // State code for GST compliance
+	ReverseCharge         bool           `json:"reverse_charge" gorm:"default:false"`       // Reverse charge mechanism
+	ShippingAddress       string         `json:"shipping_address" gorm:"type:text"`         // Ship-to address when different from billing
+	OriginalInvoiceNumber string         `json:"original_invoice_number"`                   // Reference to original invoice for debit/credit notes or revised documents
+	OriginalInvoiceDate   *time.Time     `json:"original_invoice_date,omitempty"`           // Date of the original invoice referenced
+	CessTotal             float64        `json:"cess_total" gorm:"default:0"`               // Total GST cess across line items
+	IRN                   string         `json:"irn"`                                       // Invoice Reference Number for e-invoicing
+	EInvoiceStatus        string         `json:"e_invoice_status" gorm:"default:'pending'"` // pending, generated, cancelled
+	EInvoiceGeneratedAt   *time.Time     `json:"e_invoice_generated_at,omitempty"`
+	IsPOS                 bool           `json:"is_pos" gorm:"default:false"`
+	CancelReason          string         `json:"cancel_reason"`
+	CancelledAt           *time.Time     `json:"cancelled_at,omitempty"`
+	CancelledBy           string         `json:"cancelled_by"`
+	ClientSaleID          *uuid.UUID     `json:"client_sale_id,omitempty" gorm:"type:uuid;index;uniqueIndex:idx_invoice_user_client_sale"`
+	PosSessionID          *uuid.UUID     `json:"pos_session_id,omitempty" gorm:"type:uuid;index"`
+	Party                 Party          `json:"party,omitempty" gorm:"foreignKey:PartyID"`
+	Items                 []InvoiceItem  `json:"items" gorm:"foreignKey:InvoiceID;constraint:OnDelete:CASCADE;"`
+	CreatedAt             time.Time      `json:"created_at"`
+	UpdatedAt             time.Time      `json:"updated_at"`
+	DeletedAt             gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type InvoiceItem struct {
@@ -304,6 +319,8 @@ type InvoiceItem struct {
 	CGST        float64    `json:"cgst" gorm:"default:0"`
 	SGST        float64    `json:"sgst" gorm:"default:0"`
 	IGST        float64    `json:"igst" gorm:"default:0"`
+	CessRate    float64    `json:"cess_rate" gorm:"default:0"`
+	CessAmount  float64    `json:"cess_amount" gorm:"default:0"`
 	Total       float64    `json:"total" gorm:"default:0"`
 	HSNCode     string     `json:"hsn_code"`
 	SACCode     string     `json:"sac_code"`
@@ -331,6 +348,10 @@ type Payment struct {
 	Date              time.Time      `json:"date" gorm:"index:idx_payments_user_date,priority:2"`
 	Reference         string         `json:"reference"`
 	Notes             string         `json:"notes"`
+	Status            string         `json:"status" gorm:"default:'active';index"` // active, cancelled
+	CancelReason      string         `json:"cancel_reason"`
+	CancelledAt       *time.Time     `json:"cancelled_at,omitempty"`
+	CancelledBy       string         `json:"cancelled_by"`
 	CreatedAt         time.Time      `json:"created_at"`
 	UpdatedAt         time.Time      `json:"updated_at"`
 	DeletedAt         gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
@@ -367,6 +388,10 @@ type PaymentOut struct {
 	Date               time.Time      `json:"date" gorm:"index:idx_payment_outs_user_date,priority:2"`
 	Reference          string         `json:"reference"`
 	Notes              string         `json:"notes"`
+	Status             string         `json:"status" gorm:"default:'active';index"` // active, cancelled
+	CancelReason       string         `json:"cancel_reason"`
+	CancelledAt        *time.Time     `json:"cancelled_at,omitempty"`
+	CancelledBy        string         `json:"cancelled_by"`
 	CreatedAt          time.Time      `json:"created_at"`
 	UpdatedAt          time.Time      `json:"updated_at"`
 	DeletedAt          gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
@@ -391,6 +416,10 @@ type Expense struct {
 	BankAccount        *BankAccount   `json:"bank_account,omitempty" gorm:"foreignKey:BankAccountID"`
 	Notes              string         `json:"notes"`
 	ReceiptURL         string         `json:"receipt_url"`
+	Status             string         `json:"status" gorm:"default:'active';index"` // active, cancelled
+	CancelReason       string         `json:"cancel_reason"`
+	CancelledAt        *time.Time     `json:"cancelled_at,omitempty"`
+	CancelledBy        string         `json:"cancelled_by"`
 	Items              []ExpenseItem  `json:"items" gorm:"foreignKey:ExpenseID;constraint:OnDelete:CASCADE;"`
 	CreatedAt          time.Time      `json:"created_at"`
 	UpdatedAt          time.Time      `json:"updated_at"`
@@ -1198,7 +1227,10 @@ type CreditNote struct {
 	Reason           string           `json:"reason"`
 	TotalAmount      float64          `json:"total_amount" gorm:"default:0"`
 	RefundMode       string           `json:"refund_mode"`                   // cash, original_payment, credit_note
-	Status           string           `json:"status" gorm:"default:'draft'"` // draft, issued
+	Status           string           `json:"status" gorm:"default:'draft'"` // draft, issued, cancelled
+	CancelReason     string           `json:"cancel_reason"`
+	CancelledAt      *time.Time       `json:"cancelled_at,omitempty"`
+	CancelledBy      string           `json:"cancelled_by"`
 	Date             time.Time        `json:"date" gorm:"not null"`
 	Items            []CreditNoteItem `json:"items" gorm:"foreignKey:CreditNoteID;constraint:OnDelete:CASCADE;"`
 	CreatedAt        time.Time        `json:"created_at"`
@@ -1234,7 +1266,10 @@ type DebitNote struct {
 	Reason           string          `json:"reason"`
 	TotalAmount      float64         `json:"total_amount" gorm:"default:0"`
 	RefundMode       string          `json:"refund_mode"`                   // cash, original_payment, debit_note
-	Status           string          `json:"status" gorm:"default:'draft'"` // draft, issued
+	Status           string          `json:"status" gorm:"default:'draft'"` // draft, issued, cancelled
+	CancelReason     string          `json:"cancel_reason"`
+	CancelledAt      *time.Time      `json:"cancelled_at,omitempty"`
+	CancelledBy      string          `json:"cancelled_by"`
 	Date             time.Time       `json:"date" gorm:"not null"`
 	Items            []DebitNoteItem `json:"items" gorm:"foreignKey:DebitNoteID;constraint:OnDelete:CASCADE;"`
 	CreatedAt        time.Time       `json:"created_at"`
@@ -2983,8 +3018,8 @@ type PageFeatureSettings struct {
 // global fallback (the pre-store-scoping singleton) used when the active
 // store has no row of its own.
 type SaleDiscountSettings struct {
-	ID            uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	StoreID       *uuid.UUID     `json:"store_id,omitempty" gorm:"type:uuid;uniqueIndex:idx_sale_discount_store"`
+	ID      uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	StoreID *uuid.UUID `json:"store_id,omitempty" gorm:"type:uuid;uniqueIndex:idx_sale_discount_store"`
 	// IsEnabled is the master switch for discounting across the whole app.
 	// When false, every discount input (line discounts, invoice-level
 	// discounts, payment in/out discounts, product default discounts) is

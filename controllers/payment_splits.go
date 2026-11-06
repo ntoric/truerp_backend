@@ -259,7 +259,7 @@ func attachInvoicePaymentSplits(db *gorm.DB, invoice *models.Invoice) {
 		return
 	}
 	var payments []models.Payment
-	db.Where("invoice_id = ?", invoice.ID).Order("created_at ASC").Find(&payments)
+	db.Where("invoice_id = ? AND COALESCE(status, '') != ?", invoice.ID, "cancelled").Order("created_at ASC").Find(&payments)
 	splits := paymentSplitsFromRecords(payments)
 	if len(splits) == 0 && invoice.AmountPaid > 0.009 {
 		splits = []models.PaymentSplit{{
@@ -279,7 +279,7 @@ func attachInvoicePaymentSplitsList(db *gorm.DB, invoices []models.Invoice) {
 		ids = append(ids, invoices[i].ID)
 	}
 	var payments []models.Payment
-	db.Where("invoice_id IN ?", ids).Order("created_at ASC").Find(&payments)
+	db.Where("invoice_id IN ? AND COALESCE(status, '') != ?", ids, "cancelled").Order("created_at ASC").Find(&payments)
 	byInvoice := make(map[uuid.UUID][]models.PaymentSplit, len(invoices))
 	for _, payment := range payments {
 		if payment.InvoiceID == nil {
@@ -454,7 +454,7 @@ func attachPurchaseBillPaymentSplits(db *gorm.DB, bill *models.PurchaseBill) {
 		return
 	}
 	var paymentOuts []models.PaymentOut
-	db.Where("user_id = ? AND purchase_bill_id = ?", bill.UserID, bill.ID).
+	db.Where("user_id = ? AND purchase_bill_id = ? AND COALESCE(status, '') != ?", bill.UserID, bill.ID, "cancelled").
 		Order("created_at ASC").Find(&paymentOuts)
 	splits := paymentSplitsFromOutRecords(db, bill.UserID, paymentOuts)
 	if len(splits) == 0 {
@@ -480,7 +480,7 @@ func ledgerSplitsForInvoice(tx *gorm.DB, userID uuid.UUID, previous, current *mo
 	}
 
 	var payments []models.Payment
-	if err := tx.Where("user_id = ? AND invoice_id = ?", userID, current.ID).Order("created_at ASC").Find(&payments).Error; err != nil {
+	if err := tx.Where("user_id = ? AND invoice_id = ? AND COALESCE(status, '') != ?", userID, current.ID, "cancelled").Order("created_at ASC").Find(&payments).Error; err != nil {
 		return nil, err
 	}
 	existing := paymentSplitsFromRecords(payments)

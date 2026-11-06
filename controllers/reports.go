@@ -91,9 +91,9 @@ func GetReportWidgets(c *gin.Context) {
 	utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status IN ('paid', 'sent') AND date >= ?", userID, periodStart).
 		Select("COALESCE(SUM(cgst_total + sgst_total + igst_total), 0)").Scan(&w.MonthTax)
 
-	utils.DB.Model(&models.Payment{}).Where("user_id = ? AND date >= ?", userID, periodStart).
+	utils.DB.Model(&models.Payment{}).Where("user_id = ? AND date >= ? AND COALESCE(status, '') != ?", userID, periodStart, "cancelled").
 		Select("COALESCE(SUM(amount_received), 0)").Scan(&w.PaymentsInMonth)
-	utils.DB.Model(&models.PaymentOut{}).Where("user_id = ? AND date >= ?", userID, periodStart).
+	utils.DB.Model(&models.PaymentOut{}).Where("user_id = ? AND date >= ? AND COALESCE(status, '') != ?", userID, periodStart, "cancelled").
 		Select("COALESCE(SUM(amount_paid), 0)").Scan(&w.PaymentsOutMonth)
 
 	// Purchase expense = full bill totals in period; AP = unpaid balances (all-time).

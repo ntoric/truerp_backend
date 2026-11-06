@@ -42,6 +42,91 @@ func ensureBusinessForUser(userID uuid.UUID) (models.Business, error) {
 	return business, nil
 }
 
+// overlayStoreSellerDetails copies the store-level seller identity fields
+// (name, address, contact, GSTIN, PAN, state code) onto a business profile so
+// documents and settings rendered for a store show that store's details.
+// Empty store fields leave the business-level value intact.
+func overlayStoreSellerDetails(business *models.Business, store models.Store) {
+	if store.Name != "" {
+		business.Name = store.Name
+	}
+	if store.Address != "" {
+		business.Address = store.Address
+	}
+	if store.City != "" {
+		business.City = store.City
+	}
+	if store.State != "" {
+		business.State = store.State
+	}
+	if store.Pincode != "" {
+		business.Pincode = store.Pincode
+	}
+	if store.Phone != "" {
+		business.Phone = store.Phone
+	}
+	if store.Email != "" {
+		business.Email = store.Email
+	}
+	if store.GSTIN != "" {
+		business.GSTIN = store.GSTIN
+	}
+	if store.PAN != "" {
+		business.PAN = store.PAN
+	}
+	if store.StateCode != "" {
+		business.StateCode = store.StateCode
+	}
+	if store.BankName != "" {
+		business.BankName = store.BankName
+	}
+	if store.AccountNumber != "" {
+		business.AccountNumber = store.AccountNumber
+	}
+	if store.IFSCCode != "" {
+		business.IFSCCode = store.IFSCCode
+	}
+	if store.UPIID != "" {
+		business.UPIID = store.UPIID
+	}
+}
+
+// resolveSellerBusiness builds the effective seller profile for invoice
+// documents: the owner's business profile overlaid with the active store's
+// details (the store wins where configured). storeID nil/unknown falls back
+// to the owner's primary store, then to the plain business profile.
+func resolveSellerBusiness(userID uuid.UUID, storeID *uuid.UUID) models.Business {
+	var business models.Business
+	_ = utils.DB.Where("user_id = ?", userID).First(&business)
+
+	var store models.Store
+	found := false
+	if storeID != nil && *storeID != uuid.Nil {
+		if s, err := utils.FindStoreByID(utils.DB, *storeID); err == nil {
+			store, found = s, true
+		}
+	}
+	if !found {
+		if s, err := utils.FindStoreByOwnerUserID(utils.DB, userID); err == nil {
+			store, found = s, true
+		}
+	}
+	if found {
+		overlayStoreSellerDetails(&business, store)
+	}
+	return business
+}
+
+// requestStore resolves the active store from the request context.
+func requestStore(c *gin.Context) (models.Store, bool) {
+	if id, ok := currentStoreID(c); ok {
+		if s, err := utils.FindStoreByID(utils.DB, id); err == nil {
+			return s, true
+		}
+	}
+	return models.Store{}, false
+}
+
 func GetBusiness(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
@@ -49,6 +134,12 @@ func GetBusiness(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load business"})
 		return
+	}
+
+	// Overlay the active store's seller details so business settings are
+	// configured per store.
+	if store, ok := requestStore(c); ok {
+		overlayStoreSellerDetails(&business, store)
 	}
 
 	// Don't send the actual API key to the frontend for security
@@ -83,25 +174,53 @@ func UpdateBusiness(c *gin.Context) {
 	fmt.Println("DEBUG: Business found:", business.ID)
 
 	updates := map[string]interface{}{
-		"name":                   input.Name,
-		"gstin":                  input.GSTIN,
-		"address":                input.Address,
-		"city":                   input.City,
-		"state":                  input.State,
-		"pincode":                input.Pincode,
-		"phone":                  input.Phone,
-		"email":                  input.Email,
 		"logo_url":               input.LogoURL,
 		"logo_aspect_ratio":      normalizeLogoAspectRatio(input.LogoAspectRatio),
 		"signature_url":          input.SignatureURL,
-		"state_code":             input.StateCode,
-		"bank_name":              input.BankName,
-		"account_number":         input.AccountNumber,
-		"ifsc_code":              input.IFSCCode,
-		"upi_id":                 input.UPIID,
 		"enable_aihsn_search":    input.EnableAIHSNSearch,
 		"enable_ai_bill_parsing": input.EnableAIBillParsing,
 		"allow_negative_stock":   input.AllowNegativeStock,
+	}
+
+	// Seller identity fields are store-scoped: when a store is active they are
+	// written to the store so each store keeps its own address/GSTIN/PAN/
+	// contact; otherwise they update the business profile.
+	if store, ok := requestStore(c); ok {
+		storeUpdates := map[string]interface{}{
+			"name":           input.Name,
+			"address":        input.Address,
+			"city":           input.City,
+			"state":          input.State,
+			"pincode":        input.Pincode,
+			"phone":          input.Phone,
+			"email":          input.Email,
+			"gstin":          input.GSTIN,
+			"pan":            input.PAN,
+			"state_code":     input.StateCode,
+			"bank_name":      input.BankName,
+			"account_number": input.AccountNumber,
+			"ifsc_code":      input.IFSCCode,
+			"upi_id":         input.UPIID,
+		}
+		if err := utils.DB.Model(&store).Updates(storeUpdates).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update store details"})
+			return
+		}
+	} else {
+		updates["name"] = input.Name
+		updates["address"] = input.Address
+		updates["city"] = input.City
+		updates["state"] = input.State
+		updates["pincode"] = input.Pincode
+		updates["phone"] = input.Phone
+		updates["email"] = input.Email
+		updates["gstin"] = input.GSTIN
+		updates["pan"] = input.PAN
+		updates["state_code"] = input.StateCode
+		updates["bank_name"] = input.BankName
+		updates["account_number"] = input.AccountNumber
+		updates["ifsc_code"] = input.IFSCCode
+		updates["upi_id"] = input.UPIID
 	}
 	fmt.Println("DEBUG: Updates map created")
 

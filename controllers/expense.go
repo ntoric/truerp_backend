@@ -21,6 +21,9 @@ func GetExpenses(c *gin.Context) {
 	if category := c.Query("category"); category != "" {
 		query = query.Where("category = ?", category)
 	}
+	if status := c.Query("status"); status != "" {
+		query = query.Where("status = ?", status)
+	}
 	if from := c.Query("from"); from != "" {
 		query = query.Where("date >= ?", from)
 	}
@@ -237,6 +240,10 @@ func UpdateExpense(c *gin.Context) {
 	var expense models.Expense
 	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).First(&expense).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Expense not found"})
+		return
+	}
+	if expense.Status == "cancelled" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "A cancelled expense cannot be edited"})
 		return
 	}
 
@@ -462,6 +469,79 @@ func DeleteExpense(c *gin.Context) {
 	)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Expense deleted successfully"})
+}
+
+// CancelExpense reverses an expense like a delete (cash/bank + GL) but keeps
+// the row with a mandatory cancellation reason, so it stays on file without
+// counting in balances or reports.
+func CancelExpense(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	userName := actorName(c)
+	id := c.Param("id")
+
+	reason, ok := paymentCancellationRequested(c)
+	if !ok {
+		return
+	}
+
+	var expense models.Expense
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).First(&expense).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Expense not found"})
+		return
+	}
+	if expense.Status == "cancelled" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Expense is already cancelled"})
+		return
+	}
+
+	now := time.Now()
+	tx := utils.DB.Begin()
+	if err := reverseExpenseCashOut(tx, userID, expense.ExpenseNumber); err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse account deduction"})
+		return
+	}
+	if err := reverseAccountingByRef(tx, userID, "expense", expense.ID); err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse expense accounting"})
+		return
+	}
+	if err := tx.Model(&expense).Updates(map[string]interface{}{
+		"status":        "cancelled",
+		"cancel_reason": reason,
+		"cancelled_at":  now,
+		"cancelled_by":  userName,
+	}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to cancel expense"})
+		return
+	}
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to cancel expense"})
+		return
+	}
+
+	CreateAuditLog(
+		userID,
+		userName,
+		"cancel",
+		"expense",
+		&expense.ID,
+		expense.ExpenseNumber,
+		fmt.Sprintf("Cancelled expense: %s - %s", expense.ExpenseNumber, reason),
+		c.ClientIP(),
+		c.GetHeader("User-Agent"),
+		map[string]interface{}{
+			"category":      expense.Category,
+			"amount":        expense.Amount,
+			"vendor":        expense.Vendor,
+			"cancel_reason": reason,
+		},
+		"success",
+		"",
+	)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Expense cancelled successfully"})
 }
 
 func GetNextExpenseNumber(c *gin.Context) {

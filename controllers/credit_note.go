@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 func GetCreditNotes(c *gin.Context) {
@@ -214,6 +215,94 @@ func DeleteCreditNote(c *gin.Context) {
 
 	utils.DB.Delete(&creditNote)
 	c.JSON(http.StatusOK, gin.H{"message": "Credit note deleted"})
+}
+
+// CancelCreditNote marks a credit note cancelled with a mandatory reason.
+// A standalone issued note had reduced the linked invoice's paid amount —
+// cancelling restores it. Notes issued by a processed sales return carry no
+// direct effects of their own (the return owns them), so they are only
+// flagged. The note is kept on file but no longer counts in reports.
+func CancelCreditNote(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	userName := actorName(c)
+	id := c.Param("id")
+
+	reason, ok := paymentCancellationRequested(c)
+	if !ok {
+		return
+	}
+
+	var creditNote models.CreditNote
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).First(&creditNote).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Credit note not found"})
+		return
+	}
+	if creditNote.Status == "cancelled" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Credit note is already cancelled"})
+		return
+	}
+
+	// A live refund payment-out recorded against this note must be
+	// cancelled first — otherwise the note would disappear from reports
+	// while its refund still stands.
+	var activeRefunds int64
+	utils.DB.Model(&models.PaymentOut{}).
+		Where("user_id = ? AND credit_note_id = ? AND COALESCE(status, '') != ?", userID, creditNote.ID, "cancelled").
+		Count(&activeRefunds)
+	if activeRefunds > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cancel the payment out linked to this credit note first"})
+		return
+	}
+
+	now := time.Now()
+	if err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		if creditNote.Status == "issued" && creditNote.SalesReturnID == nil {
+			// Standalone issued notes reduced the invoice's paid amount on
+			// issue — put it back and recompute the invoice status.
+			var invoice models.Invoice
+			if err := tx.Where("user_id = ? AND id = ?", userID, creditNote.InvoiceID).First(&invoice).Error; err == nil {
+				newPaid := invoice.AmountPaid + creditNote.TotalAmount
+				if newPaid > invoice.TotalAmount {
+					newPaid = invoice.TotalAmount
+				}
+				if err := tx.Model(&invoice).Updates(map[string]interface{}{
+					"amount_paid": newPaid,
+					"status":      invoiceStatusForPaidAmount(invoice, newPaid),
+				}).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return tx.Model(&creditNote).Updates(map[string]interface{}{
+			"status":        "cancelled",
+			"cancel_reason": reason,
+			"cancelled_at":  now,
+			"cancelled_by":  userName,
+		}).Error
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to cancel credit note"})
+		return
+	}
+
+	CreateAuditLog(
+		userID,
+		userName,
+		"cancel",
+		"credit_note",
+		&creditNote.ID,
+		creditNote.CreditNoteNumber,
+		fmt.Sprintf("Cancelled credit note: %s - %s", creditNote.CreditNoteNumber, reason),
+		c.ClientIP(),
+		c.GetHeader("User-Agent"),
+		map[string]interface{}{
+			"total_amount":  creditNote.TotalAmount,
+			"cancel_reason": reason,
+		},
+		"success",
+		"",
+	)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Credit note cancelled"})
 }
 
 func GetNextCreditNoteNumber(c *gin.Context) {

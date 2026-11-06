@@ -190,7 +190,8 @@ func GenerateThermalPrint(c *gin.Context) {
 
 	switch req.DocumentType {
 	case "invoice":
-		content, width, logoURL = generateInvoiceThermal(userID, req.DocumentID, req.PrintSize)
+		storeID, _ := currentStoreID(c)
+		content, width, logoURL = generateInvoiceThermal(userID, req.DocumentID, req.PrintSize, &storeID)
 	case "expense":
 		content, width, logoURL = generateExpenseThermal(userID, req.DocumentID, req.PrintSize)
 	default:
@@ -236,17 +237,18 @@ func GenerateDocumentPrint(c *gin.Context) {
 		if err := utils.DB.Where("user_id = ? AND id = ?", userID, req.DocumentID).
 			Preload("Party").
 			Preload("Items").
+			Preload("Items.Product").
 			First(&invoice).Error; err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Invoice not found"})
 			return
 		}
 		attachInvoicePaymentSplits(utils.DB, &invoice)
 		title := "Invoice " + invoice.InvoiceNumber
-		var business models.Business
-		_ = utils.DB.Where("user_id = ?", userID).First(&business)
+		storeID, _ := currentStoreID(c)
+		business := resolveSellerBusiness(userID, &storeID)
 
 		if mode == "thermal" {
-			content, width, logoURL := generateInvoiceThermal(userID, req.DocumentID, printSize)
+			content, width, logoURL := generateInvoiceThermal(userID, req.DocumentID, printSize, &storeID)
 			if content == "" {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate thermal print"})
 				return
@@ -484,7 +486,7 @@ body { display: flex; align-items: center; justify-content: center; min-height: 
 	return bodyDoc
 }
 
-func generateInvoiceThermal(userID uuid.UUID, invoiceID uuid.UUID, printSize string) (string, int, string) {
+func generateInvoiceThermal(userID uuid.UUID, invoiceID uuid.UUID, printSize string, storeID *uuid.UUID) (string, int, string) {
 	var invoice models.Invoice
 	if err := utils.DB.Where("user_id = ? AND id = ?", userID, invoiceID).
 		Preload("Party").
@@ -493,8 +495,7 @@ func generateInvoiceThermal(userID uuid.UUID, invoiceID uuid.UUID, printSize str
 		return "", 0, ""
 	}
 
-	var business models.Business
-	utils.DB.Where("user_id = ?", userID).First(&business)
+	business := resolveSellerBusiness(userID, storeID)
 
 	printSize = normalizeThermalPrintSize(printSize)
 	width := thermalWidthMM(printSize)

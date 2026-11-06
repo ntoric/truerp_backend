@@ -143,7 +143,7 @@ func loadPartyLedgerRows(userID, partyID uuid.UUID, asOf time.Time) []partyLedge
 	}
 
 	var payments []models.Payment
-	utils.DB.Where("user_id = ? AND party_id = ?", userID, partyID).Find(&payments)
+	utils.DB.Where("user_id = ? AND party_id = ? AND COALESCE(status, '') != ?", userID, partyID, "cancelled").Find(&payments)
 	for _, p := range payments {
 		rows = append(rows, partyLedgerRow{
 			Type: "payment_in", RefID: p.ID, RefNumber: p.PaymentInNumber,
@@ -157,7 +157,7 @@ func loadPartyLedgerRows(userID, partyID uuid.UUID, asOf time.Time) []partyLedge
 	// (including it as a debit would wrongly show the customer as owing the
 	// refunded sum back).
 	var paymentOuts []models.PaymentOut
-	utils.DB.Where("user_id = ? AND party_id = ? AND invoice_id IS NULL", userID, partyID).Find(&paymentOuts)
+	utils.DB.Where("user_id = ? AND party_id = ? AND invoice_id IS NULL AND COALESCE(status, '') != ?", userID, partyID, "cancelled").Find(&paymentOuts)
 	for _, p := range paymentOuts {
 		rows = append(rows, partyLedgerRow{
 			Type: "payment_out", RefID: p.ID, RefNumber: p.PaymentOutNumber,

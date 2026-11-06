@@ -72,7 +72,7 @@ func computeProductProfitForRange(userID uuid.UUID, startDate, endDate string) f
 	// matching how the daily profit report treats the same rows.
 	var invoiceRefunds float64
 	utils.DB.Model(&models.PaymentOut{}).
-		Where("user_id = ? AND DATE(date) >= ? AND DATE(date) <= ? AND invoice_id IS NOT NULL", userID, startDate, endDate).
+		Where("user_id = ? AND DATE(date) >= ? AND DATE(date) <= ? AND invoice_id IS NOT NULL AND COALESCE(status, '') != 'cancelled'", userID, startDate, endDate).
 		Select("COALESCE(SUM(amount_paid - payment_out_discount), 0)").Scan(&invoiceRefunds)
 
 	return salesProfit - returnsProfit - creditNoteProfit - invoiceRefunds
@@ -191,11 +191,11 @@ func loadReportForRange(userID uuid.UUID, startDate, endDate string) (models.Dai
 	aggregate(&models.PurchaseBill{}, "bill_date", "total_amount", "", &report.Purchases)
 	aggregate(&models.CreditNote{}, "date", "total_amount", "status != 'cancelled'", &report.CreditNotes)
 	aggregate(&models.DebitNote{}, "date", "total_amount", "status != 'cancelled'", &report.DebitNotes)
-	aggregate(&models.Expense{}, "date", "amount", "", &report.Expenses)
+	aggregate(&models.Expense{}, "date", "amount", "COALESCE(status, '') != 'cancelled'", &report.Expenses)
 	// credit_note payments settle invoices with return credit — no money
 	// was received, so they stay out of Payments Received / net cash flow.
-	aggregate(&models.Payment{}, "date", "amount_received", "COALESCE(LOWER(TRIM(mode)), '') != 'credit_note'", &report.PaymentsIn)
-	aggregate(&models.PaymentOut{}, "date", "amount_paid", "", &report.PaymentsOut)
+	aggregate(&models.Payment{}, "date", "amount_received", "COALESCE(LOWER(TRIM(mode)), '') != 'credit_note' AND COALESCE(status, '') != 'cancelled'", &report.PaymentsIn)
+	aggregate(&models.PaymentOut{}, "date", "amount_paid", "COALESCE(status, '') != 'cancelled'", &report.PaymentsOut)
 	aggregate(&models.SalesReturn{}, "date", "amount", "status != 'cancelled'", &report.SalesReturns)
 	aggregate(&models.PurchaseReturn{}, "date", "amount", "status != 'cancelled'", &report.PurchaseReturns)
 	aggregate(&models.ProfitDistribution{}, "date", "amount", "", &report.ProfitDistributions)
@@ -242,7 +242,7 @@ func loadReportForRange(userID uuid.UUID, startDate, endDate string) (models.Dai
 	// documents; bill-linked and standalone payments are not revenue events.
 	var invoiceRefunds float64
 	utils.DB.Model(&models.PaymentOut{}).
-		Where("user_id = ? AND DATE(date) >= ? AND DATE(date) <= ? AND invoice_id IS NOT NULL", userID, startDate, endDate).
+		Where("user_id = ? AND DATE(date) >= ? AND DATE(date) <= ? AND invoice_id IS NOT NULL AND COALESCE(status, '') != 'cancelled'", userID, startDate, endDate).
 		Select("COALESCE(SUM(amount_paid - payment_out_discount), 0)").Scan(&invoiceRefunds)
 
 	report.DailyProfit = report.Sales.TotalAmount -
@@ -361,6 +361,7 @@ func loadPaymentsByMethod(userID uuid.UUID, startDate, endDate string) []models.
 		FROM payments
 		WHERE user_id = ? AND `+dateWhere+` AND deleted_at IS NULL
 			AND COALESCE(LOWER(TRIM(mode)), '') != 'credit_note'
+			AND COALESCE(status, '') != 'cancelled'
 		GROUP BY `+methodExpr, userID, startDate, endDate).Scan(&inRows)
 	utils.DB.Raw(`
 		SELECT `+methodExpr+` AS method,
@@ -368,6 +369,7 @@ func loadPaymentsByMethod(userID uuid.UUID, startDate, endDate string) []models.
 			COUNT(*) AS count
 		FROM payment_outs
 		WHERE user_id = ? AND `+dateWhere+` AND deleted_at IS NULL
+			AND COALESCE(status, '') != 'cancelled'
 		GROUP BY `+methodExpr, userID, startDate, endDate).Scan(&outRows)
 
 	byMethod := make(map[string]*models.PaymentMethodTotal)
@@ -437,7 +439,7 @@ func loadDailyReport(userID uuid.UUID, date string) (models.DailyReport, error) 
 func loadExpenseLines(userID uuid.UUID, startDate, endDate string) []models.ExpenseLine {
 	var expenses []models.Expense
 	if err := utils.DB.
-		Where("user_id = ? AND DATE(date) >= ? AND DATE(date) <= ?", userID, startDate, endDate).
+		Where("user_id = ? AND DATE(date) >= ? AND DATE(date) <= ? AND COALESCE(status, '') != 'cancelled'", userID, startDate, endDate).
 		Preload("Items").
 		Order("date DESC, created_at DESC").
 		Find(&expenses).Error; err != nil {

@@ -99,8 +99,8 @@ func GenerateCustomerStatement(c *gin.Context) {
 
 	// Get payments
 	var payments []models.Payment
-	utils.DB.Where("user_id = ? AND party_id = ? AND date >= ? AND date <= ?",
-		userID, input.PartyID, input.FromDate, input.ToDate).
+	utils.DB.Where("user_id = ? AND party_id = ? AND date >= ? AND date <= ? AND COALESCE(status, '') != ?",
+		userID, input.PartyID, input.FromDate, input.ToDate, "cancelled").
 		Order("date ASC, payment_in_number ASC").
 		Find(&payments)
 

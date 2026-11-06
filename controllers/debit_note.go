@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 func GetDebitNotes(c *gin.Context) {
@@ -215,6 +216,84 @@ func DeleteDebitNote(c *gin.Context) {
 
 	utils.DB.Delete(&debitNote)
 	c.JSON(http.StatusOK, gin.H{"message": "Debit note deleted"})
+}
+
+// CancelDebitNote marks a debit note cancelled with a mandatory reason. A
+// standalone issued note had reduced the linked purchase bill's paid amount
+// — cancelling restores it. Notes issued by a processed purchase return
+// carry no direct effects of their own, so they are only flagged. The note
+// is kept on file but no longer counts in reports.
+func CancelDebitNote(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	userName := actorName(c)
+	id := c.Param("id")
+
+	reason, ok := paymentCancellationRequested(c)
+	if !ok {
+		return
+	}
+
+	var debitNote models.DebitNote
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).First(&debitNote).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Debit note not found"})
+		return
+	}
+	if debitNote.Status == "cancelled" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Debit note is already cancelled"})
+		return
+	}
+
+	now := time.Now()
+	if err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		if debitNote.Status == "issued" && debitNote.PurchaseReturnID == nil {
+			var bill models.PurchaseBill
+			if err := tx.Where("user_id = ? AND id = ?", userID, debitNote.PurchaseBillID).First(&bill).Error; err == nil {
+				newPaid := bill.PaidAmount + debitNote.TotalAmount
+				status := "unpaid"
+				if bill.TotalAmount > 0 && newPaid+0.01 >= bill.TotalAmount {
+					status = "paid"
+				} else if newPaid > 0 {
+					status = "partial"
+				}
+				if err := tx.Model(&bill).Updates(map[string]interface{}{
+					"paid_amount": newPaid,
+					"balance_due": bill.TotalAmount - newPaid,
+					"status":      status,
+				}).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return tx.Model(&debitNote).Updates(map[string]interface{}{
+			"status":        "cancelled",
+			"cancel_reason": reason,
+			"cancelled_at":  now,
+			"cancelled_by":  userName,
+		}).Error
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to cancel debit note"})
+		return
+	}
+
+	CreateAuditLog(
+		userID,
+		userName,
+		"cancel",
+		"debit_note",
+		&debitNote.ID,
+		debitNote.DebitNoteNumber,
+		fmt.Sprintf("Cancelled debit note: %s - %s", debitNote.DebitNoteNumber, reason),
+		c.ClientIP(),
+		c.GetHeader("User-Agent"),
+		map[string]interface{}{
+			"total_amount":  debitNote.TotalAmount,
+			"cancel_reason": reason,
+		},
+		"success",
+		"",
+	)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Debit note cancelled"})
 }
 
 func GetNextDebitNoteNumber(c *gin.Context) {

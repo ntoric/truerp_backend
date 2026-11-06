@@ -44,15 +44,17 @@ type PartyDetailVisibility struct {
 }
 
 type ItemTableColumnVisibility struct {
-	Items  bool `json:"items"`
-	HSN    bool `json:"hsn"`
-	Qty    bool `json:"qty"`
-	Rate   bool `json:"rate"`
-	Disc   bool `json:"disc"`
-	Tax    bool `json:"tax"`
-	Amount bool `json:"amount"`
-	Batch  bool `json:"batch"`
-	MRP    bool `json:"mrp"`
+	Items   bool `json:"items"`
+	HSN     bool `json:"hsn"`
+	Qty     bool `json:"qty"`
+	Rate    bool `json:"rate"`
+	Disc    bool `json:"disc"`
+	Gross   bool `json:"gross"`   // gross amount (qty x rate before discount)
+	Taxable bool `json:"taxable"` // taxable value (after discount, before tax)
+	Tax     bool `json:"tax"`
+	Amount  bool `json:"amount"`
+	Batch   bool `json:"batch"`
+	MRP     bool `json:"mrp"`
 }
 
 type InvoiceMiscVisibility struct {

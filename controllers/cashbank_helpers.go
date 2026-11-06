@@ -346,7 +346,7 @@ func sumInitialInvestmentCapital(db *gorm.DB, userID uuid.UUID, startDate, endDa
 	var total float64
 	// Opening stock and other purchases settled as owner's capital.
 	q := db.Model(&models.PaymentOut{}).
-		Where("user_id = ? AND LOWER(TRIM(COALESCE(mode, ''))) = ?", userID, paymentMethodInitialInvestment)
+		Where("user_id = ? AND LOWER(TRIM(COALESCE(mode, ''))) = ? AND COALESCE(status, '') != 'cancelled'", userID, paymentMethodInitialInvestment)
 	if startDate != "" {
 		q = q.Where(utils.SQLDateGTE("date"), startDate)
 	}
@@ -601,8 +601,10 @@ func reverseLinkedInvoicePayments(tx *gorm.DB, userID uuid.UUID, invoice *models
 		return nil
 	}
 
+	// Cancelled payments were already reversed when cancelled — leave them
+	// on file and out of the reversal set.
 	var payments []models.Payment
-	if err := tx.Where("user_id = ? AND invoice_id = ?", userID, invoice.ID).Find(&payments).Error; err != nil {
+	if err := tx.Where("user_id = ? AND invoice_id = ? AND COALESCE(status, '') != ?", userID, invoice.ID, "cancelled").Find(&payments).Error; err != nil {
 		return err
 	}
 	totalPaid := invoicePaymentsTotal(payments)
@@ -864,7 +866,7 @@ func reverseLinkedPurchasePaymentOuts(tx *gorm.DB, userID uuid.UUID, bill *model
 	}
 
 	var paymentOuts []models.PaymentOut
-	if err := tx.Where("user_id = ? AND purchase_bill_id = ?", userID, bill.ID).Find(&paymentOuts).Error; err != nil {
+	if err := tx.Where("user_id = ? AND purchase_bill_id = ? AND COALESCE(status, '') != ?", userID, bill.ID, "cancelled").Find(&paymentOuts).Error; err != nil {
 		return err
 	}
 	totalPaid := 0.0

@@ -14,6 +14,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/nlpodyssey/cybertron v0.2.1
 	github.com/pquerna/otp v1.5.0
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/t3rm1n4l/go-mega v0.0.0-20260717075258-c6acd6a5bd04
 	github.com/tealeg/xlsx/v3 v3.3.13
 	golang.org/x/crypto v0.52.0

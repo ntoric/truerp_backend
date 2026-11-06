@@ -162,6 +162,11 @@ func CreateInvoice(c *gin.Context) {
 		Notes                 string                    `json:"notes"`
 		Terms                 string                    `json:"terms"`
 		IsInterState          bool                      `json:"is_inter_state"`
+		PlaceOfSupply         string                    `json:"place_of_supply"`
+		ReverseCharge         bool                      `json:"reverse_charge"`
+		ShippingAddress       string                    `json:"shipping_address"`
+		OriginalInvoiceNumber string                    `json:"original_invoice_number"`
+		OriginalInvoiceDate   *models.FlexibleTime      `json:"original_invoice_date"`
 		EWayBillRequired      bool                      `json:"eway_bill_required"`
 		InvoiceDiscount       float64                   `json:"invoice_discount"`
 		AdditionalCharges     float64                   `json:"additional_charges"`
@@ -182,6 +187,7 @@ func CreateInvoice(c *gin.Context) {
 			UnitPrice   models.FlexibleFloat `json:"unit_price"`
 			Discount    models.FlexibleFloat `json:"discount"`
 			TaxRate     models.FlexibleFloat `json:"tax_rate"`
+			CessRate    models.FlexibleFloat `json:"cess_rate"`
 			Unit        string               `json:"unit"`
 			HSNCode     string               `json:"hsn_code"`
 			BatchNo     string               `json:"batch_no"`
@@ -254,6 +260,18 @@ func CreateInvoice(c *gin.Context) {
 
 	resolvedSessionID := resolvePOSSessionID(userID, input.PosSessionID, input.SessionOpeningCash)
 
+	// Place of supply defaults to the buyer's state code (or the seller's when
+	// the buyer has none) so GST documents carry it even when not submitted.
+	placeOfSupply := strings.TrimSpace(input.PlaceOfSupply)
+	if placeOfSupply == "" {
+		var business models.Business
+		sellerState := ""
+		if err := utils.DB.Select("state_code").Where("user_id = ?", userID).First(&business).Error; err == nil {
+			sellerState = business.StateCode
+		}
+		placeOfSupply = utils.DeterminePlaceOfSupply(partyStateCode(party), sellerState)
+	}
+
 	invoice := models.Invoice{
 		ID:                    uuid.New(),
 		UserID:                userID,
@@ -270,6 +288,11 @@ func CreateInvoice(c *gin.Context) {
 		Notes:                 input.Notes,
 		Terms:                 input.Terms,
 		IsInterState:          input.IsInterState,
+		PlaceOfSupply:         placeOfSupply,
+		ReverseCharge:         input.ReverseCharge,
+		ShippingAddress:       input.ShippingAddress,
+		OriginalInvoiceNumber: input.OriginalInvoiceNumber,
+		OriginalInvoiceDate:   input.OriginalInvoiceDate.Ptr(),
 		EWayBillRequired:      input.EWayBillRequired,
 		InvoiceDiscount:       input.InvoiceDiscount,
 		AdditionalCharges:     input.AdditionalCharges,
@@ -287,18 +310,20 @@ func CreateInvoice(c *gin.Context) {
 	}
 
 	// Calculate totals
-	var subTotal, discountTotal, taxTotal, cgstTotal, sgstTotal, igstTotal float64
+	var subTotal, discountTotal, taxTotal, cgstTotal, sgstTotal, igstTotal, cessTotal float64
 	for _, item := range input.Items {
 		qty := item.Quantity.Float64()
 		unitPrice := item.UnitPrice.Float64()
 		discount := item.Discount.Float64()
 		// Billing is tax-free: the item tax rate is ignored.
 		taxRate := 0.0
+		cessRate := item.CessRate.Float64()
 
 		itemTotal := qty * unitPrice
 		itemDiscount := itemTotal * (discount / 100)
 		taxableAmount := itemTotal - itemDiscount
 		itemTax := taxableAmount * (taxRate / 100)
+		cessAmount := taxableAmount * (cessRate / 100)
 
 		var cgst, sgst, igst float64
 		if input.IsInterState {
@@ -320,7 +345,9 @@ func CreateInvoice(c *gin.Context) {
 			CGST:        cgst,
 			SGST:        sgst,
 			IGST:        igst,
-			Total:       taxableAmount + cgst + sgst + igst,
+			CessRate:    cessRate,
+			CessAmount:  cessAmount,
+			Total:       taxableAmount + cgst + sgst + igst + cessAmount,
 			HSNCode:     item.HSNCode,
 			BatchNo:     strings.TrimSpace(item.BatchNo),
 			ExpDate:     item.ExpDate.Ptr(),
@@ -332,9 +359,10 @@ func CreateInvoice(c *gin.Context) {
 		cgstTotal += cgst
 		sgstTotal += sgst
 		igstTotal += igst
+		cessTotal += cessAmount
 	}
 
-	total := subTotal - discountTotal + cgstTotal + sgstTotal + igstTotal - input.InvoiceDiscount + input.AdditionalCharges
+	total := subTotal - discountTotal + cgstTotal + sgstTotal + igstTotal + cessTotal - input.InvoiceDiscount + input.AdditionalCharges
 	preLoyaltyTotal := total
 
 	loyaltySettings, _ := GetOrCreateLoyaltySettings(userID)
@@ -369,6 +397,7 @@ func CreateInvoice(c *gin.Context) {
 	invoice.CGSTTotal = cgstTotal
 	invoice.SGSTTotal = sgstTotal
 	invoice.IGSTTotal = igstTotal
+	invoice.CessTotal = cessTotal
 	invoice.RoundOff = roundOff
 	invoice.TotalAmount = roundedTotal
 
@@ -494,6 +523,10 @@ func UpdateInvoice(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Invoice not found"})
 		return
 	}
+	if invoice.Status == "cancelled" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "A cancelled invoice cannot be edited"})
+		return
+	}
 
 	var input struct {
 		InvoiceNumber         string                    `json:"invoice_number"`
@@ -504,6 +537,11 @@ func UpdateInvoice(c *gin.Context) {
 		PaymentTerms          int                       `json:"payment_terms"`
 		Status                string                    `json:"status"`
 		IsInterState          bool                      `json:"is_inter_state"`
+		PlaceOfSupply         string                    `json:"place_of_supply"`
+		ReverseCharge         *bool                     `json:"reverse_charge"`
+		ShippingAddress       *string                   `json:"shipping_address"`
+		OriginalInvoiceNumber *string                   `json:"original_invoice_number"`
+		OriginalInvoiceDate   *models.FlexibleTime      `json:"original_invoice_date"`
 		PaymentMode           string                    `json:"payment_mode"`
 		AmountPaid            float64                   `json:"amount_paid"`
 		PaymentSplits         []models.PaymentSplit     `json:"payment_splits"`
@@ -523,6 +561,7 @@ func UpdateInvoice(c *gin.Context) {
 			UnitPrice   models.FlexibleFloat `json:"unit_price"`
 			Discount    models.FlexibleFloat `json:"discount"`
 			TaxRate     models.FlexibleFloat `json:"tax_rate"`
+			CessRate    models.FlexibleFloat `json:"cess_rate"`
 			Unit        string               `json:"unit"`
 			HSNCode     string               `json:"hsn_code"`
 			BatchNo     string               `json:"batch_no"`
@@ -600,6 +639,23 @@ func UpdateInvoice(c *gin.Context) {
 	invoice.Notes = input.Notes
 	invoice.Terms = input.Terms
 	invoice.InvoiceDiscount = input.InvoiceDiscount
+	// GST detail fields are only overwritten when the request carries them so
+	// edits from clients that don't send these keys keep the stored values.
+	if input.PlaceOfSupply != "" {
+		invoice.PlaceOfSupply = strings.TrimSpace(input.PlaceOfSupply)
+	}
+	if input.ReverseCharge != nil {
+		invoice.ReverseCharge = *input.ReverseCharge
+	}
+	if input.ShippingAddress != nil {
+		invoice.ShippingAddress = *input.ShippingAddress
+	}
+	if input.OriginalInvoiceNumber != nil {
+		invoice.OriginalInvoiceNumber = *input.OriginalInvoiceNumber
+	}
+	if input.OriginalInvoiceDate != nil {
+		invoice.OriginalInvoiceDate = input.OriginalInvoiceDate.Ptr()
+	}
 	if input.AdditionalChargeItems != nil {
 		// Labelled rows are authoritative; keep the aggregate in sync.
 		if len(chargeItems) == 0 {
@@ -616,7 +672,7 @@ func UpdateInvoice(c *gin.Context) {
 	// Delete old items and recreate
 	utils.DB.Where("invoice_id = ?", invoice.ID).Delete(&models.InvoiceItem{})
 
-	var subTotal, discountTotal, cgstTotal, sgstTotal, igstTotal float64
+	var subTotal, discountTotal, cgstTotal, sgstTotal, igstTotal, cessTotal float64
 	invoice.Items = nil
 	for _, item := range input.Items {
 		qty := item.Quantity.Float64()
@@ -624,11 +680,13 @@ func UpdateInvoice(c *gin.Context) {
 		disc := item.Discount.Float64()
 		// Billing is tax-free: the item tax rate is ignored.
 		tax := 0.0
+		cessRate := item.CessRate.Float64()
 
 		itemTotal := qty * price
 		itemDiscount := itemTotal * (disc / 100)
 		taxable := itemTotal - itemDiscount
 		itemTax := taxable * (tax / 100)
+		cessAmount := taxable * (cessRate / 100)
 
 		var cgst, sgst, igst float64
 		if invoice.IsInterState {
@@ -651,7 +709,9 @@ func UpdateInvoice(c *gin.Context) {
 			CGST:        cgst,
 			SGST:        sgst,
 			IGST:        igst,
-			Total:       taxable + cgst + sgst + igst,
+			CessRate:    cessRate,
+			CessAmount:  cessAmount,
+			Total:       taxable + cgst + sgst + igst + cessAmount,
 			HSNCode:     item.HSNCode,
 			BatchNo:     strings.TrimSpace(item.BatchNo),
 			ExpDate:     item.ExpDate.Ptr(),
@@ -662,6 +722,7 @@ func UpdateInvoice(c *gin.Context) {
 		cgstTotal += cgst
 		sgstTotal += sgst
 		igstTotal += igst
+		cessTotal += cessAmount
 	}
 
 	invoice.SubTotal = subTotal
@@ -669,9 +730,10 @@ func UpdateInvoice(c *gin.Context) {
 	invoice.CGSTTotal = cgstTotal
 	invoice.SGSTTotal = sgstTotal
 	invoice.IGSTTotal = igstTotal
+	invoice.CessTotal = cessTotal
 	invoice.TaxTotal = cgstTotal + sgstTotal + igstTotal
 
-	totalBeforeRound := subTotal - discountTotal + invoice.TaxTotal - invoice.InvoiceDiscount + invoice.AdditionalCharges
+	totalBeforeRound := subTotal - discountTotal + invoice.TaxTotal + cessTotal - invoice.InvoiceDiscount + invoice.AdditionalCharges
 	roundOff := math.Round(totalBeforeRound) - totalBeforeRound
 	invoice.RoundOff = roundOff
 	invoice.TotalAmount = math.Round(totalBeforeRound)
@@ -934,6 +996,7 @@ func GenerateInvoicePDF(c *gin.Context) {
 	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).
 		Preload("Party").
 		Preload("Items").
+		Preload("Items.Product").
 		First(&invoice).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Invoice not found"})
 		return
@@ -941,8 +1004,8 @@ func GenerateInvoicePDF(c *gin.Context) {
 	attachInvoicePaymentSplits(utils.DB, &invoice)
 
 	settings := loadPrintSettings(userID)
-	var business models.Business
-	_ = utils.DB.Where("user_id = ?", userID).First(&business)
+	storeID, _ := currentStoreID(c)
+	business := resolveSellerBusiness(userID, &storeID)
 
 	pdfBytes, err := buildInvoiceDocumentPDF(invoice, &business, settings)
 	if err != nil {

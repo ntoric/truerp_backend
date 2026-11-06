@@ -69,7 +69,7 @@ func SetupRoutes(r *gin.Engine) {
 		invoices.GET("/:id/pdf", controllers.GenerateInvoicePDF)
 		invoices.GET("/:id", controllers.GetInvoice)
 		invoices.PUT("/:id", controllers.UpdateInvoice)
-		invoices.DELETE("/:id", controllers.DeleteInvoice)
+		invoices.DELETE("/:id", middleware.SuperAdminRequired(), controllers.DeleteInvoice)
 	}
 
 	invoiceTemplates := r.Group("/api/v1/invoice-templates")
@@ -120,7 +120,8 @@ func SetupRoutes(r *gin.Engine) {
 		payments.GET("", controllers.GetPayments)
 		payments.GET("/next-number", controllers.GetNextPaymentInNumber)
 		payments.POST("", controllers.CreatePayment)
-		payments.DELETE("/:id", controllers.DeletePayment)
+		payments.POST("/:id/cancel", controllers.CancelPayment)
+		payments.DELETE("/:id", middleware.SuperAdminRequired(), controllers.DeletePayment)
 		payments.GET("/:id/pdf", controllers.GenerateReceiptPDF)
 		payments.POST("/import/csv", middleware.SuperAdminRequired(), controllers.ImportPaymentsCSV)
 	}
@@ -140,7 +141,8 @@ func SetupRoutes(r *gin.Engine) {
 	{
 		paymentOuts.GET("", controllers.GetPaymentOuts)
 		paymentOuts.POST("", controllers.CreatePaymentOut)
-		paymentOuts.DELETE("/:id", controllers.DeletePaymentOut)
+		paymentOuts.POST("/:id/cancel", controllers.CancelPaymentOut)
+		paymentOuts.DELETE("/:id", middleware.SuperAdminRequired(), controllers.DeletePaymentOut)
 	}
 
 	// Expense routes
@@ -152,7 +154,8 @@ func SetupRoutes(r *gin.Engine) {
 		expenses.GET("/next-number", controllers.GetNextExpenseNumber)
 		expenses.GET("/:id", controllers.GetExpense)
 		expenses.PUT("/:id", controllers.UpdateExpense)
-		expenses.DELETE("/:id", controllers.DeleteExpense)
+		expenses.POST("/:id/cancel", controllers.CancelExpense)
+		expenses.DELETE("/:id", middleware.SuperAdminRequired(), controllers.DeleteExpense)
 		expenses.POST("/import/csv", middleware.SuperAdminRequired(), controllers.ImportExpensesCSV)
 	}
 
@@ -611,7 +614,8 @@ func SetupRoutes(r *gin.Engine) {
 		creditNotes.GET("/:id", controllers.GetCreditNote)
 		creditNotes.PUT("/:id", controllers.UpdateCreditNote)
 		creditNotes.POST("/:id/issue", controllers.IssueCreditNote)
-		creditNotes.DELETE("/:id", controllers.DeleteCreditNote)
+		creditNotes.POST("/:id/cancel", controllers.CancelCreditNote)
+		creditNotes.DELETE("/:id", middleware.SuperAdminRequired(), controllers.DeleteCreditNote)
 	}
 
 	// Purchase Return routes
@@ -636,7 +640,8 @@ func SetupRoutes(r *gin.Engine) {
 		debitNotes.GET("/:id", controllers.GetDebitNote)
 		debitNotes.PUT("/:id", controllers.UpdateDebitNote)
 		debitNotes.POST("/:id/issue", controllers.IssueDebitNote)
-		debitNotes.DELETE("/:id", controllers.DeleteDebitNote)
+		debitNotes.POST("/:id/cancel", controllers.CancelDebitNote)
+		debitNotes.DELETE("/:id", middleware.SuperAdminRequired(), controllers.DeleteDebitNote)
 	}
 
 	// Cash & Bank routes
