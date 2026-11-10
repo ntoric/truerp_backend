@@ -43,9 +43,8 @@ func stockPositionsAsOf(userID uuid.UUID, date string) map[uuid.UUID]stockPositi
 	return snapshotPositionsAsOf(userID, date)
 }
 
-// computeStockValueAsOf returns inventory quantity and value at the end of the
-// given date — the materialized stock snapshots adjusted by the latest overall
-// opening-stock override.
+// computeStockValueAsOf returns the computed inventory quantity and value at
+// the end of the given date, from the materialized stock snapshots.
 func computeStockValueAsOf(userID uuid.UUID, date string) (qty, value float64) {
 	return overallPositionAsOf(userID, date)
 }
@@ -129,13 +128,12 @@ func loadProfitLossReport(userID uuid.UUID, period, anchorDate, startDate, endDa
 	}
 
 	// Opening stock is the inventory value at the close of the day before the
-	// period starts; closing stock is the value at the period end. Positions
+	// period starts (or the opening-stock override effective on the start
+	// date); closing stock is the computed value at the period end. Positions
 	// come from the materialized daily snapshot table, refreshed if the stock
 	// source data changed since the last rebuild.
 	ensureStockSnapshots(userID)
-	startT, _ := time.Parse("2006-01-02", start)
-	openingDate := startT.AddDate(0, 0, -1).Format("2006-01-02")
-	report.OpeningStockQty, report.OpeningStock = computeStockValueAsOf(userID, openingDate)
+	report.OpeningStockQty, report.OpeningStock = overallOpeningPositionOn(userID, start)
 	report.ClosingStockQty, report.ClosingStock = computeStockValueAsOf(userID, end)
 
 	netSales := report.Sales.TotalAmount - report.SalesReturns.TotalAmount

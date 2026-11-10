@@ -448,49 +448,47 @@ func snapshotPositionsAsOfDB(db *gorm.DB, userID uuid.UUID, date string) map[uui
 	return positions
 }
 
-// latestOpeningOverride returns the most recent superadmin opening-stock
-// override whose baseline day (effective_date − 1) is on or before `date` —
-// i.e. an override effective on date+1 sets the closing position of `date`.
-func latestOpeningOverride(userID uuid.UUID, date string) *models.StockOpeningOverride {
-	if !utils.DB.Migrator().HasTable(&models.StockOpeningOverride{}) {
+// openingOverrideOn returns the superadmin opening-stock override effective on
+// exactly `date` (YYYY-MM-DD), or nil. An override declares only the opening
+// stock of its own date — it never shifts closing positions or later days.
+func openingOverrideOn(db *gorm.DB, userID uuid.UUID, date string) *models.StockOpeningOverride {
+	if !db.Migrator().HasTable(&models.StockOpeningOverride{}) {
 		return nil
 	}
-	end, err := time.Parse("2006-01-02", date)
-	if err != nil {
-		return nil
-	}
-	limit := end.AddDate(0, 0, 1).Format("2006-01-02")
 	var o models.StockOpeningOverride
-	if err := utils.DB.Where("user_id = ?", userID).
-		Where(utils.SQLDateLTE("effective_date"), limit).
-		Order("effective_date DESC").Limit(1).First(&o).Error; err != nil {
+	if err := db.Where("user_id = ?", userID).
+		Where(utils.SQLDateEquals("effective_date"), date).
+		Order("created_at DESC").Limit(1).First(&o).Error; err != nil {
 		return nil
 	}
 	return &o
 }
 
-// overallPositionAsOf returns the aggregate stock position (quantity and value
-// across all products and outlets) at the end of `date`, adjusted by the
-// latest overall opening-stock override: the override declares the position at
-// the close of the day before its effective date, and computed movements since
-// that baseline apply on top. Callers must run ensureStockSnapshots first.
+// overallPositionAsOf returns the computed aggregate stock position (quantity
+// and value across all products and outlets) at the close of `date`. Opening
+// overrides do not affect it — closing stock is always the computed figure.
+// Callers must run ensureStockSnapshots first.
 func overallPositionAsOf(userID uuid.UUID, date string) (qty, value float64) {
-	computed := func(d string) (float64, float64) {
-		var q, v float64
-		for _, p := range snapshotPositionsAsOf(userID, d) {
-			q += p.Qty
-			v += p.Value
-		}
-		return q, v
+	for _, p := range snapshotPositionsAsOf(userID, date) {
+		qty += p.Qty
+		value += p.Value
 	}
-	cQty, cVal := computed(date)
-	o := latestOpeningOverride(userID, date)
-	if o == nil {
-		return cQty, cVal
+	return qty, value
+}
+
+// overallOpeningPositionOn returns the aggregate opening stock of a period
+// starting on `start`: the opening override effective on that exact date when
+// one exists, otherwise the computed closing position of the previous day.
+// Callers must run ensureStockSnapshots first.
+func overallOpeningPositionOn(userID uuid.UUID, start string) (qty, value float64) {
+	if o := openingOverrideOn(utils.DB, userID, start); o != nil {
+		return o.Quantity, o.Value
 	}
-	base := o.EffectiveDate.AddDate(0, 0, -1).Format("2006-01-02")
-	bQty, bVal := computed(base)
-	return o.Quantity + cQty - bQty, o.Value + cVal - bVal
+	startT, err := time.Parse("2006-01-02", start)
+	if err != nil {
+		return 0, 0
+	}
+	return overallPositionAsOf(userID, startT.AddDate(0, 0, -1).Format("2006-01-02"))
 }
 
 // snapshotMovements returns per-product units moved into and out of stock

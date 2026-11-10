@@ -47,10 +47,11 @@ func loadStockReport(userID uuid.UUID, period, anchorDate, startDate, endDate st
 	openingDate := startT.AddDate(0, 0, -1).Format("2006-01-02")
 	opening := stockPositionsAsOf(userID, openingDate)
 	closing := stockPositionsAsOf(userID, end)
-	// Report totals honor the latest overall opening-stock override — the
-	// aggregate position can't be decomposed per product, so any residual vs
-	// the per-product lines is surfaced as its own line below.
-	openingQtyTotal, openingValTotal := overallPositionAsOf(userID, openingDate)
+	// The opening total honors an overall opening-stock override effective on
+	// the period's start date — the aggregate can't be decomposed per product,
+	// so any residual vs the per-product lines is surfaced as its own line
+	// below. Closing stock is always the computed position.
+	openingQtyTotal, openingValTotal := overallOpeningPositionOn(userID, start)
 	closingQtyTotal, closingValTotal := overallPositionAsOf(userID, end)
 
 	// Units moved into/out of stock within the period.
@@ -123,7 +124,7 @@ func loadStockReport(userID uuid.UUID, period, anchorDate, startDate, endDate st
 		return strings.ToLower(lines[i].ProductName) < strings.ToLower(lines[j].ProductName)
 	})
 
-	// An overall opening-stock override shifts the aggregate position without a
+	// An overall opening-stock override shifts the aggregate opening without a
 	// per-product breakdown — surface the residual as its own line so the
 	// report's line items still reconcile with the totals.
 	dOpenQty := openingQtyTotal - report.OpeningStockQty

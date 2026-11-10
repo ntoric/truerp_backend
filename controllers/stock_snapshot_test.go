@@ -135,9 +135,10 @@ func TestStockSnapshotsRebuildOnChange(t *testing.T) {
 	}
 }
 
-// An overall opening-stock override re-anchors the aggregate position at the
-// start of its effective date; computed movements on/after that day apply on
-// top, and deleting the override restores the computed position.
+// An opening-stock override replaces only the opening stock of a period that
+// starts on its effective date: closing positions, and periods starting on any
+// other day, keep the computed figures. Deleting it restores the computed
+// opening.
 func TestStockOpeningOverride(t *testing.T) {
 	db := setupProfitLossTestDB(t)
 	userID := uuid.New()
@@ -174,16 +175,22 @@ func TestStockOpeningOverride(t *testing.T) {
 		t.Fatalf("override: %v", err)
 	}
 
-	// "Opening on Jan 3 = 100/4000" is the closing position of Jan 2.
-	if qty, value := overallPositionAsOf(userID, "2026-01-02"); qty != 100 || value != 4000 {
-		t.Fatalf("override boundary position = %v qty / %v value, want 100/4000", qty, value)
+	// Closing positions are never affected by the override.
+	if qty, value := overallPositionAsOf(userID, "2026-01-02"); qty != 10 || value != 500 {
+		t.Fatalf("Jan 2 closing = %v qty / %v value, want computed 10/500", qty, value)
 	}
-	// Jan 5 sale −3 @ 50 = −150 → 97 / 3850.
-	if qty, value := overallPositionAsOf(userID, "2026-01-31"); qty != 97 || value != 3850 {
-		t.Fatalf("post-override position = %v qty / %v value, want 97/3850", qty, value)
+	if qty, value := overallPositionAsOf(userID, "2026-01-31"); qty != 7 || value != 350 {
+		t.Fatalf("Jan 31 closing = %v qty / %v value, want computed 7/350", qty, value)
+	}
+	// The opening of a period starting Jan 3 is the override; Jan 4 is computed.
+	if qty, value := overallOpeningPositionOn(userID, "2026-01-03"); qty != 100 || value != 4000 {
+		t.Fatalf("Jan 3 opening = %v qty / %v value, want 100/4000", qty, value)
+	}
+	if qty, value := overallOpeningPositionOn(userID, "2026-01-04"); qty != 10 || value != 500 {
+		t.Fatalf("Jan 4 opening = %v qty / %v value, want computed 10/500", qty, value)
 	}
 
-	// Report opening stock for a period starting on the override date.
+	// Stock report for a period starting on the override date.
 	report, err := loadStockReport(userID, "custom", "", "2026-01-03", "2026-01-31")
 	if err != nil {
 		t.Fatalf("loadStockReport: %v", err)
@@ -191,16 +198,17 @@ func TestStockOpeningOverride(t *testing.T) {
 	if report.OpeningStockQty != 100 || report.OpeningStock != 4000 {
 		t.Fatalf("report opening = %v qty / %v value, want 100/4000", report.OpeningStockQty, report.OpeningStock)
 	}
-	if report.ClosingStockQty != 97 || report.ClosingStock != 3850 {
-		t.Fatalf("report closing = %v qty / %v value, want 97/3850", report.ClosingStockQty, report.ClosingStock)
+	if report.ClosingStockQty != 7 || report.ClosingStock != 350 {
+		t.Fatalf("report closing = %v qty / %v value, want computed 7/350", report.ClosingStockQty, report.ClosingStock)
 	}
-	// The residual beyond the per-product positions is a visible line.
+	// The opening residual beyond the per-product positions is a visible line
+	// with no closing component.
 	var found bool
 	for _, l := range report.Lines {
 		if l.ProductName == "(Opening stock override)" {
 			found = true
-			if l.OpeningQty != 90 || l.OpeningValue != 3500 || l.ClosingQty != 90 || l.ClosingValue != 3500 {
-				t.Fatalf("override line = %+v, want opening/closing 90/3500", l)
+			if l.OpeningQty != 90 || l.OpeningValue != 3500 || l.ClosingQty != 0 || l.ClosingValue != 0 {
+				t.Fatalf("override line = %+v, want opening 90/3500 and closing 0/0", l)
 			}
 		}
 	}
@@ -208,28 +216,41 @@ func TestStockOpeningOverride(t *testing.T) {
 		t.Fatal("expected an '(Opening stock override)' report line")
 	}
 
-	// P&L uses the same adjusted positions.
+	// A period starting on another day ignores the override entirely.
+	later, err := loadStockReport(userID, "custom", "", "2026-01-04", "2026-01-31")
+	if err != nil {
+		t.Fatalf("loadStockReport: %v", err)
+	}
+	if later.OpeningStock != 500 || later.ClosingStock != 350 {
+		t.Fatalf("later report = open %v / close %v, want 500/350", later.OpeningStock, later.ClosingStock)
+	}
+	for _, l := range later.Lines {
+		if l.ProductName == "(Opening stock override)" {
+			t.Fatalf("unexpected override line %+v for a period not starting on the override date", l)
+		}
+	}
+
+	// P&L uses the same opening/closing rule.
 	plReport, err := loadProfitLossReport(userID, "custom", "", "2026-01-03", "2026-01-31")
 	if err != nil {
 		t.Fatalf("loadProfitLossReport: %v", err)
 	}
-	if plReport.OpeningStock != 4000 || plReport.ClosingStock != 3850 {
-		t.Fatalf("P&L stock = open %v / close %v, want 4000/3850", plReport.OpeningStock, plReport.ClosingStock)
+	if plReport.OpeningStock != 4000 || plReport.ClosingStock != 350 {
+		t.Fatalf("P&L stock = open %v / close %v, want 4000/350", plReport.OpeningStock, plReport.ClosingStock)
 	}
 
-	// Deleting the override restores the ledger-derived position (10 − 3 = 7 @ 50).
+	// Deleting the override restores the computed opening (10 @ 50).
 	if err := db.Delete(&override).Error; err != nil {
 		t.Fatalf("delete override: %v", err)
 	}
-	if qty, value := overallPositionAsOf(userID, "2026-01-31"); qty != 7 || value != 350 {
-		t.Fatalf("post-delete position = %v qty / %v value, want 7/350", qty, value)
+	if qty, value := overallOpeningPositionOn(userID, "2026-01-03"); qty != 10 || value != 500 {
+		t.Fatalf("post-delete opening = %v qty / %v value, want 10/500", qty, value)
 	}
 }
 
-// A daily-profit range starting after an override's base day must open with
-// the override-adjusted closing of the previous day — the first day's opening
-// is the previous day's closing, so a month boundary must never jump.
-func TestDailyStockPositionsOpeningCarriesOverride(t *testing.T) {
+// In the daily stock positions an override replaces only the opening of its
+// own day; every closing, and every later opening, stays computed.
+func TestDailyStockPositionsOverrideOpeningOnly(t *testing.T) {
 	db := setupProfitLossTestDB(t)
 	userID := uuid.New()
 	productID := uuid.New()
@@ -250,8 +271,7 @@ func TestDailyStockPositionsOpeningCarriesOverride(t *testing.T) {
 	}
 	ensureStockSnapshots(userID)
 
-	// Override effective Jan 3 → base Jan 2, computed base value 500,
-	// delta = 4000 − 500 = 3500.
+	// Override: opening stock on Jan 3 is 100 units worth 4000.
 	if err := db.Create(&models.StockOpeningOverride{
 		ID: uuid.New(), UserID: userID,
 		EffectiveDate: day(2026, 1, 3), Quantity: 100, Value: 4000, CreatedBy: userID,
@@ -259,14 +279,22 @@ func TestDailyStockPositionsOpeningCarriesOverride(t *testing.T) {
 		t.Fatalf("override: %v", err)
 	}
 
-	positions := loadDailyStockPositions(db, userID, "2026-01-04", "2026-01-06")
-	if pos := positions["2026-01-04"]; pos.Opening != 4000 || pos.Closing != 4000 {
-		t.Fatalf("jan 4 = open %v / close %v, want 4000/4000", pos.Opening, pos.Closing)
+	positions := loadDailyStockPositions(db, userID, "2026-01-03", "2026-01-06")
+	for _, tc := range []struct {
+		day           string
+		open, close   float64
+		openQ, closeQ float64
+	}{
+		{"2026-01-03", 4000, 500, 100, 10},
+		{"2026-01-04", 500, 500, 10, 10},
+		{"2026-01-05", 500, 350, 10, 7},
+		{"2026-01-06", 350, 350, 7, 7},
+	} {
+		pos := positions[tc.day]
+		if pos.Opening != tc.open || pos.Closing != tc.close || pos.OpeningQty != tc.openQ || pos.ClosingQty != tc.closeQ {
+			t.Fatalf("%s = open %v (%v) / close %v (%v), want %v (%v) / %v (%v)",
+				tc.day, pos.Opening, pos.OpeningQty, pos.Closing, pos.ClosingQty, tc.open, tc.openQ, tc.close, tc.closeQ)
+		}
 	}
-	if pos := positions["2026-01-05"]; pos.Opening != 4000 || pos.Closing != 3850 {
-		t.Fatalf("jan 5 = open %v / close %v, want 4000/3850", pos.Opening, pos.Closing)
-	}
-	if pos := positions["2026-01-06"]; pos.Opening != 3850 || pos.Closing != 3850 {
-		t.Fatalf("jan 6 = open %v / close %v, want 3850/3850", pos.Opening, pos.Closing)
-	}
+
 }

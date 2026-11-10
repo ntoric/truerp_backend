@@ -211,8 +211,8 @@ type dailyStockPosition struct {
 }
 
 // loadDailyStockPositions returns opening/closing stock value per day over
-// [start, end], carrying positions forward across days with no snapshot rows
-// and applying opening-stock overrides the same way overallPositionAsOf does.
+// [start, end], carrying positions forward across days with no snapshot rows.
+// An opening-stock override replaces only the opening of its own date.
 // Callers must run ensureStockSnapshots first.
 func loadDailyStockPositions(db *gorm.DB, userID uuid.UUID, start, end string) map[string]dailyStockPosition {
 	positions := make(map[string]dailyStockPosition)
@@ -263,65 +263,40 @@ func loadDailyStockPositions(db *gorm.DB, userID uuid.UUID, start, end string) m
 		prevClosing += p.Value
 	}
 
-	// Opening-stock overrides shift every day's computed position by a
-	// constant once their base day (effective_date − 1) is reached.
-	type overrideDelta struct {
-		base     string
-		deltaQty float64
-		delta    float64
-	}
-	var deltas []overrideDelta
+	// Opening-stock overrides replace only the opening of their own date;
+	// closing positions are always the computed figures.
+	overrides := map[string]models.StockOpeningOverride{}
 	if db.Migrator().HasTable(&models.StockOpeningOverride{}) {
-		var overrides []models.StockOpeningOverride
-		db.Unscoped().Where("user_id = ?", userID).Order("effective_date").Find(&overrides)
-		for _, o := range overrides {
-			base := o.EffectiveDate.AddDate(0, 0, -1).Format("2006-01-02")
-			var baseQty, baseValue float64
-			for _, p := range snapshotPositionsAsOfDB(db, userID, base) {
-				baseQty += p.Qty
-				baseValue += p.Value
-			}
-			deltas = append(deltas, overrideDelta{
-				base: base, deltaQty: o.Quantity - baseQty, delta: o.Value - baseValue,
-			})
+		var rows []models.StockOpeningOverride
+		db.Where("user_id = ?", userID).
+			Where(utils.SQLDateGTE("effective_date"), start).
+			Where(utils.SQLDateLTE("effective_date"), end).
+			Order("created_at").Find(&rows)
+		for _, o := range rows {
+			overrides[o.EffectiveDate.Format("2006-01-02")] = o
 		}
 	}
 
-	// Seed the opening delta with overrides whose base day is on or before
-	// prevDay: the first day's opening must equal the previous day's
-	// override-adjusted closing so the position carries across range
-	// boundaries (e.g. Oct 1 opening = Sep 30 closing).
-	di := 0
-	var deltaQtyPrev, deltaPrev float64
-	for di < len(deltas) && deltas[di].base <= prevDay {
-		deltaQtyPrev = deltas[di].deltaQty
-		deltaPrev = deltas[di].delta
-		di++
-	}
 	for d := startT; !d.After(endT); d = d.AddDate(0, 0, 1) {
 		day := d.Format("2006-01-02")
-		deltaQty, delta := deltaQtyPrev, deltaPrev
-		for di < len(deltas) && deltas[di].base <= day {
-			deltaQty = deltas[di].deltaQty
-			delta = deltas[di].delta
-			di++
-		}
 		pos := raw[day]
 		if pos.Closing == 0 && pos.Opening == 0 {
 			// No snapshot rows this day: position carries forward unchanged.
 			pos.ClosingQty = prevClosingQty
 			pos.Closing = prevClosing
 		}
+		openingQty, opening := prevClosingQty, prevClosing
+		if o, ok := overrides[day]; ok {
+			openingQty, opening = o.Quantity, o.Value
+		}
 		positions[day] = dailyStockPosition{
-			OpeningQty: prevClosingQty + deltaQtyPrev,
-			Opening:    prevClosing + deltaPrev,
-			ClosingQty: pos.ClosingQty + deltaQty,
-			Closing:    pos.Closing + delta,
+			OpeningQty: openingQty,
+			Opening:    opening,
+			ClosingQty: pos.ClosingQty,
+			Closing:    pos.Closing,
 		}
 		prevClosingQty = pos.ClosingQty
 		prevClosing = pos.Closing
-		deltaQtyPrev = deltaQty
-		deltaPrev = delta
 	}
 	return positions
 }
