@@ -263,8 +263,9 @@ func attachInvoicePaymentSplits(db *gorm.DB, invoice *models.Invoice) {
 	splits := paymentSplitsFromRecords(payments)
 	if len(splits) == 0 && invoice.AmountPaid > 0.009 {
 		splits = []models.PaymentSplit{{
-			Mode:   normalizePaymentMethod(invoice.PaymentMode),
-			Amount: paymentSplitAmount(invoice.AmountPaid),
+			Mode:          normalizePaymentMethod(invoice.PaymentMode),
+			Amount:        paymentSplitAmount(invoice.AmountPaid),
+			BankAccountID: invoice.BankAccountID,
 		}}
 	}
 	invoice.PaymentSplits = splits
@@ -290,16 +291,18 @@ func attachInvoicePaymentSplitsList(db *gorm.DB, invoices []models.Invoice) {
 			continue
 		}
 		byInvoice[*payment.InvoiceID] = append(byInvoice[*payment.InvoiceID], models.PaymentSplit{
-			Mode:   normalizePaymentMethod(payment.Mode),
-			Amount: amount,
+			Mode:          normalizePaymentMethod(payment.Mode),
+			Amount:        amount,
+			BankAccountID: payment.BankAccountID,
 		})
 	}
 	for i := range invoices {
 		splits := mergePaymentSplits(byInvoice[invoices[i].ID])
 		if len(splits) == 0 && invoices[i].AmountPaid > 0.009 {
 			splits = []models.PaymentSplit{{
-				Mode:   normalizePaymentMethod(invoices[i].PaymentMode),
-				Amount: paymentSplitAmount(invoices[i].AmountPaid),
+				Mode:          normalizePaymentMethod(invoices[i].PaymentMode),
+				Amount:        paymentSplitAmount(invoices[i].AmountPaid),
+				BankAccountID: invoices[i].BankAccountID,
 			}}
 		}
 		invoices[i].PaymentSplits = splits
@@ -314,8 +317,9 @@ func paymentSplitsFromRecords(payments []models.Payment) []models.PaymentSplit {
 			continue
 		}
 		splits = append(splits, models.PaymentSplit{
-			Mode:   normalizePaymentMethod(payment.Mode),
-			Amount: amount,
+			Mode:          normalizePaymentMethod(payment.Mode),
+			Amount:        amount,
+			BankAccountID: payment.BankAccountID,
 		})
 	}
 	return mergePaymentSplits(splits)
@@ -431,8 +435,9 @@ func paymentSplitsFromOutRecords(db *gorm.DB, userID uuid.UUID, paymentOuts []mo
 		}
 		var accountID *uuid.UUID
 		if !isInitialInvestmentPayment(paymentOut.Mode) {
-			txns, err := findPaymentCashTransactions(db, userID, "out", paymentOutCashRef(&paymentOut))
-			if err == nil && len(txns) > 0 {
+			if paymentOut.BankAccountID != nil {
+				accountID = paymentOut.BankAccountID
+			} else if txns, err := findPaymentCashTransactions(db, userID, "out", paymentOutCashRef(&paymentOut)); err == nil && len(txns) > 0 {
 				accountID = txns[0].AccountID
 			}
 		}

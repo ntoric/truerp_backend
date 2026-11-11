@@ -119,6 +119,7 @@ func CreatePaymentOut(c *gin.Context) {
 		PaymentOutDiscount float64    `json:"payment_out_discount" binding:"gte=0"`
 		PaymentOutNumber   string     `json:"payment_out_number"`
 		Mode               string     `json:"mode" binding:"required"`
+		BankAccountID      *uuid.UUID `json:"bank_account_id"`
 		Date               time.Time  `json:"date" binding:"required"`
 		Reference          string     `json:"reference"`
 		Notes              string     `json:"notes"`
@@ -234,13 +235,14 @@ func CreatePaymentOut(c *gin.Context) {
 	// settle against owner's equity and never touch cash or bank.
 	var accountID *uuid.UUID
 	if !isInitialInvestmentPayment(mode) && netAmount > 0 {
-		resolved, err := resolveBankAccountForPaymentMode(userID, mode, nil)
+		resolved, err := resolveBankAccountForPaymentMode(userID, mode, input.BankAccountID)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account for payment method"})
 			return
 		}
 		accountID = resolved
 	}
+	paymentOut.BankAccountID = accountID
 
 	if err := utils.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&paymentOut).Error; err != nil {

@@ -397,6 +397,9 @@ func postStandalonePaymentInAccounting(tx *gorm.DB, userID uuid.UUID, payment *m
 	}
 	desc := fmt.Sprintf("Payment in %s", payment.PaymentInNumber)
 	assetCode := settlementAccountCodeForMode(tx, userID, payment.Mode)
+	if payment.BankAccountID != nil {
+		assetCode = acCodeBank
+	}
 	refNumber := payment.PaymentInNumber
 	if refNumber == "" {
 		refNumber = payment.ID.String()
@@ -413,6 +416,9 @@ func postStandalonePaymentOutAccounting(tx *gorm.DB, userID uuid.UUID, payment *
 	}
 	desc := fmt.Sprintf("Payment out %s", payment.PaymentOutNumber)
 	assetCode := settlementAccountCodeForMode(tx, userID, payment.Mode)
+	if payment.BankAccountID != nil {
+		assetCode = acCodeBank
+	}
 	refNumber := payment.PaymentOutNumber
 	if refNumber == "" {
 		refNumber = payment.ID.String()
@@ -434,6 +440,9 @@ func postSalesReturnRefundAccounting(tx *gorm.DB, userID uuid.UUID, payment *mod
 	}
 	desc := fmt.Sprintf("Payment out %s for sales return %s", payment.PaymentOutNumber, payment.Reference)
 	assetCode := settlementAccountCodeForMode(tx, userID, payment.Mode)
+	if payment.BankAccountID != nil {
+		assetCode = acCodeBank
+	}
 	return postAutoJournal(tx, userID, payment.Date, desc, "payment_out_record", payment.ID, payment.PaymentOutNumber, []glLine{
 		{AccountCode: acCodeSales, Debit: amount, Description: desc},
 		{AccountCode: assetCode, Credit: amount, Description: desc},
@@ -455,6 +464,9 @@ func postInvoiceRefundAccounting(tx *gorm.DB, userID uuid.UUID, payment *models.
 	}
 	desc := fmt.Sprintf("Payment out %s for sales invoice %s", payment.PaymentOutNumber, invoiceNumber)
 	assetCode := settlementAccountCodeForMode(tx, userID, payment.Mode)
+	if payment.BankAccountID != nil {
+		assetCode = acCodeBank
+	}
 	refNumber := payment.PaymentOutNumber
 	if refNumber == "" {
 		refNumber = payment.ID.String()

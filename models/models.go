@@ -344,7 +344,9 @@ type Payment struct {
 	AmountReceived    float64        `json:"amount_received" gorm:"default:0"`
 	PaymentInDiscount float64        `json:"payment_in_discount" gorm:"default:0"`
 	PaymentInNumber   string         `json:"payment_in_number"`
-	Mode              string         `json:"mode"` // cash, upi, bank_transfer, cheque, card, initial_investment
+	Mode              string         `json:"mode"`                                             // cash, upi, bank_transfer, cheque, card, initial_investment
+	BankAccountID     *uuid.UUID     `json:"bank_account_id,omitempty" gorm:"type:uuid;index"` // nil = cash in-hand
+	BankAccount       *BankAccount   `json:"bank_account,omitempty" gorm:"foreignKey:BankAccountID"`
 	Date              time.Time      `json:"date" gorm:"index:idx_payments_user_date,priority:2"`
 	Reference         string         `json:"reference"`
 	Notes             string         `json:"notes"`
@@ -384,7 +386,9 @@ type PaymentOut struct {
 	AmountPaid         float64        `json:"amount_paid" gorm:"default:0"`
 	PaymentOutDiscount float64        `json:"payment_out_discount" gorm:"default:0"`
 	PaymentOutNumber   string         `json:"payment_out_number"`
-	Mode               string         `json:"mode"` // cash, upi, bank_transfer, cheque, card, initial_investment
+	Mode               string         `json:"mode"`                                             // cash, upi, bank_transfer, cheque, card, initial_investment
+	BankAccountID      *uuid.UUID     `json:"bank_account_id,omitempty" gorm:"type:uuid;index"` // nil = cash in-hand
+	BankAccount        *BankAccount   `json:"bank_account,omitempty" gorm:"foreignKey:BankAccountID"`
 	Date               time.Time      `json:"date" gorm:"index:idx_payment_outs_user_date,priority:2"`
 	Reference          string         `json:"reference"`
 	Notes              string         `json:"notes"`
@@ -441,6 +445,7 @@ type ExpenseItem struct {
 
 type DashboardStats struct {
 	TotalSales       float64 `json:"total_sales"`
+	TotalSalesPaid   float64 `json:"total_sales_paid"`
 	TotalInvoices    int64   `json:"total_invoices"`
 	TotalParties     int64   `json:"total_parties"`
 	TotalCustomers   int64   `json:"total_customers"`

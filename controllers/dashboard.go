@@ -65,14 +65,21 @@ func GetDashboardStats(c *gin.Context) {
 
 	var stats models.DashboardStats
 	unpaidStatuses := []string{"sent", "partial", "overdue"}
+	issuedStatuses := []string{"sent", "partial", "overdue", "paid"}
 
-	salesQuery := utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status = ?", userID, "paid")
+	salesQuery := utils.DB.Model(&models.Invoice{}).Where("user_id = ? AND status IN ?", userID, issuedStatuses)
 	invoiceQuery := utils.DB.Model(&models.Invoice{}).Where("user_id = ?", userID)
 	if filterDates {
 		salesQuery = salesQuery.Where("date >= ? AND date <= ?", start, end)
 		invoiceQuery = invoiceQuery.Where("date >= ? AND date <= ?", start, end)
 	}
-	salesQuery.Select("COALESCE(SUM(total_amount), 0)").Scan(&stats.TotalSales)
+	var salesTotals struct {
+		Total float64
+		Paid  float64
+	}
+	salesQuery.Select("COALESCE(SUM(total_amount), 0) AS total, COALESCE(SUM(amount_paid), 0) AS paid").Scan(&salesTotals)
+	stats.TotalSales = salesTotals.Total
+	stats.TotalSalesPaid = salesTotals.Paid
 	invoiceQuery.Count(&stats.TotalInvoices)
 
 	utils.DB.Model(&models.Party{}).Where("user_id = ?", userID).Count(&stats.TotalParties)

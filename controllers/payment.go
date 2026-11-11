@@ -106,6 +106,7 @@ func CreatePayment(c *gin.Context) {
 		PaymentInDiscount float64    `json:"payment_in_discount" binding:"gte=0"`
 		PaymentInNumber   string     `json:"payment_in_number"`
 		Mode              string     `json:"mode" binding:"required"`
+		BankAccountID     *uuid.UUID `json:"bank_account_id"`
 		Date              time.Time  `json:"date" binding:"required"`
 		Reference         string     `json:"reference"`
 		Notes             string     `json:"notes"`
@@ -176,13 +177,14 @@ func CreatePayment(c *gin.Context) {
 	// settlements move no money at all.
 	var accountID *uuid.UUID
 	if !isInitialInvestmentPayment(payment.Mode) && !isCreditSettlementPayment(payment.Mode) && netAmount > 0 {
-		resolved, err := resolveBankAccountForPaymentMode(userID, payment.Mode, nil)
+		resolved, err := resolveBankAccountForPaymentMode(userID, payment.Mode, input.BankAccountID)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account for payment method"})
 			return
 		}
 		accountID = resolved
 	}
+	payment.BankAccountID = accountID
 
 	if err := utils.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&payment).Error; err != nil {
