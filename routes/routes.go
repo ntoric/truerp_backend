@@ -568,6 +568,7 @@ func SetupRoutes(r *gin.Engine) {
 	{
 		parties.GET("", controllers.GetParties)
 		parties.GET("/stats", controllers.GetPartyStats)
+		parties.GET("/pdf", controllers.ExportPartiesPDF)
 		parties.POST("", controllers.CreateParty)
 		parties.GET("/:id/ledger", controllers.GetPartyLedger)
 		parties.GET("/:id/ledger/excel", controllers.ExportPartyLedgerExcel)
