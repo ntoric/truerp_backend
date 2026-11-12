@@ -3062,6 +3062,27 @@ type DailyReportEmailSettings struct {
 	DeletedAt       gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
+// PartyBalanceReportEmailSettings stores per-user configuration for
+// automatically emailing the Party Balance Report PDF (opening/closing balance
+// of every party with a non-zero balance) at a scheduled time each day.
+type PartyBalanceReportEmailSettings struct {
+	ID              uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
+	IsEnabled       bool           `json:"is_enabled" gorm:"default:false"`
+	RecipientEmails string         `json:"recipient_emails" gorm:"type:text"` // comma/newline separated
+	ReportDay       string         `json:"report_day" gorm:"default:'today'"` // today, previous_day
+	PartyType       string         `json:"party_type" gorm:"default:'all'"`   // all, customer, vendor
+	SendTime        string         `json:"send_time" gorm:"default:'21:00'"`  // HH:MM (24h, configured timezone)
+	Subject         string         `json:"subject"`                           // optional custom subject
+	LastSentAt      *time.Time     `json:"last_sent_at,omitempty"`            // any send (manual or scheduled)
+	LastSentStatus  string         `json:"last_sent_status"`                  // success, partial, failed
+	LastSentError   string         `json:"last_sent_error,omitempty"`
+	LastScheduledAt *time.Time     `json:"last_scheduled_at,omitempty" gorm:"index"` // scheduler sends only
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+	DeletedAt       gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
 // DBMaintenanceSettings is a system-wide singleton controlling the nightly
 // database maintenance job that removes dead tuples and reduces table bloat
 // (VACUUM ANALYZE on PostgreSQL; VACUUM + ANALYZE on SQLite). A single row is

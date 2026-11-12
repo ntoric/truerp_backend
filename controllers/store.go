@@ -1045,6 +1045,7 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 			&models.DataBackup{},
 			&models.GDPRRequest{},
 			&models.DailyReportEmailSettings{},
+			&models.PartyBalanceReportEmailSettings{},
 			&models.IPRestriction{},
 			&models.MigrationJob{},
 		); err != nil {

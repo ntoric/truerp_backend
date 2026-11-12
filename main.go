@@ -56,6 +56,7 @@ func main() {
 	// Start the background scheduler that auto-emails the daily/periodic
 	// report PDF to configured recipients at the configured time each day.
 	controllers.StartDailyReportEmailScheduler()
+	controllers.StartPartyBalanceReportEmailScheduler()
 
 	// Start the background scheduler that runs the nightly database
 	// maintenance (dead-tuple / bloat cleanup) at the configured IST time

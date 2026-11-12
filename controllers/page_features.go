@@ -40,6 +40,7 @@ var defaultPageFeatureKeys = []string{
 	"/reports/profit-loss",
 	"/reports/billwise-profit",
 	"/reports/stock",
+	"/reports/party-balance",
 	"/reports",
 	"/gst",
 	"/e-invoicing",

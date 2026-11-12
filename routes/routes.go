@@ -199,6 +199,12 @@ func SetupRoutes(r *gin.Engine) {
 		dashboard.GET("/stock-report", controllers.GetStockReport)
 		dashboard.GET("/stock-report/excel", controllers.ExportStockReportExcel)
 		dashboard.GET("/stock-report/pdf", controllers.ExportStockReportPDF)
+		dashboard.GET("/party-balance-report", controllers.GetPartyBalanceReport)
+		dashboard.GET("/party-balance-report/excel", controllers.ExportPartyBalanceReportExcel)
+		dashboard.GET("/party-balance-report/pdf", controllers.ExportPartyBalanceReportPDF)
+		dashboard.GET("/party-balance-report/email-settings", controllers.GetPartyBalanceReportEmailSettingsHandler)
+		dashboard.PUT("/party-balance-report/email-settings", controllers.UpdatePartyBalanceReportEmailSettingsHandler)
+		dashboard.POST("/party-balance-report/email-settings/send-now", controllers.SendPartyBalanceReportEmailNowHandler)
 
 		// Daily report email automation (auto-mail PDF export to configured recipients)
 		dashboard.GET("/report-email-settings", controllers.GetDailyReportEmailSettingsHandler)
