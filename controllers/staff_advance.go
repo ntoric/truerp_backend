@@ -17,7 +17,7 @@ func GetStaffAdvancePayments(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var advances []models.StaffAdvancePayment
-	query := utils.DB.Where("user_id = ?", userID).Preload("Staff")
+	query := utils.DB.Where("user_id = ?", userID).Preload("Staff").Preload("BankAccount")
 
 	if staffID := c.Query("staff_id"); staffID != "" {
 		query = query.Where("staff_id = ?", staffID)
@@ -53,7 +53,7 @@ func GetStaffAdvancePayment(c *gin.Context) {
 	id := c.Param("id")
 
 	var advance models.StaffAdvancePayment
-	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).Preload("Staff").First(&advance).Error; err != nil {
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).Preload("Staff").Preload("BankAccount").First(&advance).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Advance payment not found"})
 		return
 	}
@@ -75,6 +75,7 @@ func CreateStaffAdvancePayment(c *gin.Context) {
 		AdvanceDate          time.Time  `json:"advance_date" binding:"required"`
 		ExpectedRecoveryDate *time.Time `json:"expected_recovery_date"`
 		PaymentMode          string     `json:"payment_mode"`
+		BankAccountID        *uuid.UUID `json:"bank_account_id"`
 		Reference            string     `json:"reference"`
 		Notes                string     `json:"notes"`
 	}
@@ -82,6 +83,22 @@ func CreateStaffAdvancePayment(c *gin.Context) {
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+	if input.Amount <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Amount must be greater than 0"})
+		return
+	}
+	if err := validateUserBankAccount(userID, input.BankAccountID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account"})
+		return
+	}
+	paymentMode := input.PaymentMode
+	if paymentMode == "" {
+		if input.BankAccountID == nil {
+			paymentMode = "cash"
+		} else {
+			paymentMode = "bank_transfer"
+		}
 	}
 
 	// Validate staff exists
@@ -108,7 +125,8 @@ func CreateStaffAdvancePayment(c *gin.Context) {
 		IsRecovered:          false,
 		RecoveredAmount:      0,
 		PendingAmount:        input.Amount,
-		PaymentMode:          input.PaymentMode,
+		PaymentMode:          paymentMode,
+		BankAccountID:        input.BankAccountID,
 		Reference:            input.Reference,
 		Notes:                input.Notes,
 		Status:               "pending",
@@ -124,7 +142,7 @@ func CreateStaffAdvancePayment(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create advance payment"})
 		return
 	}
-	utils.DB.First(&advance, advance.ID)
+	utils.DB.Preload("BankAccount").First(&advance, advance.ID)
 
 	// Log advance payment creation
 	CreateAuditLog(
@@ -150,7 +168,7 @@ func CreateStaffAdvancePayment(c *gin.Context) {
 }
 
 // applyStaffAdvanceExpense records the advance payout as a Staff Advance expense,
-// deducts it from cash in-hand, and posts the expense to the general ledger.
+// deducts it from the chosen bank account or cash in-hand, and posts the expense to the general ledger.
 func applyStaffAdvanceExpense(tx *gorm.DB, userID uuid.UUID, advance *models.StaffAdvancePayment, staffName string) error {
 	if advance.Amount <= 0 {
 		return nil
@@ -167,6 +185,7 @@ func applyStaffAdvanceExpense(tx *gorm.DB, userID uuid.UUID, advance *models.Sta
 		Date:          advance.AdvanceDate,
 		Vendor:        staffName,
 		PaymentMode:   advance.PaymentMode,
+		BankAccountID: advance.BankAccountID,
 		Notes:         advance.Notes,
 	}
 	if err := tx.Create(&expense).Error; err != nil {
@@ -183,7 +202,7 @@ func applyStaffAdvanceExpense(tx *gorm.DB, userID uuid.UUID, advance *models.Sta
 	if err := tx.Create(&item).Error; err != nil {
 		return err
 	}
-	if err := recordExpenseCashOut(tx, userID, nil, advance.Amount, advance.AdvanceDate, expense.ExpenseNumber, desc); err != nil {
+	if err := recordExpenseCashOut(tx, userID, advance.BankAccountID, advance.Amount, advance.AdvanceDate, expense.ExpenseNumber, desc); err != nil {
 		return err
 	}
 	if err := postExpenseAccounting(tx, userID, &expense); err != nil {

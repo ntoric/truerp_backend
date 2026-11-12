@@ -1710,7 +1710,9 @@ type StaffAdvancePayment struct {
 	IsRecovered           bool           `json:"is_recovered" gorm:"default:false"`
 	RecoveredAmount       float64        `json:"recovered_amount" gorm:"default:0"`
 	PendingAmount         float64        `json:"pending_amount" gorm:"default:0"`
-	PaymentMode           string         `json:"payment_mode"` // cash, bank_transfer, upi, cheque
+	PaymentMode           string         `json:"payment_mode"`                                     // cash, bank_transfer, upi, cheque
+	BankAccountID         *uuid.UUID     `json:"bank_account_id,omitempty" gorm:"type:uuid;index"` // nil = cash in-hand
+	BankAccount           *BankAccount   `json:"bank_account,omitempty" gorm:"foreignKey:BankAccountID"`
 	Reference             string         `json:"reference"`
 	Notes                 string         `json:"notes"`
 	Status                string         `json:"status" gorm:"default:'pending'"` // pending, partial, recovered

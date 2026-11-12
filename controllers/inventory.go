@@ -283,9 +283,10 @@ func GetStockEntries(c *gin.Context) {
 
 	if search := strings.TrimSpace(c.Query("search")); search != "" {
 		like := "%" + strings.ToLower(search) + "%"
+		compact := utils.CompactLikePattern(search)
 		query = query.Where(
-			"LOWER(stock_entries.item_name) LIKE ? OR LOWER(stock_entries.item_code) LIKE ? OR LOWER(stock_entries.batch_no) LIKE ? OR stock_entries.product_id IN (SELECT id FROM products WHERE LOWER(name) LIKE ? OR LOWER(sku) LIKE ?)",
-			like, like, like, like, like,
+			utils.SQLCompactLike("stock_entries.item_name")+" OR LOWER(stock_entries.item_code) LIKE ? OR LOWER(stock_entries.batch_no) LIKE ? OR stock_entries.product_id IN (SELECT id FROM products WHERE "+utils.SQLCompactLike("name")+" OR LOWER(sku) LIKE ?)",
+			compact, like, like, compact, like,
 		)
 	}
 	query = query.Order("entry_date DESC")
@@ -1525,9 +1526,10 @@ func GetInventoryStocks(c *gin.Context) {
 	}
 	if search := strings.TrimSpace(c.Query("search")); search != "" {
 		like := "%" + strings.ToLower(search) + "%"
+		compact := utils.CompactLikePattern(search)
 		query = query.Where(
-			"LOWER(inventory_stocks.batch_no) LIKE ? OR inventory_stocks.product_id IN (SELECT id FROM products WHERE LOWER(name) LIKE ? OR LOWER(sku) LIKE ?)",
-			like, like, like,
+			"LOWER(inventory_stocks.batch_no) LIKE ? OR inventory_stocks.product_id IN (SELECT id FROM products WHERE "+utils.SQLCompactLike("name")+" OR LOWER(sku) LIKE ?)",
+			like, compact, like,
 		)
 	}
 

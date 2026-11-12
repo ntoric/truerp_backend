@@ -81,9 +81,10 @@ func GetProducts(c *gin.Context) {
 		query = query.Where("unit = ?", unit)
 	}
 
-	if search := c.Query("search"); search != "" {
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
 		like := "%" + strings.ToLower(search) + "%"
-		query = query.Where("LOWER(name) LIKE ? OR LOWER(sku) LIKE ? OR LOWER(item_code) LIKE ? OR LOWER(plu) LIKE ? OR LOWER(hsn_code) LIKE ? OR LOWER(category) LIKE ?", like, like, like, like, like, like)
+		compact := utils.CompactLikePattern(search)
+		query = query.Where(utils.SQLCompactLike("name")+" OR LOWER(sku) LIKE ? OR LOWER(item_code) LIKE ? OR LOWER(plu) LIKE ? OR LOWER(hsn_code) LIKE ? OR LOWER(category) LIKE ?", compact, like, like, like, like, like)
 	}
 
 	// Paginated mode (opt-in via page/per_page); per_page <= 0 returns every
@@ -661,9 +662,10 @@ func ExportProductsCSV(c *gin.Context) {
 		query = query.Where("unit = ?", unit)
 	}
 
-	if search := c.Query("search"); search != "" {
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
 		like := "%" + strings.ToLower(search) + "%"
-		query = query.Where("LOWER(name) LIKE ? OR LOWER(sku) LIKE ? OR LOWER(item_code) LIKE ? OR LOWER(plu) LIKE ?", like, like, like, like)
+		compact := utils.CompactLikePattern(search)
+		query = query.Where(utils.SQLCompactLike("name")+" OR LOWER(sku) LIKE ? OR LOWER(item_code) LIKE ? OR LOWER(plu) LIKE ?", compact, like, like, like)
 	}
 
 	if err := query.Order("created_at DESC").Find(&products).Error; err != nil {
@@ -732,9 +734,10 @@ func ExportProductsExcel(c *gin.Context) {
 		query = query.Where("unit = ?", unit)
 	}
 
-	if search := c.Query("search"); search != "" {
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
 		like := "%" + strings.ToLower(search) + "%"
-		query = query.Where("LOWER(name) LIKE ? OR LOWER(sku) LIKE ? OR LOWER(item_code) LIKE ? OR LOWER(plu) LIKE ?", like, like, like, like)
+		compact := utils.CompactLikePattern(search)
+		query = query.Where(utils.SQLCompactLike("name")+" OR LOWER(sku) LIKE ? OR LOWER(item_code) LIKE ? OR LOWER(plu) LIKE ?", compact, like, like, like)
 	}
 
 	if err := query.Order("created_at DESC").Find(&products).Error; err != nil {
