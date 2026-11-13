@@ -354,8 +354,8 @@ func buildPartyBalanceReportPDF(report *PartyBalanceReport) ([]byte, error) {
 	pageW, _ := pdf.GetPageSize()
 	l, _, r, _ := pdf.GetMargins()
 	usable := pageW - l - r
-	cols := []float64{usable * 0.25, usable * 0.09, usable * 0.15, usable * 0.11, usable * 0.11, usable * 0.15, usable * 0.14}
-	heads := []string{"Party", "Type", "Opening", "Debit", "Credit", "Closing", "Difference"}
+	cols := []float64{usable * 0.30, usable * 0.15, usable * 0.12, usable * 0.13, usable * 0.15, usable * 0.15}
+	heads := []string{"Party", "Opening", "Sales", "Collection", "Closing", "Pending Balance"}
 
 	pdf.SetFillColor(243, 244, 246)
 	pdf.SetDrawColor(200, 200, 200)
@@ -363,7 +363,7 @@ func buildPartyBalanceReportPDF(report *PartyBalanceReport) ([]byte, error) {
 	pdf.SetTextColor(40, 40, 40)
 	for i, h := range heads {
 		align := "R"
-		if i < 2 {
+		if i == 0 {
 			align = "L"
 		}
 		ln := 0
@@ -373,34 +373,45 @@ func buildPartyBalanceReportPDF(report *PartyBalanceReport) ([]byte, error) {
 		pdf.CellFormat(cols[i], 8, h, "1", ln, align, true, 0, "")
 	}
 
+	// Dr (party owes you) in red, Cr (you owe the party) in green; the
+	// caller resets to the neutral text colour afterwards.
+	drCrColor := func(v float64) {
+		if v > 0 {
+			pdf.SetTextColor(185, 28, 28)
+		} else if v < 0 {
+			pdf.SetTextColor(21, 128, 61)
+		}
+	}
+
 	pdf.SetFillColor(255, 255, 255)
 	pdf.SetFont("Arial", "", 8)
 	for _, line := range report.Lines {
 		pdf.SetTextColor(40, 40, 40)
-		pdf.CellFormat(cols[0], 6.5, sanitizePDFText(truncatePDF(line.PartyName, 42)), "1", 0, "L", true, 0, "")
-		pdf.CellFormat(cols[1], 6.5, line.PartyType, "1", 0, "L", true, 0, "")
-		pdf.CellFormat(cols[2], 6.5, partyBalanceLabel(line.OpeningBalance), "1", 0, "R", true, 0, "")
-		pdf.CellFormat(cols[3], 6.5, fmt.Sprintf("%.2f", line.Debit), "1", 0, "R", true, 0, "")
-		pdf.CellFormat(cols[4], 6.5, fmt.Sprintf("%.2f", line.Credit), "1", 0, "R", true, 0, "")
-		if line.ClosingBalance > 0 {
-			pdf.SetTextColor(22, 101, 52)
-		} else if line.ClosingBalance < 0 {
-			pdf.SetTextColor(153, 27, 27)
-		}
-		pdf.CellFormat(cols[5], 6.5, partyBalanceLabel(line.ClosingBalance), "1", 0, "R", true, 0, "")
+		pdf.CellFormat(cols[0], 6.5, sanitizePDFText(truncatePDF(line.PartyName, 50)), "1", 0, "L", true, 0, "")
+		drCrColor(line.OpeningBalance)
+		pdf.CellFormat(cols[1], 6.5, partyBalanceLabel(line.OpeningBalance), "1", 0, "R", true, 0, "")
 		pdf.SetTextColor(40, 40, 40)
-		pdf.CellFormat(cols[6], 6.5, fmt.Sprintf("%+.2f", line.Difference), "1", 1, "R", true, 0, "")
+		pdf.CellFormat(cols[2], 6.5, fmt.Sprintf("%.2f", line.Debit), "1", 0, "R", true, 0, "")
+		pdf.CellFormat(cols[3], 6.5, fmt.Sprintf("%.2f", line.Credit), "1", 0, "R", true, 0, "")
+		drCrColor(line.ClosingBalance)
+		pdf.CellFormat(cols[4], 6.5, partyBalanceLabel(line.ClosingBalance), "1", 0, "R", true, 0, "")
+		pdf.SetTextColor(40, 40, 40)
+		pdf.CellFormat(cols[5], 6.5, fmt.Sprintf("%+.2f", line.Difference), "1", 1, "R", true, 0, "")
 	}
 
 	pdf.SetFillColor(243, 244, 246)
 	pdf.SetFont("Arial", "B", 8)
 	pdf.SetTextColor(40, 40, 40)
-	pdf.CellFormat(cols[0]+cols[1], 7, fmt.Sprintf("Total (%d parties)", len(report.Lines)), "1", 0, "L", true, 0, "")
-	pdf.CellFormat(cols[2], 7, partyBalanceLabel(report.NetOpening), "1", 0, "R", true, 0, "")
-	pdf.CellFormat(cols[3], 7, fmt.Sprintf("%.2f", report.TotalDebit), "1", 0, "R", true, 0, "")
-	pdf.CellFormat(cols[4], 7, fmt.Sprintf("%.2f", report.TotalCredit), "1", 0, "R", true, 0, "")
-	pdf.CellFormat(cols[5], 7, partyBalanceLabel(report.NetClosing), "1", 0, "R", true, 0, "")
-	pdf.CellFormat(cols[6], 7, fmt.Sprintf("%+.2f", report.NetDifference), "1", 1, "R", true, 0, "")
+	pdf.CellFormat(cols[0], 7, fmt.Sprintf("Total (%d parties)", len(report.Lines)), "1", 0, "L", true, 0, "")
+	drCrColor(report.NetOpening)
+	pdf.CellFormat(cols[1], 7, partyBalanceLabel(report.NetOpening), "1", 0, "R", true, 0, "")
+	pdf.SetTextColor(40, 40, 40)
+	pdf.CellFormat(cols[2], 7, fmt.Sprintf("%.2f", report.TotalDebit), "1", 0, "R", true, 0, "")
+	pdf.CellFormat(cols[3], 7, fmt.Sprintf("%.2f", report.TotalCredit), "1", 0, "R", true, 0, "")
+	drCrColor(report.NetClosing)
+	pdf.CellFormat(cols[4], 7, partyBalanceLabel(report.NetClosing), "1", 0, "R", true, 0, "")
+	pdf.SetTextColor(40, 40, 40)
+	pdf.CellFormat(cols[5], 7, fmt.Sprintf("%+.2f", report.NetDifference), "1", 1, "R", true, 0, "")
 
 	pdf.Ln(6)
 	pdf.SetFont("Arial", "I", 8)
