@@ -27,11 +27,13 @@ import (
 // documents are excluded). Parties whose opening AND closing balances are both
 // zero are omitted.
 //
-// Balances follow the Party Statement (Ledger) rules exactly, so each line
-// reconciles with that party's ledger for the same date: positive = the party
-// owes the business (receivable), negative = the business owes the party
-// (payable). Instead of loading every document per party, each document type is
-// aggregated with one grouped query.
+// Balances are anchored on the party's stored balance (parties.balance, the
+// figure shown on the party list), so today's closing equals that value. For an
+// earlier date the documents dated after it are rolled back off the stored
+// balance; the day's movement is then rolled back to get the opening. Positive
+// = the party owes the business (receivable), negative = the business owes the
+// party (payable). Instead of loading every document per party, each document
+// type is aggregated with one grouped query.
 // -----------------------------------------------------------------------------
 
 type PartyBalanceLine struct {
@@ -86,25 +88,23 @@ var partyBalanceSources = []partyBalanceSource{
 }
 
 type partyBalanceAgg struct {
-	before   float64 // net (debit - credit) dated before the report day
-	debit    float64 // debits dated on the report day
-	credit   float64 // credits dated on the report day
-	docCount int64   // all qualifying documents regardless of date
+	after  float64 // net (debit - credit) dated after the report day
+	debit  float64 // debits dated on the report day
+	credit float64 // credits dated on the report day
 }
 
 func aggregatePartyBalances(db *gorm.DB, userID uuid.UUID, date string) (map[uuid.UUID]*partyBalanceAgg, error) {
 	out := make(map[uuid.UUID]*partyBalanceAgg)
 	for _, src := range partyBalanceSources {
 		var rows []struct {
-			PartyID uuid.UUID
-			Before  float64
-			OnDay   float64
-			Cnt     int64
+			PartyID  uuid.UUID
+			AfterDay float64
+			OnDay    float64
 		}
 		dateExpr := "DATE(" + src.dateCol + ")"
 		sel := fmt.Sprintf(
-			"party_id, COALESCE(SUM(CASE WHEN %[1]s < ? THEN %[2]s ELSE 0 END), 0) AS before, "+
-				"COALESCE(SUM(CASE WHEN %[1]s = ? THEN %[2]s ELSE 0 END), 0) AS on_day, COUNT(*) AS cnt",
+			"party_id, COALESCE(SUM(CASE WHEN %[1]s > ? THEN %[2]s ELSE 0 END), 0) AS after_day, "+
+				"COALESCE(SUM(CASE WHEN %[1]s = ? THEN %[2]s ELSE 0 END), 0) AS on_day",
 			dateExpr, src.amount)
 		args := append([]interface{}{userID}, src.args...)
 		err := db.Model(src.model).
@@ -121,13 +121,12 @@ func aggregatePartyBalances(db *gorm.DB, userID uuid.UUID, date string) (map[uui
 				a = &partyBalanceAgg{}
 				out[r.PartyID] = a
 			}
-			a.before += src.sign * r.Before
+			a.after += src.sign * r.AfterDay
 			if src.sign > 0 {
 				a.debit += r.OnDay
 			} else {
 				a.credit += r.OnDay
 			}
-			a.docCount += r.Cnt
 		}
 	}
 	return out, nil
@@ -175,13 +174,10 @@ func loadPartyBalanceReport(userID uuid.UUID, date, partyType, search string) (*
 		if a == nil {
 			a = &partyBalanceAgg{}
 		}
-		opening := p.OpeningBalance
-		if opening == 0 && a.docCount == 0 {
-			// Imported closing balance with no documents (same as the ledger).
-			opening = p.Balance
-		}
-		opening = round(opening + a.before)
-		closing := round(opening + a.debit - a.credit)
+		// Stored balance minus everything dated after the day = closing;
+		// minus the day's own movement = opening.
+		closing := round(p.Balance - a.after)
+		opening := round(closing - a.debit + a.credit)
 		if opening == 0 && closing == 0 {
 			continue
 		}

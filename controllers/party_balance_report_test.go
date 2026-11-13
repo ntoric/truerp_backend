@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestPartyBalanceReportMatchesLedgerAndSkipsZero(t *testing.T) {
+func TestPartyBalanceReportUsesStoredBalanceAndSkipsZero(t *testing.T) {
 	db := openPartyLedgerTestDB(t)
 	userID := uuid.New()
 	day := func(d int) time.Time { return time.Date(2026, 9, d, 10, 0, 0, 0, time.UTC) }
@@ -19,12 +19,17 @@ func TestPartyBalanceReportMatchesLedgerAndSkipsZero(t *testing.T) {
 		}
 	}
 
-	customer := models.Party{ID: uuid.New(), UserID: userID, Name: "Customer A", PartyType: "customer", OpeningBalance: 1000}
-	vendor := models.Party{ID: uuid.New(), UserID: userID, Name: "Vendor B", PartyType: "vendor"}
+	// Stored balances = opening + all documents (incl. the future-dated
+	// invoice 2): 1000 + 5000 - 1900 - 450 + 9999.
+	customer := models.Party{ID: uuid.New(), UserID: userID, Name: "Customer A", PartyType: "customer", OpeningBalance: 1000, Balance: 13649}
+	vendor := models.Party{ID: uuid.New(), UserID: userID, Name: "Vendor B", PartyType: "vendor", Balance: -2000}
 	settled := models.Party{ID: uuid.New(), UserID: userID, Name: "Zero C", PartyType: "customer"}
 	imported := models.Party{ID: uuid.New(), UserID: userID, Name: "Imported D", PartyType: "customer", Balance: 750}
-	otherUser := models.Party{ID: uuid.New(), UserID: uuid.New(), Name: "Other", PartyType: "customer", OpeningBalance: 99}
-	for _, p := range []*models.Party{&customer, &vendor, &settled, &imported, &otherUser} {
+	// Drifted: stored balance disagrees with opening + documents — the report
+	// follows the stored balance, not the recomputed one.
+	drifted := models.Party{ID: uuid.New(), UserID: userID, Name: "Drifted E", PartyType: "customer", OpeningBalance: 100, Balance: 1234}
+	otherUser := models.Party{ID: uuid.New(), UserID: uuid.New(), Name: "Other", PartyType: "customer", OpeningBalance: 99, Balance: 99}
+	for _, p := range []*models.Party{&customer, &vendor, &settled, &imported, &drifted, &otherUser} {
 		mk(p)
 	}
 
@@ -48,8 +53,8 @@ func TestPartyBalanceReportMatchesLedgerAndSkipsZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if len(report.Lines) != 3 {
-		t.Fatalf("want 3 lines (zero-balance party skipped), got %d: %+v", len(report.Lines), report.Lines)
+	if len(report.Lines) != 4 {
+		t.Fatalf("want 4 lines (zero-balance party skipped), got %d: %+v", len(report.Lines), report.Lines)
 	}
 
 	byName := map[string]PartyBalanceLine{}
@@ -70,6 +75,7 @@ func TestPartyBalanceReportMatchesLedgerAndSkipsZero(t *testing.T) {
 	check("Customer A", 6000, 0, 2350, 3650)
 	check("Vendor B", -3000, 1000, 0, -2000)
 	check("Imported D", 750, 0, 0, 750)
+	check("Drifted E", 1234, 0, 0, 1234)
 	if byName["Customer A"].Difference != -2350 || byName["Vendor B"].Difference != 1000 || byName["Imported D"].Difference != 0 {
 		t.Fatalf("difference: %+v", report.Lines)
 	}
@@ -77,7 +83,8 @@ func TestPartyBalanceReportMatchesLedgerAndSkipsZero(t *testing.T) {
 		t.Fatalf("net difference: %v", report.NetDifference)
 	}
 
-	// Each line reconciles with the party ledger for the same day.
+	// Parties whose stored balance is consistent with their documents
+	// reconcile with the party ledger for the same day.
 	for _, p := range []models.Party{customer, vendor, imported} {
 		ledger, err := loadPartyLedger(userID, p.ID, "2026-09-05", "2026-09-05")
 		if err != nil {
@@ -89,8 +96,8 @@ func TestPartyBalanceReportMatchesLedgerAndSkipsZero(t *testing.T) {
 		}
 	}
 
-	if report.OpeningReceivable != 6750 || report.OpeningPayable != 3000 ||
-		report.ClosingReceivable != 4400 || report.ClosingPayable != 2000 {
+	if report.OpeningReceivable != 7984 || report.OpeningPayable != 3000 ||
+		report.ClosingReceivable != 5634 || report.ClosingPayable != 2000 {
 		t.Fatalf("totals: %+v", report)
 	}
 
