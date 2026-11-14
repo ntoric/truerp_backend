@@ -230,9 +230,9 @@ func partyBalanceReportFromRequest(c *gin.Context) (*PartyBalanceReport, bool) {
 func partyBalanceLabel(v float64) string {
 	switch {
 	case v > 0:
-		return fmt.Sprintf("%.2f Dr", v)
+		return fmt.Sprintf("%.2f Cr", v)
 	case v < 0:
-		return fmt.Sprintf("%.2f Cr", -v)
+		return fmt.Sprintf("%.2f Dr", -v)
 	default:
 		return "0.00"
 	}
@@ -373,13 +373,14 @@ func buildPartyBalanceReportPDF(report *PartyBalanceReport) ([]byte, error) {
 		pdf.CellFormat(cols[i], 8, h, "1", ln, align, true, 0, "")
 	}
 
-	// Dr (party owes you) in red, Cr (you owe the party) in green; the
-	// caller resets to the neutral text colour afterwards.
+	// Cr (party owes you) in green, Dr (you owe the party) in red — also
+	// used for Pending Balance (positive green, negative red). The caller
+	// resets to the neutral text colour afterwards.
 	drCrColor := func(v float64) {
 		if v > 0 {
-			pdf.SetTextColor(185, 28, 28)
-		} else if v < 0 {
 			pdf.SetTextColor(21, 128, 61)
+		} else if v < 0 {
+			pdf.SetTextColor(185, 28, 28)
 		}
 	}
 
@@ -396,6 +397,7 @@ func buildPartyBalanceReportPDF(report *PartyBalanceReport) ([]byte, error) {
 		drCrColor(line.ClosingBalance)
 		pdf.CellFormat(cols[4], 6.5, partyBalanceLabel(line.ClosingBalance), "1", 0, "R", true, 0, "")
 		pdf.SetTextColor(40, 40, 40)
+		drCrColor(line.Difference)
 		pdf.CellFormat(cols[5], 6.5, fmt.Sprintf("%+.2f", line.Difference), "1", 1, "R", true, 0, "")
 	}
 
@@ -411,12 +413,13 @@ func buildPartyBalanceReportPDF(report *PartyBalanceReport) ([]byte, error) {
 	drCrColor(report.NetClosing)
 	pdf.CellFormat(cols[4], 7, partyBalanceLabel(report.NetClosing), "1", 0, "R", true, 0, "")
 	pdf.SetTextColor(40, 40, 40)
+	drCrColor(report.NetDifference)
 	pdf.CellFormat(cols[5], 7, fmt.Sprintf("%+.2f", report.NetDifference), "1", 1, "R", true, 0, "")
 
 	pdf.Ln(6)
 	pdf.SetFont("Arial", "I", 8)
 	pdf.SetTextColor(140, 140, 140)
-	pdf.MultiCell(0, 4.5, "Dr = party owes you (receivable); Cr = you owe the party (payable). Opening is the close of the previous day; closing is the end of the selected day. Parties with zero opening and closing balance are omitted. Generated from TruERP.", "", "L", false)
+	pdf.MultiCell(0, 4.5, "Cr = party owes you (receivable); Dr = you owe the party (payable). Opening is the close of the previous day; closing is the end of the selected day. Parties with zero opening and closing balance are omitted. Generated from TruERP.", "", "L", false)
 
 	var buf bytes.Buffer
 	if err := pdf.Output(&buf); err != nil {
