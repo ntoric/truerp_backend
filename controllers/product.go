@@ -105,7 +105,30 @@ func GetProducts(c *gin.Context) {
 		}
 	}
 
-	findQuery := query.Order("created_at DESC")
+	dir := "DESC"
+	if strings.EqualFold(c.Query("order"), "asc") {
+		dir = "ASC"
+	}
+	findQuery := query.Session(&gorm.Session{})
+	switch c.Query("sort") {
+	case "name":
+		findQuery = findQuery.Order("LOWER(name) " + dir)
+	case "category":
+		findQuery = findQuery.Order("LOWER(category) " + dir)
+	case "sale_price":
+		findQuery = findQuery.Order("sale_price " + dir)
+	case "purchase_price":
+		findQuery = findQuery.Order("purchase_price " + dir)
+	case "stock":
+		// Stock is the same aggregate the response exposes as stock_qty.
+		stockQtySQL := fmt.Sprintf(
+			"(SELECT COALESCE(SUM(available_qty), 0) FROM inventory_stocks WHERE inventory_stocks.product_id = products.id AND inventory_stocks.user_id = '%s')",
+			userID,
+		)
+		findQuery = findQuery.Order(stockQtySQL + " " + dir)
+	default:
+		findQuery = findQuery.Order("created_at DESC")
+	}
 	if paginated && perPage > 0 {
 		findQuery = findQuery.Limit(perPage).Offset((page - 1) * perPage)
 	}

@@ -57,6 +57,7 @@ func SetupRoutes(r *gin.Engine) {
 	{
 		invoices.GET("", controllers.GetInvoices)
 		invoices.POST("", controllers.CreateInvoice)
+		invoices.POST("/:id/whatsapp", controllers.SendInvoiceWhatsApp)
 		invoices.POST("/check-stock", controllers.CheckInvoiceStock)
 		invoices.POST("/import/csv", controllers.ImportInvoicesCSV)
 		invoices.GET("/stats", controllers.GetInvoiceStats)
@@ -798,6 +799,12 @@ func SetupRoutes(r *gin.Engine) {
 		settings.GET("/attendance-reminder", controllers.GetAttendanceReminderSettings)
 		settings.PUT("/attendance-reminder", controllers.UpdateAttendanceReminderSettings)
 
+		// WhatsApp invoice message (WhatsApp Cloud API), per store
+		settings.GET("/whatsapp-invoice", controllers.GetWhatsAppInvoiceSettings)
+		settings.PUT("/whatsapp-invoice", controllers.UpdateWhatsAppInvoiceSettings)
+		settings.POST("/whatsapp-invoice/test", controllers.TestWhatsAppInvoice)
+		settings.GET("/whatsapp-invoice/logs", controllers.GetWhatsAppInvoiceLogs)
+
 		// Reminders
 		settings.GET("/reminders", controllers.GetReminders)
 		settings.POST("/reminders", controllers.CreateReminder)
@@ -1095,6 +1102,9 @@ func SetupRoutes(r *gin.Engine) {
 		customerPortalAdmin.GET("/tickets", controllers.AdminListSupportTickets)
 		customerPortalAdmin.PUT("/tickets/:id", controllers.AdminUpdateSupportTicket)
 	}
+
+	// Signed, expiring public invoice PDF link (WhatsApp document attachment)
+	r.GET("/api/v1/public/invoice-pdf/:token", controllers.PublicInvoicePDF)
 
 	// Customer portal — public & customer session
 	portalPublic := r.Group("/api/v1/portal")

@@ -3240,3 +3240,63 @@ type ProfitDistribution struct {
 	UpdatedAt          time.Time      `json:"updated_at"`
 	DeletedAt          gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
+
+// WhatsAppInvoiceSettings configures the automatic "purchase summary"
+// WhatsApp message (with the invoice PDF attached) sent to a customer when a
+// sales invoice is created. One row per store-owner scope (user_id), so each
+// store enables/configures it independently.
+type WhatsAppInvoiceSettings struct {
+	ID      uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID  uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
+	Enabled bool      `json:"enabled" gorm:"default:false"`
+	// Provider is the WhatsApp gateway. Only "whatsapp_cloud" (Meta) is
+	// supported today.
+	Provider string `json:"provider" gorm:"default:'whatsapp_cloud'"`
+	// MessageID is the approved template's name in WhatsApp Manager.
+	MessageID string `json:"message_id"`
+	// PhoneNumberID is the sender's WhatsApp Business phone number ID from
+	// Meta → WhatsApp → API Setup.
+	PhoneNumberID string `json:"phone_number_id"`
+	// LanguageCode is the template's language (e.g. en, en_US, hi).
+	LanguageCode string `json:"language_code" gorm:"default:'en'"`
+	// VariableMapping is a comma-separated list of field keys; position N
+	// fills template variable {{N}}. See whatsAppInvoiceFields.
+	VariableMapping string `json:"variable_mapping"`
+	// StoreDisplayName overrides the business/store name used by the
+	// store_name field. Empty = use the store name.
+	StoreDisplayName string `json:"store_display_name"`
+	// AttachPDF sends the invoice PDF as the template's document header.
+	AttachPDF bool `json:"attach_pdf" gorm:"default:true"`
+	// PublicBaseURL is this backend's internet-reachable origin (e.g.
+	// https://api.example.com) used to build the PDF link WhatsApp downloads.
+	PublicBaseURL string `json:"public_base_url"`
+	// CountryCode is prefixed to 10-digit customer numbers.
+	CountryCode   string `json:"country_code" gorm:"default:'91'"`
+	SendForPOS    bool   `json:"send_for_pos" gorm:"default:true"`
+	SendForNonPOS bool   `json:"send_for_non_pos" gorm:"default:true"`
+	// PDFLinkTTLMinutes is how long the signed invoice PDF link stays valid.
+	// Editable by super admins only. 0 = default (60).
+	PDFLinkTTLMinutes int `json:"pdf_link_ttl_minutes" gorm:"default:60"`
+
+	EncryptedAPIKey string `json:"-" gorm:"column:api_key"`
+
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// WhatsAppInvoiceLog records each invoice WhatsApp send attempt.
+type WhatsAppInvoiceLog struct {
+	ID            uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID        uuid.UUID `json:"user_id" gorm:"type:uuid;not null;index"`
+	InvoiceID     uuid.UUID `json:"invoice_id" gorm:"type:uuid;index"`
+	InvoiceNumber string    `json:"invoice_number"`
+	PartyName     string    `json:"party_name"`
+	Phone         string    `json:"phone"`
+	Trigger       string    `json:"trigger"` // auto, manual, test
+	Status        string    `json:"status"`  // sent, failed, skipped
+	RequestID     string    `json:"request_id"`
+	Error         string    `json:"error" gorm:"type:text"`
+	Response      string    `json:"response" gorm:"type:text"`
+	CreatedAt     time.Time `json:"created_at" gorm:"index"`
+}

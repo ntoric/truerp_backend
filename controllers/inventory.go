@@ -65,6 +65,9 @@ func GetStockBalance(c *gin.Context) {
 	if outletID != "" {
 		query = query.Where("outlet_id = ?", outletID)
 	}
+	if category := c.Query("category"); category != "" && category != "all" {
+		query = query.Where("product_id IN (SELECT id FROM products WHERE user_id = ? AND category = ?)", userID, category)
+	}
 
 	if err := query.Find(&stocks).Error; err != nil {
 		fmt.Printf("[DEBUG] GetStockBalance - DB error: %v\n", err)
@@ -264,6 +267,10 @@ func GetStockEntries(c *gin.Context) {
 
 	if outletID != "" {
 		query = query.Where("outlet_id = ?", outletID)
+	}
+
+	if category := c.Query("category"); category != "" && category != "all" {
+		query = query.Where("stock_entries.product_id IN (SELECT id FROM products WHERE user_id = ? AND category = ?)", userID, category)
 	}
 
 	if approvalStatus != "" {
@@ -1514,6 +1521,9 @@ func GetInventoryStocks(c *gin.Context) {
 	if batchNo != "" {
 		query = query.Where("batch_no = ?", batchNo)
 	}
+	if category := c.Query("category"); category != "" && category != "all" {
+		query = query.Where("inventory_stocks.product_id IN (SELECT id FROM products WHERE user_id = ? AND category = ?)", userID, category)
+	}
 	if availableOnly {
 		query = query.Where("available_qty > 0")
 	}
@@ -2065,6 +2075,13 @@ func GetLowStockAlerts(c *gin.Context) {
 		INNER JOIN inventory_stocks s ON p.id = s.product_id
 		LEFT JOIN warehouses w ON s.outlet_id = w.id
 		WHERE p.user_id = ? AND p.deleted_at IS NULL AND p.low_stock_alert = true
+	`
+	args := []interface{}{userID}
+	if category := c.Query("category"); category != "" && category != "all" {
+		baseQuery += " AND p.category = ?"
+		args = append(args, category)
+	}
+	baseQuery += `
 		GROUP BY p.id, p.name, p.sku, p.min_stock, s.outlet_id, w.name
 		HAVING SUM(s.quantity) <= p.min_stock
 	`
@@ -2080,19 +2097,19 @@ func GetLowStockAlerts(c *gin.Context) {
 		perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "25"))
 
 		var total int64
-		if err := utils.DB.Raw("SELECT COUNT(*) FROM ("+baseQuery+") consolidated", userID).Scan(&total).Error; err != nil {
+		if err := utils.DB.Raw("SELECT COUNT(*) FROM ("+baseQuery+") consolidated", args...).Scan(&total).Error; err != nil {
 			fmt.Printf("[DEBUG] GetLowStockAlerts - count error: %v\n", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch low stock alerts"})
 			return
 		}
 
 		pageQuery := baseQuery + " ORDER BY product_name ASC, outlet_name ASC"
-		args := []interface{}{userID}
+		pageArgs := append([]interface{}{}, args...)
 		if perPage > 0 {
 			pageQuery += " LIMIT ? OFFSET ?"
-			args = append(args, perPage, (page-1)*perPage)
+			pageArgs = append(pageArgs, perPage, (page-1)*perPage)
 		}
-		if err := utils.DB.Raw(pageQuery, args...).Scan(&results).Error; err != nil {
+		if err := utils.DB.Raw(pageQuery, pageArgs...).Scan(&results).Error; err != nil {
 			fmt.Printf("[DEBUG] GetLowStockAlerts - DB error: %v\n", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch low stock alerts"})
 			return
@@ -2108,7 +2125,7 @@ func GetLowStockAlerts(c *gin.Context) {
 		return
 	}
 
-	if err := utils.DB.Raw(baseQuery, userID).Scan(&results).Error; err != nil {
+	if err := utils.DB.Raw(baseQuery, args...).Scan(&results).Error; err != nil {
 		fmt.Printf("[DEBUG] GetLowStockAlerts - DB error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch low stock alerts"})
 		return

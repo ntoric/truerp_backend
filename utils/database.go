@@ -195,6 +195,8 @@ func allApplicationModels() []interface{} {
 		&models.EmailRecipient{},
 		&models.WhatsAppMarketing{},
 		&models.WhatsAppRecipient{},
+		&models.WhatsAppInvoiceSettings{},
+		&models.WhatsAppInvoiceLog{},
 		&models.IPRestriction{},
 		&models.DataBackup{},
 		&models.GDPRRequest{},

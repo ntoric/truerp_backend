@@ -1025,6 +1025,8 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 			&models.EmailMarketing{},
 			&models.SMSMarketing{},
 			&models.WhatsAppMarketing{},
+			&models.WhatsAppInvoiceSettings{},
+			&models.WhatsAppInvoiceLog{},
 			&models.LoyaltyTransaction{},
 			&models.LoyaltySettings{},
 			&models.PrintSettings{},

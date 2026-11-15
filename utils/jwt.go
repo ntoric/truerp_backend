@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"errors"
 	"time"
 
@@ -70,4 +72,12 @@ func ParseToken(tokenString string) (*Claims, error) {
 		return claims, nil
 	}
 	return nil, errors.New("invalid token claims")
+}
+
+// SignHMAC returns an HMAC-SHA256 of data keyed by the server secret and a
+// purpose label, for short unguessable public links (e.g. invoice PDFs).
+func SignHMAC(purpose string, data []byte) []byte {
+	mac := hmac.New(sha256.New, append(append([]byte{}, jwtSecret...), []byte("|"+purpose)...))
+	mac.Write(data)
+	return mac.Sum(nil)
 }

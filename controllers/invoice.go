@@ -504,6 +504,10 @@ func CreateInvoice(c *gin.Context) {
 	)
 
 	attachInvoicePaymentSplits(utils.DB, &invoice)
+
+	// Store-configured WhatsApp purchase summary + invoice PDF (async).
+	queueInvoiceWhatsApp(userID, &invoice)
+
 	c.JSON(http.StatusCreated, invoice)
 }
 
