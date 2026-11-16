@@ -16,15 +16,16 @@ import (
 )
 
 // ExportPartiesPDF renders every party matching the list filters (search,
-// category, party_type) as a landscape A4 PDF table.
+// category, party_type, balance) as a landscape A4 PDF table.
 func ExportPartiesPDF(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 	search := c.Query("search")
 	category := c.Query("category")
 	partyType := c.Query("party_type")
+	balance := c.Query("balance")
 
 	parties := make([]models.Party, 0)
-	if err := partyFilterQuery(userID, search, category, partyType).Order("name ASC").Find(&parties).Error; err != nil {
+	if err := partyFilterQuery(userID, search, category, partyType, balance).Order("name ASC").Find(&parties).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch parties"})
 		return
 	}

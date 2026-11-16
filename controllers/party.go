@@ -15,7 +15,9 @@ import (
 
 // partyFilterQuery builds the list query shared by GetParties and the bulk
 // endpoints so "all matching" bulk actions target the same rows the user sees.
-func partyFilterQuery(userID uuid.UUID, search, category, partyType string) *gorm.DB {
+// balance narrows by outstanding direction: "to_collect" (balance > 0) or
+// "to_pay" (balance < 0), matching the arrows shown in the list.
+func partyFilterQuery(userID uuid.UUID, search, category, partyType, balance string) *gorm.DB {
 	query := utils.DB.Model(&models.Party{}).Where("user_id = ?", userID)
 
 	if search != "" {
@@ -28,6 +30,12 @@ func partyFilterQuery(userID uuid.UUID, search, category, partyType string) *gor
 	if partyType != "" {
 		query = query.Where("party_type = ?", partyType)
 	}
+	switch balance {
+	case "to_collect":
+		query = query.Where("balance > 0")
+	case "to_pay":
+		query = query.Where("balance < 0")
+	}
 	return query
 }
 
@@ -37,6 +45,7 @@ type PartyBulkFilters struct {
 	Search    string `json:"search"`
 	Category  string `json:"category"`
 	PartyType string `json:"party_type"`
+	Balance   string `json:"balance"`
 }
 
 func GetParties(c *gin.Context) {
@@ -44,6 +53,7 @@ func GetParties(c *gin.Context) {
 	search := c.Query("search")
 	category := c.Query("category")
 	partyType := c.Query("party_type")
+	balance := c.Query("balance")
 
 	fmt.Printf("[DEBUG] GetParties - UserID: %s, Search: %s, Category: %s, PartyType: %s\n", userID, search, category, partyType)
 
@@ -52,7 +62,7 @@ func GetParties(c *gin.Context) {
 	}
 
 	var parties []models.Party
-	query := partyFilterQuery(userID, search, category, partyType).Order("name ASC")
+	query := partyFilterQuery(userID, search, category, partyType, balance).Order("name ASC")
 	parties = make([]models.Party, 0)
 
 	// Paginated mode (opt-in via page/per_page); per_page <= 0 returns every
@@ -375,7 +385,7 @@ func BulkDeleteParties(c *gin.Context) {
 
 	var query *gorm.DB
 	if input.AllMatching {
-		query = partyFilterQuery(userID, input.Filters.Search, input.Filters.Category, input.Filters.PartyType)
+		query = partyFilterQuery(userID, input.Filters.Search, input.Filters.Category, input.Filters.PartyType, input.Filters.Balance)
 		// Never mass-delete the system default vendor.
 		query = query.Where("NOT (party_type = ? AND LOWER(TRIM(name)) = ?)", "vendor", strings.ToLower(utils.DefaultVendorName))
 	} else {
@@ -411,7 +421,7 @@ func BulkUpdatePartyCategory(c *gin.Context) {
 
 	var query *gorm.DB
 	if input.AllMatching {
-		query = partyFilterQuery(userID, input.Filters.Search, input.Filters.Category, input.Filters.PartyType)
+		query = partyFilterQuery(userID, input.Filters.Search, input.Filters.Category, input.Filters.PartyType, input.Filters.Balance)
 	} else {
 		if len(input.IDs) == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "ids are required"})

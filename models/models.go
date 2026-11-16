@@ -3249,13 +3249,14 @@ type WhatsAppInvoiceSettings struct {
 	ID      uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID  uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
 	Enabled bool      `json:"enabled" gorm:"default:false"`
-	// Provider is the WhatsApp gateway. Only "whatsapp_cloud" (Meta) is
-	// supported today.
+	// Provider is the WhatsApp gateway: "whatsapp_cloud" (Meta directly) or
+	// "fast2sms" (Fast2SMS's Meta-format WhatsApp API). EncryptedAPIKey holds
+	// the Meta access token or the Fast2SMS API key accordingly.
 	Provider string `json:"provider" gorm:"default:'whatsapp_cloud'"`
 	// MessageID is the approved template's name in WhatsApp Manager.
 	MessageID string `json:"message_id"`
 	// PhoneNumberID is the sender's WhatsApp Business phone number ID from
-	// Meta → WhatsApp → API Setup.
+	// Meta → WhatsApp → API Setup, or the Fast2SMS WhatsApp Manager.
 	PhoneNumberID string `json:"phone_number_id"`
 	// LanguageCode is the template's language (e.g. en, en_US, hi).
 	LanguageCode string `json:"language_code" gorm:"default:'en'"`

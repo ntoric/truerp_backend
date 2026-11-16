@@ -104,7 +104,7 @@ func TestNormalizeWhatsAppVariableMapping(t *testing.T) {
 	}
 }
 
-func TestCallWhatsAppCloud(t *testing.T) {
+func TestCallWhatsAppAPICloud(t *testing.T) {
 	var gotPath, gotAuth string
 	var gotBody map[string]interface{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +136,7 @@ func TestCallWhatsAppCloud(t *testing.T) {
 			},
 		},
 	}
-	msgID, _, err := callWhatsAppCloud("12345", "TOKEN", payload)
+	msgID, _, err := callWhatsAppAPI(whatsAppProviderCloud, "12345", "TOKEN", payload)
 	if err != nil || msgID != "wamid.abc123" {
 		t.Fatalf("expected success, got id=%q err=%v", msgID, err)
 	}
@@ -152,8 +152,71 @@ func TestCallWhatsAppCloud(t *testing.T) {
 	}
 
 	payload["to"] = "910000000000"
-	_, _, err = callWhatsAppCloud("12345", "TOKEN", payload)
+	_, _, err = callWhatsAppAPI(whatsAppProviderCloud, "12345", "TOKEN", payload)
 	if err == nil || !strings.Contains(err.Error(), "Invalid phone number") {
 		t.Fatalf("expected gateway error, got %v", err)
+	}
+}
+
+func TestCallWhatsAppAPIFast2SMS(t *testing.T) {
+	var gotPath, gotAuth string
+	var gotBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		switch gotBody["to"] {
+		case "910000000000":
+			// Fast2SMS-native error with HTTP 200.
+			_, _ = w.Write([]byte(`{"return":false,"status_code":412,"message":"Invalid Authentication, Check Authorization Key"}`))
+		case "910000000001":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"return":false,"message":["Template not approved"]}`))
+		default:
+			_, _ = w.Write([]byte(`{"messaging_product":"whatsapp","contacts":[{"input":"919876543210","wa_id":"919876543210"}],"messages":[{"id":"wamid.f2s","message_status":"accepted"}]}`))
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("FAST2SMS_WHATSAPP_API_BASE", srv.URL+"/dev/whatsapp/v26.0")
+	t.Setenv("WHATSAPP_CLOUD_API_BASE", "http://127.0.0.1:1") // must not be used
+
+	payload := map[string]interface{}{
+		"messaging_product": "whatsapp",
+		"to":                "919876543210",
+		"type":              "template",
+		"template":          map[string]interface{}{"name": "purchase_summary", "language": map[string]interface{}{"code": "en"}},
+	}
+	msgID, _, err := callWhatsAppAPI(whatsAppProviderFast2SMS, "555", "F2SKEY", payload)
+	if err != nil || msgID != "wamid.f2s" {
+		t.Fatalf("expected success, got id=%q err=%v", msgID, err)
+	}
+	if gotPath != "/dev/whatsapp/v26.0/555/messages" {
+		t.Fatalf("unexpected endpoint path: %s", gotPath)
+	}
+	if gotAuth != "F2SKEY" {
+		t.Fatalf("Fast2SMS expects the bare API key, got auth header %q", gotAuth)
+	}
+
+	payload["to"] = "910000000000"
+	if _, _, err = callWhatsAppAPI(whatsAppProviderFast2SMS, "555", "F2SKEY", payload); err == nil || !strings.Contains(err.Error(), "Invalid Authentication") {
+		t.Fatalf("expected Fast2SMS return:false error, got %v", err)
+	}
+	payload["to"] = "910000000001"
+	if _, _, err = callWhatsAppAPI(whatsAppProviderFast2SMS, "555", "F2SKEY", payload); err == nil || !strings.Contains(err.Error(), "Template not approved") {
+		t.Fatalf("expected Fast2SMS array message error, got %v", err)
+	}
+}
+
+func TestNormalizeWhatsAppProvider(t *testing.T) {
+	cases := map[string]string{
+		"":               whatsAppProviderCloud,
+		"whatsapp_cloud": whatsAppProviderCloud,
+		" Fast2SMS ":     whatsAppProviderFast2SMS,
+		"unknown":        whatsAppProviderCloud,
+	}
+	for in, want := range cases {
+		if got := normalizeWhatsAppProvider(in); got != want {
+			t.Fatalf("normalizeWhatsAppProvider(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

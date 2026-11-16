@@ -25,11 +25,18 @@ import (
 )
 
 // Automatic WhatsApp "purchase summary" message (with invoice PDF) sent to the
-// customer through Meta's WhatsApp Cloud API when a sales invoice is
-// created. Configured and toggled per store (store-owner user_id scope).
+// customer when a sales invoice is created. Each store picks its gateway:
+// Meta's WhatsApp Cloud API directly, or Fast2SMS's Meta-format WhatsApp API.
+// Both take the same template payload; they differ only in endpoint, auth
+// header and error format. Configured and toggled per store (store-owner
+// user_id scope).
 
 const (
+	whatsAppProviderCloud    = "whatsapp_cloud"
+	whatsAppProviderFast2SMS = "fast2sms"
+
 	defaultWhatsAppCloudAPIBase  = "https://graph.facebook.com/v21.0"
+	defaultFast2SMSWhatsAppBase  = "https://www.fast2sms.com/dev/whatsapp/v26.0"
 	defaultWhatsAppInvoiceFields = "invoice_number,total_amount,invoice_date,points_earned,points_balance,points_redeemed,store_name"
 	defaultPDFLinkTTLMinutes     = 60
 	minPDFLinkTTLMinutes         = 5
@@ -67,11 +74,62 @@ func isKnownWhatsAppInvoiceField(key string) bool {
 	return false
 }
 
-func whatsAppCloudAPIBase() string {
-	if u := strings.TrimSpace(os.Getenv("WHATSAPP_CLOUD_API_BASE")); u != "" {
+type whatsAppProviderInfo struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}
+
+var whatsAppProviders = []whatsAppProviderInfo{
+	{whatsAppProviderCloud, "WhatsApp Cloud API (Meta)"},
+	{whatsAppProviderFast2SMS, "Fast2SMS"},
+}
+
+func isKnownWhatsAppProvider(p string) bool {
+	for _, info := range whatsAppProviders {
+		if info.Key == p {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeWhatsAppProvider maps empty/legacy values to the Meta provider.
+func normalizeWhatsAppProvider(p string) string {
+	p = strings.ToLower(strings.TrimSpace(p))
+	if isKnownWhatsAppProvider(p) {
+		return p
+	}
+	return whatsAppProviderCloud
+}
+
+func whatsAppProviderLabel(p string) string {
+	for _, info := range whatsAppProviders {
+		if info.Key == p {
+			return info.Label
+		}
+	}
+	return p
+}
+
+// whatsAppAPIBase returns the gateway's base URL (overridable per provider
+// via env, e.g. for staging or a newer API version).
+func whatsAppAPIBase(provider string) string {
+	envKey, def := "WHATSAPP_CLOUD_API_BASE", defaultWhatsAppCloudAPIBase
+	if provider == whatsAppProviderFast2SMS {
+		envKey, def = "FAST2SMS_WHATSAPP_API_BASE", defaultFast2SMSWhatsAppBase
+	}
+	if u := strings.TrimSpace(os.Getenv(envKey)); u != "" {
 		return u
 	}
-	return defaultWhatsAppCloudAPIBase
+	return def
+}
+
+// whatsAppCredentialName is the user-facing name of the secret per provider.
+func whatsAppCredentialName(provider string) string {
+	if provider == whatsAppProviderFast2SMS {
+		return "Fast2SMS API key"
+	}
+	return "WhatsApp Cloud API access token"
 }
 
 func loadWhatsAppInvoiceSettings(userID uuid.UUID) (models.WhatsAppInvoiceSettings, bool) {
@@ -79,7 +137,7 @@ func loadWhatsAppInvoiceSettings(userID uuid.UUID) (models.WhatsAppInvoiceSettin
 	if err := utils.DB.Where("user_id = ?", userID).First(&s).Error; err != nil {
 		return models.WhatsAppInvoiceSettings{
 			UserID:            userID,
-			Provider:          "whatsapp_cloud",
+			Provider:          whatsAppProviderCloud,
 			VariableMapping:   defaultWhatsAppInvoiceFields,
 			AttachPDF:         true,
 			CountryCode:       "91",
@@ -89,6 +147,7 @@ func loadWhatsAppInvoiceSettings(userID uuid.UUID) (models.WhatsAppInvoiceSettin
 			PDFLinkTTLMinutes: defaultPDFLinkTTLMinutes,
 		}, false
 	}
+	s.Provider = normalizeWhatsAppProvider(s.Provider)
 	if s.PDFLinkTTLMinutes <= 0 {
 		s.PDFLinkTTLMinutes = defaultPDFLinkTTLMinutes
 	}
@@ -117,6 +176,7 @@ type whatsAppInvoiceSettingsResponse struct {
 	HasAPIKey       bool                   `json:"has_api_key"`
 	APIKeyHint      string                 `json:"api_key_hint"`
 	AvailableFields []whatsAppInvoiceField `json:"available_fields"`
+	Providers       []whatsAppProviderInfo `json:"providers"`
 	DefaultMapping  string                 `json:"default_mapping"`
 	EnvPublicURL    string                 `json:"env_public_base_url"`
 	CanEditLinkTTL  bool                   `json:"can_edit_link_ttl"`
@@ -142,6 +202,7 @@ func buildWhatsAppInvoiceSettingsResponse(c *gin.Context, s models.WhatsAppInvoi
 		HasAPIKey:               s.EncryptedAPIKey != "",
 		APIKeyHint:              hint,
 		AvailableFields:         whatsAppInvoiceFields,
+		Providers:               whatsAppProviders,
 		DefaultMapping:          defaultWhatsAppInvoiceFields,
 		EnvPublicURL:            strings.TrimSpace(os.Getenv("PUBLIC_API_BASE_URL")),
 		CanEditLinkTTL:          isSuperAdminRequest(c),
@@ -163,6 +224,7 @@ func UpdateWhatsAppInvoiceSettings(c *gin.Context) {
 
 	var input struct {
 		Enabled          bool    `json:"enabled"`
+		Provider         string  `json:"provider"`
 		APIKey           *string `json:"api_key"` // nil/"" = keep existing
 		ClearAPIKey      bool    `json:"clear_api_key"`
 		MessageID        string  `json:"message_id"`
@@ -207,9 +269,19 @@ func UpdateWhatsAppInvoiceSettings(c *gin.Context) {
 		languageCode = "en"
 	}
 
+	provider := strings.ToLower(strings.TrimSpace(input.Provider))
+	if provider == "" {
+		provider = whatsAppProviderCloud
+	}
+	if !isKnownWhatsAppProvider(provider) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Unsupported WhatsApp provider %q", input.Provider)})
+		return
+	}
+
 	s, exists := loadWhatsAppInvoiceSettings(userID)
+	providerChanged := exists && s.Provider != provider
 	s.Enabled = input.Enabled
-	s.Provider = "whatsapp_cloud"
+	s.Provider = provider
 	s.MessageID = strings.TrimSpace(input.MessageID)
 	s.PhoneNumberID = strings.TrimSpace(input.PhoneNumberID)
 	s.LanguageCode = languageCode
@@ -234,7 +306,10 @@ func UpdateWhatsAppInvoiceSettings(c *gin.Context) {
 		s.PDFLinkTTLMinutes = ttl
 	}
 
-	if input.ClearAPIKey {
+	// A Meta token is useless for Fast2SMS and vice versa, so switching
+	// provider without supplying a new secret drops the old one.
+	newKey := input.APIKey != nil && strings.TrimSpace(*input.APIKey) != ""
+	if input.ClearAPIKey || (providerChanged && !newKey) {
 		s.EncryptedAPIKey = ""
 	} else if input.APIKey != nil && strings.TrimSpace(*input.APIKey) != "" {
 		enc, err := utils.Encrypt(strings.TrimSpace(*input.APIKey))
@@ -247,7 +322,11 @@ func UpdateWhatsAppInvoiceSettings(c *gin.Context) {
 
 	if s.Enabled {
 		if s.EncryptedAPIKey == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "WhatsApp Cloud API access token is required to enable WhatsApp invoices"})
+			msg := whatsAppCredentialName(s.Provider) + " is required to enable WhatsApp invoices"
+			if providerChanged {
+				msg = "You switched to " + whatsAppProviderLabel(s.Provider) + ": enter its " + whatsAppCredentialName(s.Provider) + " to enable WhatsApp invoices"
+			}
+			c.JSON(http.StatusBadRequest, gin.H{"error": msg})
 			return
 		}
 		if s.PhoneNumberID == "" {
@@ -432,11 +511,11 @@ func sendInvoiceWhatsApp(userID, invoiceID uuid.UUID, trigger, overridePhone str
 		return finish("skipped", errors.New("WhatsApp invoice messages are disabled"))
 	}
 	if s.EncryptedAPIKey == "" || s.MessageID == "" || s.PhoneNumberID == "" {
-		return finish("failed", errors.New("WhatsApp Cloud API access token, template name and phone number ID are required"))
+		return finish("failed", fmt.Errorf("%s, template name and phone number ID are required", whatsAppCredentialName(s.Provider)))
 	}
 	accessToken, err := utils.Decrypt(s.EncryptedAPIKey)
 	if err != nil {
-		return finish("failed", errors.New("failed to decrypt WhatsApp Cloud API access token"))
+		return finish("failed", fmt.Errorf("failed to decrypt %s", whatsAppCredentialName(s.Provider)))
 	}
 
 	var invoice models.Invoice
@@ -501,7 +580,7 @@ func sendInvoiceWhatsApp(userID, invoiceID uuid.UUID, trigger, overridePhone str
 		"template":          template,
 	}
 
-	requestID, body, err := callWhatsAppCloud(s.PhoneNumberID, accessToken, payload)
+	requestID, body, err := callWhatsAppAPI(s.Provider, s.PhoneNumberID, accessToken, payload)
 	entry.RequestID = requestID
 	entry.Response = truncateWALog(body, 2000)
 	if err != nil {
@@ -625,15 +704,21 @@ func truncateWALog(s string, n int) string {
 
 var whatsAppCloudHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
-// callWhatsAppCloud sends a template message via the WhatsApp Cloud API
-// (Meta Graph API). Returns the sent message's wamid and the raw body.
-// The access token travels only in the Authorization header; it is never
-// surfaced in errors.
-func callWhatsAppCloud(phoneNumberID, accessToken string, payload map[string]interface{}) (string, string, error) {
+// callWhatsAppAPI sends a template message through the store's provider.
+// Meta and Fast2SMS share the payload and success response
+// ({"messages":[{"id":"wamid..."}]}); they differ in base URL, auth header
+// (Meta: "Bearer <token>", Fast2SMS: the bare API key) and error body
+// (Meta: {"error":{"message":..}}, Fast2SMS: {"return":false,"message":..}).
+// Returns the sent message's wamid and the raw body. The secret travels only
+// in the Authorization header; it is never surfaced in errors.
+func callWhatsAppAPI(provider, phoneNumberID, secret string, payload map[string]interface{}) (string, string, error) {
+	provider = normalizeWhatsAppProvider(provider)
+	label := whatsAppProviderLabel(provider)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	endpoint := strings.TrimRight(whatsAppCloudAPIBase(), "/") + "/" + url.PathEscape(phoneNumberID) + "/messages"
+	endpoint := strings.TrimRight(whatsAppAPIBase(provider), "/") + "/" + url.PathEscape(phoneNumberID) + "/messages"
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", "", errors.New("failed to encode WhatsApp message payload")
@@ -641,9 +726,13 @@ func callWhatsAppCloud(phoneNumberID, accessToken string, payload map[string]int
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", "", errors.New("invalid WhatsApp Cloud API endpoint")
+		return "", "", fmt.Errorf("invalid %s endpoint", label)
 	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
+	if provider == whatsAppProviderFast2SMS {
+		req.Header.Set("Authorization", secret)
+	} else {
+		req.Header.Set("Authorization", "Bearer "+secret)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
@@ -653,7 +742,7 @@ func callWhatsAppCloud(phoneNumberID, accessToken string, payload map[string]int
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		return "", "", fmt.Errorf("WhatsApp Cloud API request failed: %v", err)
+		return "", "", fmt.Errorf("%s request failed: %v", label, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
@@ -667,6 +756,9 @@ func callWhatsAppCloud(phoneNumberID, accessToken string, payload map[string]int
 			Message string `json:"message"`
 			Code    int    `json:"code"`
 		} `json:"error"`
+		// Fast2SMS-native fields.
+		Return  *bool           `json:"return"`
+		Message json.RawMessage `json:"message"`
 	}
 	_ = json.Unmarshal(raw, &parsed)
 
@@ -674,17 +766,38 @@ func callWhatsAppCloud(phoneNumberID, accessToken string, payload map[string]int
 	if len(parsed.Messages) > 0 {
 		messageID = parsed.Messages[0].ID
 	}
-	if resp.StatusCode >= 300 || parsed.Error != nil {
+	failed := resp.StatusCode >= 300 || parsed.Error != nil || (parsed.Return != nil && !*parsed.Return)
+	if failed {
 		msg := ""
 		if parsed.Error != nil {
 			msg = parsed.Error.Message
 		}
 		if msg == "" {
+			msg = fast2SMSMessageText(parsed.Message)
+		}
+		if msg == "" {
 			msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
 		}
-		return messageID, bodyText, fmt.Errorf("WhatsApp Cloud API rejected the message: %s", msg)
+		return messageID, bodyText, fmt.Errorf("%s rejected the message: %s", label, msg)
 	}
 	return messageID, bodyText, nil
+}
+
+// fast2SMSMessageText extracts Fast2SMS's "message" field, which is either a
+// string or an array of strings.
+func fast2SMSMessageText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var str string
+	if json.Unmarshal(raw, &str) == nil {
+		return strings.TrimSpace(str)
+	}
+	var list []string
+	if json.Unmarshal(raw, &list) == nil {
+		return strings.TrimSpace(strings.Join(list, "; "))
+	}
+	return ""
 }
 
 // ---- Public, signed invoice PDF link (fetched by WhatsApp's media fetcher) ----
