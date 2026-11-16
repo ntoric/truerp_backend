@@ -858,6 +858,13 @@ func prepareInvoiceData(invoice models.Invoice, business models.Business, printS
 			totalLines = append(totalLines, formatLabelValue("Balance", fmt.Sprintf("%.2f", balance), cols))
 		}
 	}
+	if lp := invoiceLoyaltyPrintSummary(invoice); lp != nil {
+		totalLines = append(totalLines, sepWeak, "@C@@B@LOYALTY POINTS")
+		totalLines = append(totalLines, formatLabelValue("Pts Redeemed", fmt.Sprintf("%d", lp.Redeemed), cols))
+		totalLines = append(totalLines, formatLabelValue("Pts Discount", fmt.Sprintf("%.2f", lp.Discount), cols))
+		totalLines = append(totalLines, formatLabelValue("Pts Credited", fmt.Sprintf("%d", lp.Earned), cols))
+		totalLines = append(totalLines, formatLabelValue("Pts Balance", fmt.Sprintf("%d", lp.Balance), cols))
+	}
 	totals := strings.Join(totalLines, "\n")
 
 	taxDetails := ""

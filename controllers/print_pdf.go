@@ -440,6 +440,24 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 		pdf.MultiCell(colW, 4.6, "Payment: "+sanitizePDFText(label), "", "L", false)
 		leftEnd = pdf.GetY()
 	}
+	if lp := invoiceLoyaltyPrintSummary(invoice); lp != nil {
+		pdf.SetXY(leftM, leftEnd+3)
+		pdf.SetFont("Arial", "B", fontSize-1)
+		pdf.SetTextColor(30, 30, 30)
+		pdf.MultiCell(colW, 5, "LOYALTY POINTS", "", "L", false)
+		pdf.SetFont("Arial", "", fontSize-2)
+		pdf.SetTextColor(55, 55, 55)
+		for _, line := range []string{
+			fmt.Sprintf("Points Redeemed: %d", lp.Redeemed),
+			"Points Discount: Rs. " + formatINR(lp.Discount),
+			fmt.Sprintf("Points Credited: %d", lp.Earned),
+			fmt.Sprintf("Points Balance: %d", lp.Balance),
+		} {
+			pdf.SetX(leftM)
+			pdf.MultiCell(colW, 4.6, line, "", "L", false)
+		}
+		leftEnd = pdf.GetY()
+	}
 
 	// Bottom right: totals, amount in words, authorised signatory.
 	pdf.SetY(bottomTop)
@@ -471,6 +489,13 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 	}
 	if disc := invoice.DiscountTotal + invoice.InvoiceDiscount; disc > 0 {
 		totRow("Discount", -disc, false)
+	}
+	if invoice.LoyaltyDiscount > 0 {
+		label := "Loyalty Discount"
+		if invoice.LoyaltyPointsRedeemed > 0 {
+			label = fmt.Sprintf("Loyalty Discount (%d pts)", invoice.LoyaltyPointsRedeemed)
+		}
+		totRow(label, -invoice.LoyaltyDiscount, false)
 	}
 	for _, charge := range additionalChargeRows(invoice.AdditionalChargeItems, invoice.AdditionalCharges) {
 		totRow(charge.Label, charge.Amount, false)

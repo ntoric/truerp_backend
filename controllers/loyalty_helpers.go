@@ -181,3 +181,40 @@ func AdjustPartyLoyaltyPoints(tx *gorm.DB, userID uuid.UUID, party *models.Party
 	}
 	return tx.Model(party).Update("loyalty_points", newBalance).Error
 }
+
+// invoiceLoyaltyPrint is the loyalty block printed on an invoice.
+type invoiceLoyaltyPrint struct {
+	Redeemed int64
+	Discount float64
+	Earned   int64
+	Balance  int64
+}
+
+// invoiceLoyaltyPrintSummary returns the loyalty figures to print on an
+// invoice, or nil when the loyalty program is disabled for the invoice owner
+// or the invoice party is not a customer. Balance is the customer's points
+// balance right after this invoice (falling back to the current balance when
+// the invoice has no loyalty ledger entries). Expects invoice.Party preloaded.
+func invoiceLoyaltyPrintSummary(invoice models.Invoice) *invoiceLoyaltyPrint {
+	if utils.DB == nil || invoice.Party.ID == uuid.Nil || invoice.Party.PartyType != "customer" {
+		return nil
+	}
+	var settings models.LoyaltySettings
+	if err := utils.DB.Where("user_id = ?", invoice.UserID).First(&settings).Error; err != nil || !settings.IsEnabled {
+		return nil
+	}
+	summary := &invoiceLoyaltyPrint{
+		Redeemed: invoice.LoyaltyPointsRedeemed,
+		Discount: invoice.LoyaltyDiscount,
+		Earned:   invoice.LoyaltyPointsEarned,
+		Balance:  invoice.Party.LoyaltyPoints,
+	}
+	var last models.LoyaltyTransaction
+	if err := utils.DB.
+		Where("user_id = ? AND party_id = ? AND reference_type = ? AND reference_id = ?", invoice.UserID, invoice.Party.ID, "invoice", invoice.ID).
+		Order("created_at DESC").
+		First(&last).Error; err == nil {
+		summary.Balance = last.BalanceAfter
+	}
+	return summary
+}

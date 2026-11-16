@@ -578,6 +578,17 @@ func renderInvoiceBottom(invoice models.Invoice, custom models.InvoiceTemplateCu
 	if label := formatPaymentSplitsLabel(invoice.PaymentSplits, invoice.PaymentMode); label != "" {
 		left.WriteString(fmt.Sprintf(`<div class="kv-row" style="margin-top:10px"><span class="k">Payment:</span><span>%s</span></div>`, html.EscapeString(label)))
 	}
+	if lp := invoiceLoyaltyPrintSummary(invoice); lp != nil {
+		left.WriteString(`<div style="margin-top:14px"><div class="sec-label">LOYALTY POINTS</div>`)
+		kv := func(k, v string) {
+			left.WriteString(fmt.Sprintf(`<div class="kv-row"><span class="k">%s:</span><span>%s</span></div>`, k, html.EscapeString(v)))
+		}
+		kv("Points Redeemed", fmt.Sprintf("%d", lp.Redeemed))
+		kv("Points Discount", "₹ "+formatINR(lp.Discount))
+		kv("Points Credited", fmt.Sprintf("%d", lp.Earned))
+		kv("Points Balance", fmt.Sprintf("%d", lp.Balance))
+		left.WriteString(`</div>`)
+	}
 
 	var right strings.Builder
 	hasGST := invoiceHasGST(invoice)
@@ -595,6 +606,13 @@ func renderInvoiceBottom(invoice models.Invoice, custom models.InvoiceTemplateCu
 	}
 	if disc := invoice.DiscountTotal + invoice.InvoiceDiscount; disc > 0 {
 		right.WriteString(totRow("Discount", "-₹ "+formatINR(disc), false))
+	}
+	if invoice.LoyaltyDiscount > 0 {
+		label := "Loyalty Discount"
+		if invoice.LoyaltyPointsRedeemed > 0 {
+			label = fmt.Sprintf("Loyalty Discount (%d pts)", invoice.LoyaltyPointsRedeemed)
+		}
+		right.WriteString(totRow(label, "-₹ "+formatINR(invoice.LoyaltyDiscount), false))
 	}
 	for _, charge := range additionalChargeRows(invoice.AdditionalChargeItems, invoice.AdditionalCharges) {
 		right.WriteString(totRow(charge.Label, "₹ "+formatINR(charge.Amount), false))
