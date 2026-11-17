@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"bytes"
 	"fmt"
 	"html"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-pdf/fpdf"
 	"github.com/google/uuid"
 	"github.com/tealeg/xlsx/v3"
 )
@@ -569,8 +571,13 @@ func GetPartyLedgerPDF(c *gin.Context) {
 		return
 	}
 
-	c.Header("Content-Type", "text/html")
-	c.String(http.StatusOK, partyLedgerHTML(ledger))
+	pdfBytes, err := buildPartyLedgerPDF(ledger)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate PDF"})
+		return
+	}
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", partyLedgerFilename(ledger, "pdf")))
+	c.Data(http.StatusOK, "application/pdf", pdfBytes)
 }
 
 func esc(s string) string { return html.EscapeString(s) }
@@ -579,11 +586,121 @@ func fmtINR(v float64) string {
 	return fmt.Sprintf("₹%.2f", v)
 }
 
-func partyLedgerHTML(ledger *PartyLedger) string {
-	cards := partyLedgerCards(ledger)
+func partyLedgerFilename(ledger *PartyLedger, ext string) string {
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			return r
+		case r == ' ':
+			return '_'
+		}
+		return -1
+	}, strings.ToLower(strings.TrimSpace(ledger.Party.Name)))
+	if safe == "" {
+		safe = "ledger"
+	}
+	return fmt.Sprintf("party_statement_%s.%s", safe, ext)
+}
 
-	var rows strings.Builder
+// buildPartyLedgerPDF renders the party statement as an A4 landscape PDF.
+func buildPartyLedgerPDF(ledger *PartyLedger) ([]byte, error) {
+	pdf := fpdf.New("L", "mm", "A4", "")
+	pdf.SetMargins(12, 12, 12)
+	pdf.SetAutoPageBreak(true, 14)
+	pdf.AliasNbPages("")
+	pdf.SetFooterFunc(func() {
+		pdf.SetY(-10)
+		pdf.SetFont("Arial", "", 8)
+		pdf.SetTextColor(140, 140, 140)
+		pdf.CellFormat(0, 5, fmt.Sprintf("Page %d of {nb}", pdf.PageNo()), "", 0, "R", false, 0, "")
+	})
+	pdf.AddPage()
+
+	pageW, _ := pdf.GetPageSize()
+	l, _, r, _ := pdf.GetMargins()
+	usable := pageW - l - r
+
+	// Header
+	pdf.SetFont("Arial", "B", 16)
+	pdf.SetTextColor(30, 30, 30)
+	pdf.CellFormat(usable*0.6, 8, "Party Statement (Ledger)", "", 0, "L", false, 0, "")
+	pdf.SetFont("Arial", "", 9)
+	pdf.SetTextColor(110, 110, 110)
+	pdf.CellFormat(usable*0.4, 8, "Generated: "+time.Now().Format("02-01-2006 15:04"), "", 1, "R", false, 0, "")
+	pdf.CellFormat(0, 5, sanitizePDFText(ledger.Label), "", 1, "L", false, 0, "")
+	pdf.Ln(3)
+
+	// Party line
+	pdf.SetFont("Arial", "B", 11)
+	pdf.SetTextColor(30, 30, 30)
+	pdf.CellFormat(0, 6, sanitizePDFText(ledger.Party.Name), "", 1, "L", false, 0, "")
+	meta := []string{}
+	if ledger.Party.Phone != "" {
+		meta = append(meta, ledger.Party.Phone)
+	}
+	if ledger.Party.PartyType != "" {
+		meta = append(meta, ledger.Party.PartyType)
+	}
+	if ledger.Party.GSTIN != "" {
+		meta = append(meta, "GSTIN: "+ledger.Party.GSTIN)
+	}
+	if len(meta) > 0 {
+		pdf.SetFont("Arial", "", 9)
+		pdf.SetTextColor(110, 110, 110)
+		pdf.CellFormat(0, 5, sanitizePDFText(strings.Join(meta, " | ")), "", 1, "L", false, 0, "")
+	}
+	pdf.Ln(3)
+
+	// Summary cards
+	cards := partyLedgerCards(ledger)
+	gap := 4.0
+	cardW := (usable - gap*float64(len(cards)-1)) / float64(len(cards))
+	cardY := pdf.GetY()
+	pdf.SetDrawColor(220, 222, 226)
+	for i, card := range cards {
+		x := l + float64(i)*(cardW+gap)
+		pdf.Rect(x, cardY, cardW, 16, "D")
+		pdf.SetXY(x+3, cardY+2)
+		pdf.SetFont("Arial", "", 8)
+		pdf.SetTextColor(110, 110, 110)
+		pdf.CellFormat(cardW-6, 4, sanitizePDFText(card.label), "", 2, "L", false, 0, "")
+		pdf.SetFont("Arial", "B", 12)
+		pdf.SetTextColor(30, 30, 30)
+		pdf.CellFormat(cardW-6, 7, sanitizePDFText(fmtINR(card.value)), "", 0, "L", false, 0, "")
+	}
+	pdf.SetXY(l, cardY+20)
+
+	// Table
+	cols := []float64{
+		usable * 0.10, usable * 0.14, usable * 0.12, usable * 0.11,
+		usable * 0.12, usable * 0.12, usable * 0.13, usable * 0.16,
+	}
+	heads := []string{"Date", "Voucher", "Sr No", "Payment Mode", "Credit", "Debit", "Balance", "Due Date (Overdue by)"}
+	aligns := []string{"L", "L", "L", "L", "R", "R", "R", "L"}
+	drawHeader := func() {
+		pdf.SetFillColor(243, 244, 246)
+		pdf.SetDrawColor(220, 222, 226)
+		pdf.SetFont("Arial", "B", 8)
+		pdf.SetTextColor(90, 90, 90)
+		for i, h := range heads {
+			ln := 0
+			if i == len(heads)-1 {
+				ln = 1
+			}
+			pdf.CellFormat(cols[i], 8, h, "B", ln, aligns[i], true, 0, "")
+		}
+	}
+	drawHeader()
+
+	_, pageH := pdf.GetPageSize()
+	_, _, _, bottom := pdf.GetMargins()
+	rowH := 7.0
 	for _, e := range ledger.Entries {
+		if pdf.GetY()+rowH > pageH-bottom {
+			pdf.AddPage()
+			drawHeader()
+		}
+		special := e.Type == "opening_balance" || e.Type == "closing_balance"
 		date := e.Date
 		if date == "" {
 			date = "-"
@@ -592,121 +709,47 @@ func partyLedgerHTML(ledger *PartyLedger) string {
 		if mode == "" {
 			mode = "-"
 		}
-		credit := "-"
+		credit, debit := "-", "-"
 		if e.Credit > 0 {
 			credit = fmtINR(e.Credit)
 		}
-		debit := "-"
 		if e.Debit > 0 {
 			debit = fmtINR(e.Debit)
 		}
-		dueClass := ""
-		due := ledgerDueCell(e)
-		switch e.DueStatus {
-		case "paid":
-			dueClass = " class='due-paid'"
-		case "partial":
-			dueClass = " class='due-partial'"
-		case "unpaid":
-			dueClass = " class='due-unpaid'"
+		values := []string{date, e.Voucher, e.RefNumber, mode, credit, debit, fmtINR(e.Balance), ledgerDueCell(e)}
+
+		style := ""
+		if special {
+			style = "B"
+			pdf.SetFillColor(249, 250, 251)
 		}
-		rowClass := ""
-		if e.Type == "opening_balance" || e.Type == "closing_balance" {
-			rowClass = " class='special'"
+		pdf.SetFont("Arial", style, 8)
+		for i, v := range values {
+			switch {
+			case i == 4 && v != "-":
+				pdf.SetTextColor(22, 163, 74)
+			case i == 5 && v != "-":
+				pdf.SetTextColor(220, 38, 38)
+			case i == 7 && e.DueStatus == "paid":
+				pdf.SetTextColor(22, 163, 74)
+			case i == 7 && e.DueStatus == "partial":
+				pdf.SetTextColor(217, 119, 6)
+			case i == 7 && e.DueStatus == "unpaid":
+				pdf.SetTextColor(220, 38, 38)
+			default:
+				pdf.SetTextColor(40, 40, 40)
+			}
+			ln := 0
+			if i == len(values)-1 {
+				ln = 1
+			}
+			pdf.CellFormat(cols[i], rowH, sanitizePDFText(v), "B", ln, aligns[i], special, 0, "")
 		}
-		fmt.Fprintf(&rows, `<tr%s>
-			<td>%s</td><td>%s</td><td>%s</td><td>%s</td>
-			<td class="num credit">%s</td><td class="num debit">%s</td>
-			<td class="num">%s</td><td%s>%s</td>
-		</tr>`, rowClass, esc(date), esc(e.Voucher), esc(e.RefNumber), esc(mode),
-			credit, debit, fmtINR(e.Balance), dueClass, esc(due))
 	}
 
-	return fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>Party Statement - %s</title>
-<style>
-	body { font-family: Arial, sans-serif; margin: 0; padding: 20px; color: #333; font-size: 13px; }
-	.header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }
-	.title { font-size: 22px; font-weight: bold; }
-	.muted { color: #666; }
-	.cards { display: flex; gap: 12px; margin-bottom: 16px; }
-	.card { flex: 1; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 14px; }
-	.card .label { font-size: 11px; color: #666; }
-	.card .value { font-size: 18px; font-weight: bold; margin-top: 4px; }
-	.party { margin-bottom: 14px; }
-	table { width: 100%%; border-collapse: collapse; }
-	th, td { border-bottom: 1px solid #e5e7eb; padding: 7px 8px; text-align: left; }
-	th { background: #f9fafb; font-size: 11px; color: #666; text-transform: uppercase; }
-	td.num { text-align: right; }
-	.credit { color: #16a34a; }
-	.debit { color: #dc2626; }
-	.due-paid { color: #16a34a; }
-	.due-partial { color: #d97706; }
-	.due-unpaid { color: #dc2626; }
-	tr.special td { background: #f9fafb; font-weight: bold; }
-	@media print { body { margin: 0; padding: 10px; } }
-</style>
-</head>
-<body>
-	<div class="header">
-		<div>
-			<div class="title">Party Statement (Ledger)</div>
-			<div class="muted">%s</div>
-		</div>
-		<div class="muted">Generated: %s</div>
-	</div>
-
-	<div class="cards">
-		<div class="card"><div class="label">%s</div><div class="value">%s</div></div>
-		<div class="card"><div class="label">%s</div><div class="value">%s</div></div>
-		<div class="card"><div class="label">%s</div><div class="value">%s</div></div>
-		<div class="card"><div class="label">%s</div><div class="value">%s</div></div>
-	</div>
-
-	<div class="party">
-		<strong>%s</strong> &nbsp;<span class="muted">%s%s%s</span>
-	</div>
-
-	<table>
-		<thead>
-			<tr>
-				<th>Date</th><th>Voucher</th><th>Sr No</th><th>Payment Mode</th>
-				<th style="text-align:right">Credit</th><th style="text-align:right">Debit</th>
-				<th style="text-align:right">Balance</th><th>Due Date (Overdue by)</th>
-			</tr>
-		</thead>
-		<tbody>
-			%s
-		</tbody>
-	</table>
-
-	<script>window.onload = function() { window.print(); };</script>
-</body>
-</html>`,
-		esc(ledger.Party.Name),
-		esc(ledger.Label),
-		time.Now().Format("02-01-2006 15:04"),
-		esc(cards[0].label), fmtINR(cards[0].value),
-		esc(cards[1].label), fmtINR(cards[1].value),
-		esc(cards[2].label), fmtINR(cards[2].value),
-		esc(cards[3].label), fmtINR(cards[3].value),
-		esc(ledger.Party.Name),
-		func() string {
-			if ledger.Party.Phone != "" {
-				return esc(ledger.Party.Phone) + " · "
-			}
-			return ""
-		}(),
-		esc(ledger.Party.PartyType),
-		func() string {
-			if ledger.Party.GSTIN != "" {
-				return " · GSTIN: " + esc(ledger.Party.GSTIN)
-			}
-			return ""
-		}(),
-		rows.String(),
-	)
+	var buf bytes.Buffer
+	if err := pdf.Output(&buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
