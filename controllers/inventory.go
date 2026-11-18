@@ -1515,6 +1515,20 @@ func GetInventoryStocks(c *gin.Context) {
 	if productID != "" {
 		query = query.Where("product_id = ?", productID)
 	}
+	if raw := strings.TrimSpace(c.Query("product_ids")); raw != "" {
+		// Comma-separated list, e.g. for loading batches of a whole product page at once.
+		ids := make([]uuid.UUID, 0)
+		for _, part := range strings.Split(raw, ",") {
+			if id, err := uuid.Parse(strings.TrimSpace(part)); err == nil {
+				ids = append(ids, id)
+			}
+		}
+		if len(ids) == 0 {
+			c.JSON(http.StatusOK, []models.InventoryStock{})
+			return
+		}
+		query = query.Where("product_id IN ?", ids)
+	}
 	if outletID != "" {
 		query = query.Where("outlet_id = ?", outletID)
 	}
