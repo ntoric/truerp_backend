@@ -821,6 +821,8 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 		}
 		// Documents referencing invoices/parties must go before invoices.
 		if err := wipeStoreScopeModels(tx, ownerID,
+			&models.B2BOrderItem{},
+			&models.B2BOrder{},
 			&models.InvoiceStatusHistory{},
 			&models.Payment{},
 			&models.CreditNote{},
@@ -975,6 +977,9 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 		if err := hardDeleteByUser(tx, &models.StockOpeningOverride{}, ownerID); err != nil {
 			return err
 		}
+		if err := hardDeleteByUser(tx, &models.B2BCatalogItem{}, ownerID); err != nil {
+			return err
+		}
 		// Detach the product link on line items instead of failing — documents keep
 		// their description/qty/price even after the catalog entry is gone.
 		if len(productIDs) > 0 {
@@ -982,6 +987,7 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 				&models.InvoiceItem{},
 				&models.SalesReturnItem{},
 				&models.QuotationItem{},
+				&models.B2BOrderItem{},
 			} {
 				if err := tx.Unscoped().Model(model).
 					Where("product_id IN ?", productIDs).
@@ -1043,6 +1049,7 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 			&models.MediaFile{},
 			&models.CustomerPortalAccess{},
 			&models.CustomerPortalSettings{},
+			&models.B2BShopSettings{},
 			&models.SupportTicket{},
 			&models.DataBackup{},
 			&models.GDPRRequest{},
@@ -1151,6 +1158,7 @@ func wipeStoreOperationalData(tx *gorm.DB, ownerID uuid.UUID, scopes storeResetS
 			{&models.SalesReturn{}, "party_id", "sales returns", "Sales"},
 			{&models.DeliveryChallan{}, "party_id", "delivery challans", "Sales"},
 			{&models.Quotation{}, "party_id", "quotations", "Sales"},
+			{&models.B2BOrder{}, "party_id", "B2B orders", "Sales"},
 			{&models.CustomerStatement{}, "party_id", "customer statements", "Sales"},
 			{&models.PurchaseOrder{}, "party_id", "purchase orders", "Purchases"},
 			{&models.PurchaseReceipt{}, "party_id", "purchase receipts", "Purchases"},
