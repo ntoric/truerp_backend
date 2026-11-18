@@ -77,6 +77,14 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 	}
 	pdf.Ln(4)
 
+	// Composition dealers must declare this prominently on a bill of supply.
+	if docTitle == "BILL OF SUPPLY" {
+		pdf.SetFont("Arial", "B", fontSize)
+		pdf.SetTextColor(20, 20, 20)
+		pdf.MultiCell(0, 6, compositionDeclaration, "", "C", false)
+		pdf.Ln(2)
+	}
+
 	// Supplier (seller) block.
 	if business != nil && business.Name != "" {
 		pdf.SetFont("Arial", "B", fontSize+6)

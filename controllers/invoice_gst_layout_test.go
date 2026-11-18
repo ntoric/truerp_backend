@@ -143,6 +143,7 @@ func TestInvoicePDFHTMLBillOfSupplyLayout(t *testing.T) {
 	out := InvoicePDFHTMLWithOptions(invoice, invoicePDFOptions{Business: gstTestBusiness()})
 	for _, want := range []string{
 		"BILL OF SUPPLY", "ORIGINAL FOR RECIPIENT",
+		"Composition taxable person, not eligible to collect tax on supplies.",
 		"Seller Enterprises", "GSTIN: 27ZZZZZ9999Z1Z1", "PAN Number: ZZZZZ9999Z",
 		"Invoice No.: INV-1", "Invoice Date: 07/11/2026",
 		"BILL TO", "SHIP TO", "Acme Traders",
@@ -157,7 +158,7 @@ func TestInvoicePDFHTMLBillOfSupplyLayout(t *testing.T) {
 		}
 	}
 	// Bill of supply must not show the tax split columns or meta.
-	for _, absent := range []string{"<th>CGST</th>", "<th>IGST</th>", "Reverse Charge:", "Financial Year", "Composition taxable person"} {
+	for _, absent := range []string{"<th>CGST</th>", "<th>IGST</th>", "Reverse Charge:", "Financial Year"} {
 		if strings.Contains(out, absent) {
 			t.Errorf("bill-of-supply HTML should not contain %q", absent)
 		}
@@ -170,6 +171,7 @@ func TestInvoicePDFHTMLLegacyTaxInvoiceRendersBillOfSupply(t *testing.T) {
 	out := InvoicePDFHTMLWithOptions(gstTestInvoice(), invoicePDFOptions{Business: gstTestBusiness()})
 	for _, want := range []string{
 		"BILL OF SUPPLY", "ORIGINAL FOR RECIPIENT",
+		"Composition taxable person, not eligible to collect tax on supplies.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("legacy tax_invoice HTML missing %q", want)
