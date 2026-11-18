@@ -18,15 +18,15 @@ import (
 const compositionDeclaration = "Composition taxable person, not eligible to collect tax on supplies."
 
 // invoiceDocumentTitle maps invoice_type to the document heading printed on
-// GST documents. Unknown/empty types fall back to a tax invoice.
+// GST documents. GST is not collected from customers, so every sale —
+// including legacy "tax_invoice" rows and unknown/empty types — is issued as
+// a bill of supply. Only export invoices keep their own heading.
 func invoiceDocumentTitle(invoiceType string) string {
 	switch strings.ToLower(strings.TrimSpace(invoiceType)) {
-	case "bill_of_supply":
-		return "BILL OF SUPPLY"
 	case "export":
 		return "EXPORT INVOICE"
 	default:
-		return "TAX INVOICE"
+		return "BILL OF SUPPLY"
 	}
 }
 

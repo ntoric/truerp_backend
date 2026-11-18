@@ -767,7 +767,7 @@ func prepareInvoiceData(invoice models.Invoice, business models.Business, printS
 	sepStrong := thermalSep(cols, '=')
 	sepWeak := thermalSep(cols, '-')
 
-	header := buildThermalBusinessHeader(business, cols, "TAX INVOICE")
+	header := buildThermalBusinessHeader(business, cols, "BILL OF SUPPLY")
 
 	docInfo := formatLabelValue("Invoice", invoice.InvoiceNumber, cols)
 	docInfo += "\n" + formatLabelValue("Date", invoice.Date.Format("02-01-2006"), cols)

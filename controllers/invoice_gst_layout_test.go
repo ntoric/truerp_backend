@@ -44,13 +44,16 @@ func TestFinancialYearLabel(t *testing.T) {
 }
 
 func TestInvoiceDocumentTitle(t *testing.T) {
-	if got := invoiceDocumentTitle("tax_invoice"); got != "TAX INVOICE" {
+	if got := invoiceDocumentTitle("tax_invoice"); got != "BILL OF SUPPLY" {
 		t.Fatalf("got %s", got)
 	}
 	if got := invoiceDocumentTitle("bill_of_supply"); got != "BILL OF SUPPLY" {
 		t.Fatalf("got %s", got)
 	}
-	if got := invoiceDocumentTitle(""); got != "TAX INVOICE" {
+	if got := invoiceDocumentTitle(""); got != "BILL OF SUPPLY" {
+		t.Fatalf("got %s", got)
+	}
+	if got := invoiceDocumentTitle("export"); got != "EXPORT INVOICE" {
 		t.Fatalf("got %s", got)
 	}
 }
@@ -162,20 +165,22 @@ func TestInvoicePDFHTMLBillOfSupplyLayout(t *testing.T) {
 	}
 }
 
-func TestInvoicePDFHTMLTaxInvoiceGSTLayout(t *testing.T) {
+func TestInvoicePDFHTMLLegacyTaxInvoiceRendersBillOfSupply(t *testing.T) {
+	// Stored invoices default to invoice_type "tax_invoice"; GST is not
+	// collected from customers, so they must still print as a bill of supply.
 	out := InvoicePDFHTMLWithOptions(gstTestInvoice(), invoicePDFOptions{Business: gstTestBusiness()})
 	for _, want := range []string{
-		"TAX INVOICE", "ORIGINAL FOR RECIPIENT",
-		"FY 2026-27", "Reverse Charge:", "Place of Supply",
-		"<th>CGST</th>", "<th>SGST</th>", "HSN/SAC", "GROSS", "TAXABLE", "GST%",
-		"Total Taxable Value", "SUBTOTAL",
+		"BILL OF SUPPLY", "ORIGINAL FOR RECIPIENT",
+		"Composition taxable person, not eligible to collect tax on supplies.",
 	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("tax-invoice HTML missing %q", want)
+			t.Errorf("legacy tax_invoice HTML missing %q", want)
 		}
 	}
-	if strings.Contains(out, "Composition taxable person") {
-		t.Error("tax invoice must not show the composition declaration")
+	for _, absent := range []string{"TAX INVOICE", "Reverse Charge:"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("legacy tax_invoice HTML should not contain %q", absent)
+		}
 	}
 }
 
