@@ -118,11 +118,6 @@ func InvoicePDFHTMLWithOptions(invoice models.Invoice, opts invoicePDFOptions) s
 		<div>%s</div>
 	</div>`, docTitle, headRight)
 
-	compositionHTML := ""
-	if docTitle == "BILL OF SUPPLY" {
-		compositionHTML = fmt.Sprintf(`<div class="comp-note">%s</div>`, compositionDeclaration)
-	}
-
 	// --- seller (supplier) block -------------------------------------------
 	sellerHTML := ""
 	if biz != nil {
@@ -200,7 +195,6 @@ func InvoicePDFHTMLWithOptions(invoice models.Invoice, opts invoicePDFOptions) s
 		.doc-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
 		.doc-title { font-size: 15px; font-weight: bold; color: #111; }
 		.orig-box { border: 1.5px solid #9aa0a6; color: #555; font-size: 10px; font-weight: bold; padding: 3px 8px; margin-left: 10px; border-radius: 2px; letter-spacing: 0.04em; }
-		.comp-note { font-size: 14px; font-weight: bold; color: #111; text-align: center; margin: -6px 0 14px; }
 		.seller { display: flex; gap: 18px; align-items: flex-start; margin-bottom: 20px; }
 		.seller-logo { min-width: 0; }
 		.biz-name { font-size: 21px; font-weight: bold; color: #111; margin-bottom: 5px; }
@@ -247,14 +241,12 @@ func InvoicePDFHTMLWithOptions(invoice models.Invoice, opts invoicePDFOptions) s
 	%s
 	%s
 	%s
-	%s
 	<script>window.onload=function(){window.print();};</script>
 </body>
 </html>`,
 		html.EscapeString(invoice.InvoiceNumber),
 		pageRule, bodyPadding, fontSize,
 		docHead,
-		compositionHTML,
 		sellerHTML,
 		bandHTML,
 		partyHTML,

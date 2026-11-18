@@ -13,10 +13,6 @@ import (
 	"github.com/skip2/go-qrcode"
 )
 
-// compositionDeclaration is the mandatory declaration composition dealers
-// must print prominently on a bill of supply.
-const compositionDeclaration = "Composition taxable person, not eligible to collect tax on supplies."
-
 // invoiceDocumentTitle maps invoice_type to the document heading printed on
 // GST documents. GST is not collected from customers, so every sale —
 // including legacy "tax_invoice" rows and unknown/empty types — is issued as
