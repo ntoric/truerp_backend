@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"time"
 	"truerp/controllers"
 	"truerp/middleware"
 
@@ -1102,6 +1103,41 @@ func SetupRoutes(r *gin.Engine) {
 		customerPortalAdmin.PUT("/access/:party_id", controllers.UpsertCustomerPortalAccess)
 		customerPortalAdmin.GET("/tickets", controllers.AdminListSupportTickets)
 		customerPortalAdmin.PUT("/tickets/:id", controllers.AdminUpdateSupportTicket)
+	}
+
+	// B2B shop — store-side management of the storefront, catalogue and orders.
+	// Scoped to the active store like every other operational route.
+	b2bShop := r.Group("/api/v1/b2b-shop")
+	b2bShop.Use(middleware.AuthRequired())
+	{
+		b2bShop.GET("/settings", controllers.GetB2BShopSettings)
+		b2bShop.PUT("/settings", controllers.UpdateB2BShopSettings)
+		b2bShop.GET("/catalog", controllers.ListB2BCatalog)
+		b2bShop.POST("/catalog/bulk", controllers.BulkUpdateB2BCatalog)
+		b2bShop.PUT("/catalog/:product_id", controllers.UpsertB2BCatalogItem)
+		b2bShop.GET("/catalog/:product_id/images", controllers.GetB2BCatalogImages)
+		b2bShop.PUT("/catalog/:product_id/image", controllers.SetB2BCatalogMainImage)
+		b2bShop.GET("/orders", controllers.ListB2BOrders)
+		b2bShop.GET("/orders/pending-items", controllers.ListB2BPendingItems)
+		b2bShop.GET("/orders/export", controllers.ExportB2BOrders)
+		b2bShop.GET("/orders/:id", controllers.GetB2BOrder)
+		b2bShop.PUT("/orders/:id", controllers.UpdateB2BOrder)
+		b2bShop.PATCH("/orders/:id/status", controllers.UpdateB2BOrderStatus)
+		b2bShop.POST("/orders/:id/estimate", controllers.CreateB2BOrderEstimate)
+		b2bShop.DELETE("/orders/:id", controllers.DeleteB2BOrder)
+	}
+
+	// B2B shop — public storefront (no auth). Rate limited per IP; order
+	// placement and buyer lookup get tighter budgets than browsing.
+	shopPublic := r.Group("/api/v1/shop/:slug")
+	shopPublic.Use(middleware.RateLimitByIP(240, time.Minute))
+	{
+		shopPublic.GET("", controllers.GetPublicB2BShop)
+		shopPublic.GET("/products", controllers.ListPublicB2BProducts)
+		shopPublic.GET("/products/:id", controllers.GetPublicB2BProduct)
+		shopPublic.GET("/buyers", middleware.RateLimitByIP(30, time.Minute), controllers.SearchPublicB2BBuyers)
+		shopPublic.POST("/orders", middleware.RateLimitByIP(10, 10*time.Minute), controllers.PlacePublicB2BOrder)
+		shopPublic.GET("/orders/:number", middleware.RateLimitByIP(20, time.Minute), controllers.TrackPublicB2BOrder)
 	}
 
 	// Signed, expiring public invoice PDF link (WhatsApp document attachment)

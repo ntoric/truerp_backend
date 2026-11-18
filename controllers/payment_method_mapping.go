@@ -12,6 +12,10 @@ import (
 
 const paymentMethodInitialInvestment = "initial_investment"
 
+// paymentMethodUnpaid marks a bill saved with nothing received/paid; it never
+// maps to a cash or bank account.
+const paymentMethodUnpaid = "unpaid"
+
 var standardPaymentMethods = []struct {
 	Key   string `json:"payment_method"`
 	Label string `json:"label"`
@@ -36,9 +40,14 @@ func isInitialInvestmentPayment(mode string) bool {
 	return normalizePaymentMethod(mode) == paymentMethodInitialInvestment
 }
 
+func isUnpaidPaymentMode(mode string) bool {
+	return normalizePaymentMethod(mode) == paymentMethodUnpaid
+}
+
 func resolveBankAccountForPaymentMode(userID uuid.UUID, paymentMode string, explicit *uuid.UUID) (*uuid.UUID, error) {
-	// Opening stock / capital contributions must never hit cash or bank.
-	if isInitialInvestmentPayment(paymentMode) {
+	// Opening stock / capital contributions must never hit cash or bank, and
+	// an unpaid bill has no money movement to route.
+	if isInitialInvestmentPayment(paymentMode) || isUnpaidPaymentMode(paymentMode) {
 		return nil, nil
 	}
 

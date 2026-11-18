@@ -59,6 +59,8 @@ var defaultPageFeatureKeys = []string{
 	"/audit",
 	"/notifications",
 	"/customer-portal",
+	"/b2b-shop",
+	"/b2b-orders",
 	"/settings/reminders",
 	"/settings/ca-share",
 }
