@@ -26,22 +26,30 @@ import (
 
 // Automatic WhatsApp "purchase summary" message (with invoice PDF) sent to the
 // customer when a sales invoice is created. Each store picks its gateway:
-// Meta's WhatsApp Cloud API directly, or Fast2SMS's Meta-format WhatsApp API.
-// Both take the same template payload; they differ only in endpoint, auth
-// header and error format. Configured and toggled per store (store-owner
-// user_id scope).
+// Meta's WhatsApp Cloud API directly, Fast2SMS's Meta-format WhatsApp API, or
+// Twilio. Meta and Fast2SMS take the same template payload and differ only in
+// endpoint, auth header and error format; Twilio uses its own Messages API
+// with Content templates (see callTwilioWhatsAppAPI). Configured and toggled
+// per store (store-owner user_id scope).
 
 const (
 	whatsAppProviderCloud    = "whatsapp_cloud"
 	whatsAppProviderFast2SMS = "fast2sms"
+	whatsAppProviderTwilio   = "twilio"
 
 	defaultWhatsAppCloudAPIBase  = "https://graph.facebook.com/v21.0"
 	defaultFast2SMSWhatsAppBase  = "https://www.fast2sms.com/dev/whatsapp/v26.0"
+	defaultTwilioAPIBase         = "https://api.twilio.com/2010-04-01"
 	defaultWhatsAppInvoiceFields = "invoice_number,total_amount,invoice_date,points_earned,points_balance,points_redeemed,store_name"
-	defaultPDFLinkTTLMinutes     = 60
-	minPDFLinkTTLMinutes         = 5
-	maxPDFLinkTTLMinutes         = 7 * 24 * 60
-	whatsAppInvoicePDFPurpose    = "wa-invoice-pdf"
+	// Default mapping for the template used while the loyalty program is off.
+	defaultWhatsAppNoLoyaltyFields = "invoice_number,total_amount,invoice_date,store_name"
+	defaultPDFLinkTTLMinutes       = 60
+	// WhatsApp caps a template body at 1024 characters; allow some slack.
+	maxWhatsAppTemplateBodyLen = 4096
+	minPDFLinkTTLMinutes       = 5
+	maxPDFLinkTTLMinutes       = 7 * 24 * 60
+	whatsAppInvoicePDFPurpose  = "wa-invoice-pdf"
+	publicInvoicePDFPath       = "/api/v1/public/invoice-pdf/"
 )
 
 type whatsAppInvoiceField struct {
@@ -63,6 +71,31 @@ var whatsAppInvoiceFields = []whatsAppInvoiceField{
 	{"balance_due", "Balance due"},
 	{"loyalty_discount", "Loyalty discount (₹)"},
 	{"store_phone", "Store phone"},
+	{"invoice_pdf_url", "Invoice PDF link (full URL)"},
+	{"invoice_pdf_file", "Invoice PDF file (Twilio media URL variable)"},
+}
+
+// whatsAppPDFFields need a signed PDF link and therefore a public base URL.
+func isWhatsAppPDFField(key string) bool {
+	return key == "invoice_pdf_url" || key == "invoice_pdf_file"
+}
+
+func whatsAppMappingHas(mapping, key string) bool {
+	for _, k := range strings.Split(mapping, ",") {
+		if strings.TrimSpace(k) == key {
+			return true
+		}
+	}
+	return false
+}
+
+func whatsAppMappingNeedsPDF(mapping string) bool {
+	for _, k := range strings.Split(mapping, ",") {
+		if isWhatsAppPDFField(strings.TrimSpace(k)) {
+			return true
+		}
+	}
+	return false
 }
 
 func isKnownWhatsAppInvoiceField(key string) bool {
@@ -82,6 +115,7 @@ type whatsAppProviderInfo struct {
 var whatsAppProviders = []whatsAppProviderInfo{
 	{whatsAppProviderCloud, "WhatsApp Cloud API (Meta)"},
 	{whatsAppProviderFast2SMS, "Fast2SMS"},
+	{whatsAppProviderTwilio, "Twilio"},
 }
 
 func isKnownWhatsAppProvider(p string) bool {
@@ -115,8 +149,11 @@ func whatsAppProviderLabel(p string) string {
 // via env, e.g. for staging or a newer API version).
 func whatsAppAPIBase(provider string) string {
 	envKey, def := "WHATSAPP_CLOUD_API_BASE", defaultWhatsAppCloudAPIBase
-	if provider == whatsAppProviderFast2SMS {
+	switch provider {
+	case whatsAppProviderFast2SMS:
 		envKey, def = "FAST2SMS_WHATSAPP_API_BASE", defaultFast2SMSWhatsAppBase
+	case whatsAppProviderTwilio:
+		envKey, def = "TWILIO_API_BASE", defaultTwilioAPIBase
 	}
 	if u := strings.TrimSpace(os.Getenv(envKey)); u != "" {
 		return u
@@ -126,25 +163,45 @@ func whatsAppAPIBase(provider string) string {
 
 // whatsAppCredentialName is the user-facing name of the secret per provider.
 func whatsAppCredentialName(provider string) string {
-	if provider == whatsAppProviderFast2SMS {
+	switch provider {
+	case whatsAppProviderFast2SMS:
 		return "Fast2SMS API key"
+	case whatsAppProviderTwilio:
+		return "Twilio Auth Token"
 	}
 	return "WhatsApp Cloud API access token"
+}
+
+// whatsAppSenderName / whatsAppTemplateName are the user-facing names of the
+// sender and template fields per provider.
+func whatsAppSenderName(provider string) string {
+	if provider == whatsAppProviderTwilio {
+		return "WhatsApp sender (number or Messaging Service SID)"
+	}
+	return "Phone Number ID"
+}
+
+func whatsAppTemplateName(provider string) string {
+	if provider == whatsAppProviderTwilio {
+		return "Content SID"
+	}
+	return "Template name"
 }
 
 func loadWhatsAppInvoiceSettings(userID uuid.UUID) (models.WhatsAppInvoiceSettings, bool) {
 	var s models.WhatsAppInvoiceSettings
 	if err := utils.DB.Where("user_id = ?", userID).First(&s).Error; err != nil {
 		return models.WhatsAppInvoiceSettings{
-			UserID:            userID,
-			Provider:          whatsAppProviderCloud,
-			VariableMapping:   defaultWhatsAppInvoiceFields,
-			AttachPDF:         true,
-			CountryCode:       "91",
-			LanguageCode:      "en",
-			SendForPOS:        true,
-			SendForNonPOS:     true,
-			PDFLinkTTLMinutes: defaultPDFLinkTTLMinutes,
+			UserID:                   userID,
+			Provider:                 whatsAppProviderCloud,
+			VariableMapping:          defaultWhatsAppInvoiceFields,
+			NoLoyaltyVariableMapping: defaultWhatsAppNoLoyaltyFields,
+			AttachPDF:                true,
+			CountryCode:              "91",
+			LanguageCode:             "en",
+			SendForPOS:               true,
+			SendForNonPOS:            true,
+			PDFLinkTTLMinutes:        defaultPDFLinkTTLMinutes,
 		}, false
 	}
 	s.Provider = normalizeWhatsAppProvider(s.Provider)
@@ -153,6 +210,9 @@ func loadWhatsAppInvoiceSettings(userID uuid.UUID) (models.WhatsAppInvoiceSettin
 	}
 	if strings.TrimSpace(s.VariableMapping) == "" {
 		s.VariableMapping = defaultWhatsAppInvoiceFields
+	}
+	if strings.TrimSpace(s.NoLoyaltyVariableMapping) == "" {
+		s.NoLoyaltyVariableMapping = defaultWhatsAppNoLoyaltyFields
 	}
 	if strings.TrimSpace(s.CountryCode) == "" {
 		s.CountryCode = "91"
@@ -171,17 +231,44 @@ func whatsAppInvoicePublicBaseURL(s models.WhatsAppInvoiceSettings) string {
 	return strings.TrimRight(base, "/")
 }
 
+// storeLoyaltyEnabled reports whether the store's loyalty program is on
+// (without creating a settings row as a side effect).
+func storeLoyaltyEnabled(userID uuid.UUID) bool {
+	var ls models.LoyaltySettings
+	if err := utils.DB.Select("is_enabled").Where("user_id = ?", userID).First(&ls).Error; err != nil {
+		return false
+	}
+	return ls.IsEnabled
+}
+
+// whatsAppActiveTemplate returns the template and variable mapping to send:
+// the "without loyalty" template while the loyalty program is off and one is
+// configured, otherwise the main template.
+func whatsAppActiveTemplate(s models.WhatsAppInvoiceSettings, loyaltyEnabled bool) (messageID, mapping string, noLoyalty bool) {
+	if !loyaltyEnabled && strings.TrimSpace(s.NoLoyaltyMessageID) != "" {
+		return s.NoLoyaltyMessageID, s.NoLoyaltyVariableMapping, true
+	}
+	return s.MessageID, s.VariableMapping, false
+}
+
 type whatsAppInvoiceSettingsResponse struct {
 	models.WhatsAppInvoiceSettings
-	HasAPIKey       bool                   `json:"has_api_key"`
-	APIKeyHint      string                 `json:"api_key_hint"`
-	AvailableFields []whatsAppInvoiceField `json:"available_fields"`
-	Providers       []whatsAppProviderInfo `json:"providers"`
-	DefaultMapping  string                 `json:"default_mapping"`
-	EnvPublicURL    string                 `json:"env_public_base_url"`
-	CanEditLinkTTL  bool                   `json:"can_edit_link_ttl"`
-	MinLinkTTL      int                    `json:"min_link_ttl_minutes"`
-	MaxLinkTTL      int                    `json:"max_link_ttl_minutes"`
+	HasAPIKey  bool   `json:"has_api_key"`
+	APIKeyHint string `json:"api_key_hint"`
+	// Phone Number ID is masked like the API key; only super admins get the
+	// full value back (in phone_number_id) so they can view it.
+	HasPhoneNumberID  bool                   `json:"has_phone_number_id"`
+	PhoneNumberIDHint string                 `json:"phone_number_id_hint"`
+	CanViewPhoneID    bool                   `json:"can_view_phone_number_id"`
+	AvailableFields   []whatsAppInvoiceField `json:"available_fields"`
+	Providers         []whatsAppProviderInfo `json:"providers"`
+	DefaultMapping    string                 `json:"default_mapping"`
+	DefaultNoLoyalty  string                 `json:"default_no_loyalty_mapping"`
+	LoyaltyEnabled    bool                   `json:"loyalty_enabled"`
+	EnvPublicURL      string                 `json:"env_public_base_url"`
+	CanEditLinkTTL    bool                   `json:"can_edit_link_ttl"`
+	MinLinkTTL        int                    `json:"min_link_ttl_minutes"`
+	MaxLinkTTL        int                    `json:"max_link_ttl_minutes"`
 }
 
 func isSuperAdminRequest(c *gin.Context) bool {
@@ -197,15 +284,31 @@ func buildWhatsAppInvoiceSettingsResponse(c *gin.Context, s models.WhatsAppInvoi
 			hint = "••••" + key[len(key)-4:]
 		}
 	}
+	phoneID := strings.TrimSpace(s.PhoneNumberID)
+	phoneHint := ""
+	if len(phoneID) >= 4 {
+		phoneHint = "••••" + phoneID[len(phoneID)-4:]
+	} else if phoneID != "" {
+		phoneHint = "••••"
+	}
+	superAdmin := isSuperAdminRequest(c)
+	if !superAdmin {
+		s.PhoneNumberID = ""
+	}
 	return whatsAppInvoiceSettingsResponse{
 		WhatsAppInvoiceSettings: s,
 		HasAPIKey:               s.EncryptedAPIKey != "",
 		APIKeyHint:              hint,
+		HasPhoneNumberID:        phoneID != "",
+		PhoneNumberIDHint:       phoneHint,
+		CanViewPhoneID:          superAdmin,
 		AvailableFields:         whatsAppInvoiceFields,
 		Providers:               whatsAppProviders,
 		DefaultMapping:          defaultWhatsAppInvoiceFields,
+		DefaultNoLoyalty:        defaultWhatsAppNoLoyaltyFields,
+		LoyaltyEnabled:          storeLoyaltyEnabled(s.UserID),
 		EnvPublicURL:            strings.TrimSpace(os.Getenv("PUBLIC_API_BASE_URL")),
-		CanEditLinkTTL:          isSuperAdminRequest(c),
+		CanEditLinkTTL:          superAdmin,
 		MinLinkTTL:              minPDFLinkTTLMinutes,
 		MaxLinkTTL:              maxPDFLinkTTLMinutes,
 	}
@@ -228,15 +331,21 @@ func UpdateWhatsAppInvoiceSettings(c *gin.Context) {
 		APIKey           *string `json:"api_key"` // nil/"" = keep existing
 		ClearAPIKey      bool    `json:"clear_api_key"`
 		MessageID        string  `json:"message_id"`
-		PhoneNumberID    string  `json:"phone_number_id"`
+		PhoneNumberID    *string `json:"phone_number_id"` // nil/"" = keep existing
+		AccountSID       *string `json:"account_sid"`     // nil = keep existing
 		LanguageCode     string  `json:"language_code"`
 		VariableMapping  string  `json:"variable_mapping"`
 		StoreDisplayName string  `json:"store_display_name"`
-		AttachPDF        bool    `json:"attach_pdf"`
-		PublicBaseURL    string  `json:"public_base_url"`
-		CountryCode      string  `json:"country_code"`
-		SendForPOS       bool    `json:"send_for_pos"`
-		SendForNonPOS    bool    `json:"send_for_non_pos"`
+		TemplateBody     *string `json:"template_body"` // nil = keep existing
+		// Template used while the loyalty program is off; nil = keep existing.
+		NoLoyaltyMessageID       *string `json:"no_loyalty_message_id"`
+		NoLoyaltyVariableMapping *string `json:"no_loyalty_variable_mapping"`
+		NoLoyaltyTemplateBody    *string `json:"no_loyalty_template_body"`
+		AttachPDF                bool    `json:"attach_pdf"`
+		PublicBaseURL            string  `json:"public_base_url"`
+		CountryCode              string  `json:"country_code"`
+		SendForPOS               bool    `json:"send_for_pos"`
+		SendForNonPOS            bool    `json:"send_for_non_pos"`
 		// Super admin only; ignored for other roles.
 		PDFLinkTTLMinutes *int `json:"pdf_link_ttl_minutes"`
 	}
@@ -283,10 +392,46 @@ func UpdateWhatsAppInvoiceSettings(c *gin.Context) {
 	s.Enabled = input.Enabled
 	s.Provider = provider
 	s.MessageID = strings.TrimSpace(input.MessageID)
-	s.PhoneNumberID = strings.TrimSpace(input.PhoneNumberID)
+	if input.PhoneNumberID != nil && strings.TrimSpace(*input.PhoneNumberID) != "" {
+		s.PhoneNumberID = strings.TrimSpace(*input.PhoneNumberID)
+	}
+	if input.AccountSID != nil {
+		s.AccountSID = strings.TrimSpace(*input.AccountSID)
+	}
 	s.LanguageCode = languageCode
 	s.VariableMapping = mapping
 	s.StoreDisplayName = strings.TrimSpace(input.StoreDisplayName)
+	if input.TemplateBody != nil {
+		body := strings.TrimSpace(strings.ReplaceAll(*input.TemplateBody, "\r\n", "\n"))
+		if len(body) > maxWhatsAppTemplateBodyLen {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Template text must be at most %d characters", maxWhatsAppTemplateBodyLen)})
+			return
+		}
+		s.TemplateBody = body
+	}
+	if input.NoLoyaltyMessageID != nil {
+		s.NoLoyaltyMessageID = strings.TrimSpace(*input.NoLoyaltyMessageID)
+	}
+	if input.NoLoyaltyVariableMapping != nil {
+		m := strings.TrimSpace(*input.NoLoyaltyVariableMapping)
+		if m == "" {
+			m = defaultWhatsAppNoLoyaltyFields
+		}
+		m, err := normalizeWhatsAppVariableMapping(m)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Template without loyalty: " + err.Error()})
+			return
+		}
+		s.NoLoyaltyVariableMapping = m
+	}
+	if input.NoLoyaltyTemplateBody != nil {
+		body := strings.TrimSpace(strings.ReplaceAll(*input.NoLoyaltyTemplateBody, "\r\n", "\n"))
+		if len(body) > maxWhatsAppTemplateBodyLen {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Template text must be at most %d characters", maxWhatsAppTemplateBodyLen)})
+			return
+		}
+		s.NoLoyaltyTemplateBody = body
+	}
 	s.AttachPDF = input.AttachPDF
 	s.PublicBaseURL = publicURL
 	s.CountryCode = countryCode
@@ -321,24 +466,8 @@ func UpdateWhatsAppInvoiceSettings(c *gin.Context) {
 	}
 
 	if s.Enabled {
-		if s.EncryptedAPIKey == "" {
-			msg := whatsAppCredentialName(s.Provider) + " is required to enable WhatsApp invoices"
-			if providerChanged {
-				msg = "You switched to " + whatsAppProviderLabel(s.Provider) + ": enter its " + whatsAppCredentialName(s.Provider) + " to enable WhatsApp invoices"
-			}
+		if msg := whatsAppInvoiceEnableError(s, providerChanged); msg != "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": msg})
-			return
-		}
-		if s.PhoneNumberID == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Phone Number ID is required to enable WhatsApp invoices"})
-			return
-		}
-		if s.MessageID == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Template name is required to enable WhatsApp invoices"})
-			return
-		}
-		if s.AttachPDF && whatsAppInvoicePublicBaseURL(s) == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Public base URL is required to attach the invoice PDF"})
 			return
 		}
 	}
@@ -354,6 +483,92 @@ func UpdateWhatsAppInvoiceSettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save WhatsApp invoice settings"})
 		return
 	}
+	c.JSON(http.StatusOK, buildWhatsAppInvoiceSettingsResponse(c, s))
+}
+
+// whatsAppInvoiceEnableError returns why the settings can't be enabled, or ""
+// when they're complete enough to send.
+func whatsAppInvoiceEnableError(s models.WhatsAppInvoiceSettings, providerChanged bool) string {
+	if s.EncryptedAPIKey == "" {
+		if providerChanged {
+			return "You switched to " + whatsAppProviderLabel(s.Provider) + ": enter its " + whatsAppCredentialName(s.Provider) + " to enable WhatsApp invoices"
+		}
+		return whatsAppCredentialName(s.Provider) + " is required to enable WhatsApp invoices"
+	}
+	if s.Provider == whatsAppProviderTwilio && s.AccountSID == "" {
+		return "Twilio Account SID is required to enable WhatsApp invoices"
+	}
+	if s.PhoneNumberID == "" {
+		return whatsAppSenderName(s.Provider) + " is required to enable WhatsApp invoices"
+	}
+	if s.MessageID == "" {
+		return whatsAppTemplateName(s.Provider) + " is required to enable WhatsApp invoices"
+	}
+	if s.Provider == whatsAppProviderTwilio {
+		if !strings.HasPrefix(s.AccountSID, "AC") {
+			return "Twilio Account SID must start with AC"
+		}
+		if !strings.HasPrefix(s.MessageID, "HX") {
+			return "Twilio Content SID must start with HX (Twilio Console → Messaging → Content Template Builder)"
+		}
+		if s.AttachPDF && !whatsAppMappingHas(s.VariableMapping, "invoice_pdf_file") {
+			return "To attach the PDF with Twilio, map your media template's URL variable to \"Invoice PDF file\""
+		}
+	}
+	if (s.AttachPDF || whatsAppMappingNeedsPDF(s.VariableMapping)) && whatsAppInvoicePublicBaseURL(s) == "" {
+		return "Public base URL is required to attach or link the invoice PDF"
+	}
+	if s.NoLoyaltyMessageID != "" {
+		if s.Provider == whatsAppProviderTwilio {
+			if !strings.HasPrefix(s.NoLoyaltyMessageID, "HX") {
+				return "Twilio Content SID of the template without loyalty must start with HX"
+			}
+			if s.AttachPDF && !whatsAppMappingHas(s.NoLoyaltyVariableMapping, "invoice_pdf_file") {
+				return "To attach the PDF with Twilio, map the media URL variable of the template without loyalty to \"Invoice PDF file\""
+			}
+		}
+		if whatsAppMappingNeedsPDF(s.NoLoyaltyVariableMapping) && whatsAppInvoicePublicBaseURL(s) == "" {
+			return "Public base URL is required to link the invoice PDF in the template without loyalty"
+		}
+	}
+	return ""
+}
+
+// SetWhatsAppInvoiceEnabled turns automatic WhatsApp invoice messages on or
+// off without touching the rest of the settings.
+func SetWhatsAppInvoiceEnabled(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	var input struct {
+		Enabled *bool `json:"enabled" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil || input.Enabled == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "enabled is required"})
+		return
+	}
+
+	s, exists := loadWhatsAppInvoiceSettings(userID)
+	if *input.Enabled {
+		if !exists {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Configure WhatsApp invoice settings before enabling"})
+			return
+		}
+		if msg := whatsAppInvoiceEnableError(s, false); msg != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": msg + ". Open Configure WhatsApp to finish setup."})
+			return
+		}
+	}
+	if !exists {
+		// Nothing saved and asked to disable: already off.
+		c.JSON(http.StatusOK, buildWhatsAppInvoiceSettingsResponse(c, s))
+		return
+	}
+
+	if err := utils.DB.Model(&models.WhatsAppInvoiceSettings{}).Where("id = ?", s.ID).
+		Update("enabled", *input.Enabled).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update WhatsApp invoice setting"})
+		return
+	}
+	s.Enabled = *input.Enabled
 	c.JSON(http.StatusOK, buildWhatsAppInvoiceSettingsResponse(c, s))
 }
 
@@ -510,7 +725,11 @@ func sendInvoiceWhatsApp(userID, invoiceID uuid.UUID, trigger, overridePhone str
 	if !force && !s.Enabled {
 		return finish("skipped", errors.New("WhatsApp invoice messages are disabled"))
 	}
-	if s.EncryptedAPIKey == "" || s.MessageID == "" || s.PhoneNumberID == "" {
+	if s.EncryptedAPIKey == "" || s.MessageID == "" || s.PhoneNumberID == "" ||
+		(s.Provider == whatsAppProviderTwilio && s.AccountSID == "") {
+		if s.Provider == whatsAppProviderTwilio {
+			return finish("failed", errors.New("Twilio Account SID, Auth Token, Content SID and WhatsApp sender are required"))
+		}
 		return finish("failed", fmt.Errorf("%s, template name and phone number ID are required", whatsAppCredentialName(s.Provider)))
 	}
 	accessToken, err := utils.Decrypt(s.EncryptedAPIKey)
@@ -537,11 +756,43 @@ func sendInvoiceWhatsApp(userID, invoiceID uuid.UUID, trigger, overridePhone str
 		return finish("skipped", errors.New("customer has no valid mobile number"))
 	}
 
+	// Pick the template for the store's current loyalty state; the rest of the
+	// send works on this local copy.
+	s.MessageID, s.VariableMapping, _ = whatsAppActiveTemplate(s, storeLoyaltyEnabled(userID))
+
 	business := resolveSellerBusiness(userID, nil)
 	values := whatsAppInvoiceValues(&invoice, &business, s)
+
+	// Signed, expiring PDF link: Meta's document header, Twilio's media URL
+	// variable (invoice_pdf_file) and the invoice_pdf_url text field.
+	pdfFile, pdfURL := "", ""
+	if s.AttachPDF || whatsAppMappingNeedsPDF(s.VariableMapping) {
+		base := whatsAppInvoicePublicBaseURL(s)
+		if base == "" {
+			return finish("failed", errors.New("public base URL is not configured; cannot attach invoice PDF"))
+		}
+		pdfFile = signInvoicePDFToken(invoice.ID, time.Now().Add(time.Duration(s.PDFLinkTTLMinutes)*time.Minute)) + ".pdf"
+		pdfURL = base + publicInvoicePDFPath + pdfFile
+		values["invoice_pdf_file"] = pdfFile
+		values["invoice_pdf_url"] = pdfURL
+	}
+
 	vars := make([]string, 0, 8)
 	for _, key := range strings.Split(s.VariableMapping, ",") {
 		vars = append(vars, values[strings.TrimSpace(key)])
+	}
+
+	if s.Provider == whatsAppProviderTwilio {
+		if s.AttachPDF && !whatsAppMappingHas(s.VariableMapping, "invoice_pdf_file") {
+			return finish("failed", errors.New("attach PDF is on but no template variable is mapped to \"Invoice PDF file\""))
+		}
+		sid, body, err := callTwilioWhatsAppAPI(s.AccountSID, accessToken, s.PhoneNumberID, phone, s.MessageID, vars, s.CountryCode)
+		entry.RequestID = sid
+		entry.Response = truncateWALog(body, 2000)
+		if err != nil {
+			return finish("failed", err)
+		}
+		return finish("sent", nil)
 	}
 
 	template := map[string]interface{}{
@@ -550,11 +801,6 @@ func sendInvoiceWhatsApp(userID, invoiceID uuid.UUID, trigger, overridePhone str
 	}
 	var components []map[string]interface{}
 	if s.AttachPDF {
-		base := whatsAppInvoicePublicBaseURL(s)
-		if base == "" {
-			return finish("failed", errors.New("public base URL is not configured; cannot attach invoice PDF"))
-		}
-		pdfURL := base + "/api/v1/public/invoice-pdf/" + signInvoicePDFToken(invoice.ID, time.Now().Add(time.Duration(s.PDFLinkTTLMinutes)*time.Minute)) + ".pdf"
 		components = append(components, map[string]interface{}{
 			"type": "header",
 			"parameters": []map[string]interface{}{
@@ -615,6 +861,9 @@ func whatsAppInvoiceValues(inv *models.Invoice, business *models.Business, s mod
 		"balance_due":      formatINRAmount(balanceDue),
 		"loyalty_discount": formatINRAmount(inv.LoyaltyDiscount),
 		"store_phone":      business.Phone,
+		// Filled by sendInvoiceWhatsApp once the signed link is built.
+		"invoice_pdf_url":  "",
+		"invoice_pdf_file": "",
 	}
 	for k, v := range values {
 		// WhatsApp rejects empty template parameters and body text containing
@@ -798,6 +1047,110 @@ func fast2SMSMessageText(raw json.RawMessage) string {
 		return strings.TrimSpace(strings.Join(list, "; "))
 	}
 	return ""
+}
+
+// twilioWhatsAppAddress turns a number into Twilio's "whatsapp:+<digits>"
+// address form; "" when it isn't a valid number.
+func twilioWhatsAppAddress(raw, countryCode string) string {
+	raw = strings.TrimPrefix(strings.TrimSpace(raw), "whatsapp:")
+	n := normalizeWhatsAppNumber(raw, countryCode)
+	if n == "" {
+		return ""
+	}
+	return "whatsapp:+" + n
+}
+
+// callTwilioWhatsAppAPI sends an approved Content template through Twilio's
+// Messages API. sender is a WhatsApp-enabled Twilio number or a Messaging
+// Service SID (MG...); vars fill the template's {{1}}, {{2}}… in order. A
+// media template's document comes from its media URL, whose variable is one of
+// vars. Auth is HTTP Basic (Account SID : Auth Token); the token is never
+// surfaced in errors. Returns the message SID (SM...) and the raw body.
+//
+// Twilio accepts the message (HTTP 201, status "queued") before WhatsApp
+// delivers it, so a later delivery failure (e.g. 63016, template mismatch)
+// shows only in the Twilio console, not here.
+func callTwilioWhatsAppAPI(accountSID, authToken, sender, to, contentSID string, vars []string, countryCode string) (string, string, error) {
+	const label = "Twilio"
+	toAddr := twilioWhatsAppAddress(to, countryCode)
+	if toAddr == "" {
+		return "", "", errors.New("customer has no valid mobile number")
+	}
+
+	form := url.Values{}
+	form.Set("To", toAddr)
+	form.Set("ContentSid", contentSID)
+	if strings.HasPrefix(sender, "MG") {
+		form.Set("MessagingServiceSid", sender)
+	} else {
+		from := twilioWhatsAppAddress(sender, countryCode)
+		if from == "" {
+			return "", "", errors.New("Twilio WhatsApp sender must be a phone number with country code or a Messaging Service SID (MG...)")
+		}
+		form.Set("From", from)
+	}
+	if len(vars) > 0 {
+		cv := make(map[string]string, len(vars))
+		for i, v := range vars {
+			cv[strconv.Itoa(i+1)] = v
+		}
+		raw, err := json.Marshal(cv)
+		if err != nil {
+			return "", "", errors.New("failed to encode Twilio content variables")
+		}
+		form.Set("ContentVariables", string(raw))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	endpoint := strings.TrimRight(whatsAppAPIBase(whatsAppProviderTwilio), "/") +
+		"/Accounts/" + url.PathEscape(accountSID) + "/Messages.json"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", "", fmt.Errorf("invalid %s endpoint", label)
+	}
+	req.SetBasicAuth(accountSID, authToken)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := whatsAppCloudHTTPClient.Do(req)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return "", "", fmt.Errorf("%s request failed: %v", label, err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	bodyText := string(bytes.TrimSpace(raw))
+
+	var parsed struct {
+		SID       string `json:"sid"`
+		Status    string `json:"status"`
+		Code      int    `json:"code"`
+		Message   string `json:"message"`
+		ErrorCode *int   `json:"error_code"`
+		ErrorMsg  string `json:"error_message"`
+	}
+	_ = json.Unmarshal(raw, &parsed)
+
+	if resp.StatusCode >= 300 || parsed.Status == "failed" || parsed.Status == "undelivered" {
+		msg := strings.TrimSpace(parsed.Message)
+		if msg == "" {
+			msg = strings.TrimSpace(parsed.ErrorMsg)
+		}
+		if msg == "" {
+			msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		}
+		if parsed.Code != 0 {
+			msg = fmt.Sprintf("%s (code %d)", msg, parsed.Code)
+		} else if parsed.ErrorCode != nil {
+			msg = fmt.Sprintf("%s (code %d)", msg, *parsed.ErrorCode)
+		}
+		return parsed.SID, bodyText, fmt.Errorf("%s rejected the message: %s", label, msg)
+	}
+	return parsed.SID, bodyText, nil
 }
 
 // ---- Public, signed invoice PDF link (fetched by WhatsApp's media fetcher) ----

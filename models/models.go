@@ -3249,15 +3249,21 @@ type WhatsAppInvoiceSettings struct {
 	ID      uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID  uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
 	Enabled bool      `json:"enabled" gorm:"default:false"`
-	// Provider is the WhatsApp gateway: "whatsapp_cloud" (Meta directly) or
-	// "fast2sms" (Fast2SMS's Meta-format WhatsApp API). EncryptedAPIKey holds
-	// the Meta access token or the Fast2SMS API key accordingly.
+	// Provider is the WhatsApp gateway: "whatsapp_cloud" (Meta directly),
+	// "fast2sms" (Fast2SMS's Meta-format WhatsApp API) or "twilio" (Twilio
+	// Messages API with Content templates). EncryptedAPIKey holds the Meta
+	// access token, the Fast2SMS API key or the Twilio Auth Token accordingly.
 	Provider string `json:"provider" gorm:"default:'whatsapp_cloud'"`
-	// MessageID is the approved template's name in WhatsApp Manager.
+	// MessageID is the approved template's name in WhatsApp Manager, or the
+	// Twilio Content SID (HX...).
 	MessageID string `json:"message_id"`
 	// PhoneNumberID is the sender's WhatsApp Business phone number ID from
-	// Meta → WhatsApp → API Setup, or the Fast2SMS WhatsApp Manager.
+	// Meta → WhatsApp → API Setup, or the Fast2SMS WhatsApp Manager. For
+	// Twilio it is the WhatsApp sender number (+14155238886) or a Messaging
+	// Service SID (MG...).
 	PhoneNumberID string `json:"phone_number_id"`
+	// AccountSID is the Twilio Account SID (AC...); unused by other providers.
+	AccountSID string `json:"account_sid"`
 	// LanguageCode is the template's language (e.g. en, en_US, hi).
 	LanguageCode string `json:"language_code" gorm:"default:'en'"`
 	// VariableMapping is a comma-separated list of field keys; position N
@@ -3266,7 +3272,20 @@ type WhatsAppInvoiceSettings struct {
 	// StoreDisplayName overrides the business/store name used by the
 	// store_name field. Empty = use the store name.
 	StoreDisplayName string `json:"store_display_name"`
-	// AttachPDF sends the invoice PDF as the template's document header.
+	// TemplateBody is a copy of the approved template's body text, used only
+	// for the settings-page preview. The real wording always comes from the
+	// approved template; this is never sent.
+	TemplateBody string `json:"template_body" gorm:"type:text"`
+	// NoLoyalty* configure the alternate template sent while the store's
+	// loyalty program is disabled (a template without the points lines).
+	// Empty NoLoyaltyMessageID = always send the main template. Language,
+	// sender and PDF settings are shared with the main template.
+	NoLoyaltyMessageID       string `json:"no_loyalty_message_id"`
+	NoLoyaltyVariableMapping string `json:"no_loyalty_variable_mapping"`
+	NoLoyaltyTemplateBody    string `json:"no_loyalty_template_body" gorm:"type:text"`
+	// AttachPDF sends the invoice PDF as the template's document header. For
+	// Twilio the document comes from the Content template's media URL, whose
+	// variable must be mapped to the invoice_pdf_file field.
 	AttachPDF bool `json:"attach_pdf" gorm:"default:true"`
 	// PublicBaseURL is this backend's internet-reachable origin (e.g.
 	// https://api.example.com) used to build the PDF link WhatsApp downloads.

@@ -802,6 +802,7 @@ func SetupRoutes(r *gin.Engine) {
 		// WhatsApp invoice message (WhatsApp Cloud API), per store
 		settings.GET("/whatsapp-invoice", controllers.GetWhatsAppInvoiceSettings)
 		settings.PUT("/whatsapp-invoice", controllers.UpdateWhatsAppInvoiceSettings)
+		settings.PUT("/whatsapp-invoice/enabled", controllers.SetWhatsAppInvoiceEnabled)
 		settings.POST("/whatsapp-invoice/test", controllers.TestWhatsAppInvoice)
 		settings.GET("/whatsapp-invoice/logs", controllers.GetWhatsAppInvoiceLogs)
 

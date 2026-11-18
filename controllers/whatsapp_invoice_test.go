@@ -212,11 +212,136 @@ func TestNormalizeWhatsAppProvider(t *testing.T) {
 		"":               whatsAppProviderCloud,
 		"whatsapp_cloud": whatsAppProviderCloud,
 		" Fast2SMS ":     whatsAppProviderFast2SMS,
+		"Twilio":         whatsAppProviderTwilio,
 		"unknown":        whatsAppProviderCloud,
 	}
 	for in, want := range cases {
 		if got := normalizeWhatsAppProvider(in); got != want {
 			t.Fatalf("normalizeWhatsAppProvider(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestCallTwilioWhatsAppAPI(t *testing.T) {
+	var gotPath, gotUser, gotPass string
+	var gotForm map[string][]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotUser, gotPass, _ = r.BasicAuth()
+		_ = r.ParseForm()
+		gotForm = r.PostForm
+		w.Header().Set("Content-Type", "application/json")
+		if r.PostForm.Get("To") == "whatsapp:+910000000000" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"code":21211,"message":"The 'To' number is not a valid phone number.","more_info":"https://www.twilio.com/docs/errors/21211","status":400}`))
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"sid":"SM123","status":"queued","error_code":null,"error_message":null}`))
+	}))
+	defer srv.Close()
+	t.Setenv("TWILIO_API_BASE", srv.URL+"/2010-04-01")
+
+	sid, _, err := callTwilioWhatsAppAPI("AC1", "TOKEN", "+1 415 523 8886", "919876543210", "HXabc", []string{"INV-1", "abc.pdf"}, "91")
+	if err != nil || sid != "SM123" {
+		t.Fatalf("expected success, got sid=%q err=%v", sid, err)
+	}
+	if gotPath != "/2010-04-01/Accounts/AC1/Messages.json" {
+		t.Fatalf("unexpected endpoint path: %s", gotPath)
+	}
+	if gotUser != "AC1" || gotPass != "TOKEN" {
+		t.Fatalf("unexpected basic auth %q:%q", gotUser, gotPass)
+	}
+	if gotForm["From"][0] != "whatsapp:+14155238886" || gotForm["To"][0] != "whatsapp:+919876543210" {
+		t.Fatalf("unexpected addresses: %v", gotForm)
+	}
+	if gotForm["ContentSid"][0] != "HXabc" {
+		t.Fatalf("unexpected content sid: %v", gotForm["ContentSid"])
+	}
+	var cv map[string]string
+	if err := json.Unmarshal([]byte(gotForm["ContentVariables"][0]), &cv); err != nil || cv["1"] != "INV-1" || cv["2"] != "abc.pdf" {
+		t.Fatalf("unexpected content variables: %v err=%v", gotForm["ContentVariables"], err)
+	}
+
+	if _, _, err := callTwilioWhatsAppAPI("AC1", "TOKEN", "MGservice", "919876543210", "HXabc", nil, "91"); err != nil {
+		t.Fatalf("messaging service send failed: %v", err)
+	}
+	if gotForm["MessagingServiceSid"][0] != "MGservice" || len(gotForm["From"]) != 0 {
+		t.Fatalf("expected MessagingServiceSid and no From, got %v", gotForm)
+	}
+
+	_, _, err = callTwilioWhatsAppAPI("AC1", "TOKEN", "+14155238886", "910000000000", "HXabc", nil, "91")
+	if err == nil || !strings.Contains(err.Error(), "not a valid phone number") || !strings.Contains(err.Error(), "21211") {
+		t.Fatalf("expected Twilio error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "TOKEN") {
+		t.Fatal("auth token leaked into error")
+	}
+}
+
+func TestWhatsAppInvoiceEnableErrorTwilio(t *testing.T) {
+	s := models.WhatsAppInvoiceSettings{
+		Provider:        whatsAppProviderTwilio,
+		EncryptedAPIKey: "enc",
+		PhoneNumberID:   "+14155238886",
+		MessageID:       "HXabc",
+		VariableMapping: "invoice_number,invoice_pdf_file",
+		AttachPDF:       true,
+		PublicBaseURL:   "https://api.example.com",
+	}
+	if msg := whatsAppInvoiceEnableError(s, false); !strings.Contains(msg, "Account SID") {
+		t.Fatalf("expected Account SID error, got %q", msg)
+	}
+	s.AccountSID = "AC123"
+	if msg := whatsAppInvoiceEnableError(s, false); msg != "" {
+		t.Fatalf("expected valid settings, got %q", msg)
+	}
+	s.VariableMapping = "invoice_number"
+	if msg := whatsAppInvoiceEnableError(s, false); !strings.Contains(msg, "Invoice PDF file") {
+		t.Fatalf("expected PDF mapping error, got %q", msg)
+	}
+	s.AttachPDF = false
+	s.MessageID = "purchase_summary"
+	if msg := whatsAppInvoiceEnableError(s, false); !strings.Contains(msg, "HX") {
+		t.Fatalf("expected Content SID error, got %q", msg)
+	}
+}
+
+func TestWhatsAppActiveTemplate(t *testing.T) {
+	s := models.WhatsAppInvoiceSettings{
+		MessageID:                "purchase_summary",
+		VariableMapping:          defaultWhatsAppInvoiceFields,
+		NoLoyaltyVariableMapping: defaultWhatsAppNoLoyaltyFields,
+	}
+	// No alternate template configured: always the main one.
+	if id, m, alt := whatsAppActiveTemplate(s, false); id != "purchase_summary" || m != defaultWhatsAppInvoiceFields || alt {
+		t.Fatalf("got %q %q %v, want main template", id, m, alt)
+	}
+	s.NoLoyaltyMessageID = "purchase_summary_basic"
+	if id, m, alt := whatsAppActiveTemplate(s, false); id != "purchase_summary_basic" || m != defaultWhatsAppNoLoyaltyFields || !alt {
+		t.Fatalf("got %q %q %v, want no-loyalty template", id, m, alt)
+	}
+	if id, _, alt := whatsAppActiveTemplate(s, true); id != "purchase_summary" || alt {
+		t.Fatalf("loyalty on: got %q %v, want main template", id, alt)
+	}
+}
+
+func TestWhatsAppInvoiceEnableErrorNoLoyaltyTwilio(t *testing.T) {
+	s := models.WhatsAppInvoiceSettings{
+		Provider:                 whatsAppProviderTwilio,
+		EncryptedAPIKey:          "x",
+		AccountSID:               "AC123",
+		PhoneNumberID:            "+14155238886",
+		MessageID:                "HX123",
+		VariableMapping:          defaultWhatsAppInvoiceFields,
+		NoLoyaltyMessageID:       "purchase_basic",
+		NoLoyaltyVariableMapping: defaultWhatsAppNoLoyaltyFields,
+	}
+	if msg := whatsAppInvoiceEnableError(s, false); !strings.Contains(msg, "without loyalty") {
+		t.Fatalf("expected no-loyalty HX error, got %q", msg)
+	}
+	s.NoLoyaltyMessageID = "HX456"
+	if msg := whatsAppInvoiceEnableError(s, false); msg != "" {
+		t.Fatalf("expected valid settings, got %q", msg)
 	}
 }
