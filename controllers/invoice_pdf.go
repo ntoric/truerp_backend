@@ -184,7 +184,7 @@ func InvoicePDFHTMLWithOptions(invoice models.Invoice, opts invoicePDFOptions) s
 
 	footerHTML := ""
 	if printSettings.PrintFooter {
-		footerHTML = `<div class="print-footer">Invoice created using TruERP</div>`
+		footerHTML = `<div class="print-footer">Invoice created using TruERP by Gooseroot</div>`
 	}
 
 	return fmt.Sprintf(`

@@ -1781,7 +1781,7 @@ type InvoiceSettings struct {
 type AppearanceSettings struct {
 	ID         uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
 	UserID     uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
-	ColorTheme string         `json:"color_theme" gorm:"default:'runerail'"`
+	ColorTheme string         `json:"color_theme" gorm:"default:'crimson'"`
 	CustomHex  string         `json:"custom_hex"`
 	ThemeMode  string         `json:"theme_mode" gorm:"default:'light'"`
 	CreatedAt  time.Time      `json:"created_at"`

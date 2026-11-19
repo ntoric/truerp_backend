@@ -160,7 +160,7 @@ func sendPartyBalanceReportEmail(settings models.PartyBalanceReportEmailSettings
 Opening — receivable: %s, payable: %s<br>
 Closing — receivable: %s, payable: %s</p>
 <p>This report was generated and sent automatically by TruERP.</p>
-<p>— TruERP</p>`,
+<p>— TruERP by Gooseroot</p>`,
 		dateLabel, len(report.Lines),
 		fmtINR(report.OpeningReceivable), fmtINR(report.OpeningPayable),
 		fmtINR(report.ClosingReceivable), fmtINR(report.ClosingPayable))
