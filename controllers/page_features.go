@@ -18,6 +18,7 @@ var defaultPageFeatureKeys = []string{
 	"/categories",
 	"/products",
 	"/inventory",
+	"/inventory/movements",
 	"/warehouses",
 	"/purchase-invoices",
 	"/purchase-returns",
