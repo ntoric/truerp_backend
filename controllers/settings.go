@@ -109,18 +109,27 @@ func UpdateInvoiceSettings(c *gin.Context) {
 }
 
 var allowedColorThemes = map[string]bool{
+	// Current presets
+	"crimson":    true,
+	"rose":       true,
+	"tangerine":  true,
+	"amber":      true,
+	"emerald":    true,
+	"teal":       true,
+	"ocean":      true,
+	"indigo":     true,
+	"plum":       true,
+	"graphite":   true,
+	"monochrome": true,
+	"custom":     true,
+	// Legacy ids, still accepted so older clients keep saving
 	"runerail": true,
 	"blue":     true,
 	"sky":      true,
-	"teal":     true,
-	"emerald":  true,
 	"violet":   true,
 	"purple":   true,
-	"rose":     true,
 	"orange":   true,
-	"amber":    true,
 	"slate":    true,
-	"custom":   true,
 }
 
 func normalizeCustomHex(hex string) string {
@@ -209,7 +218,7 @@ func UpdateAppearanceSettings(c *gin.Context) {
 		settings = models.AppearanceSettings{
 			ID:         uuid.New(),
 			UserID:     userID,
-			ColorTheme: "runerail",
+			ColorTheme: "crimson",
 			ThemeMode:  "light",
 		}
 		if v, ok := updates["color_theme"]; ok {

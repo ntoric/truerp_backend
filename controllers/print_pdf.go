@@ -559,7 +559,7 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 		pdf.Ln(8)
 		pdf.SetFont("Arial", "I", 8)
 		pdf.SetTextColor(140, 140, 140)
-		pdf.CellFormat(0, 6, "Invoice created using TruERP", "", 1, "C", false, 0, "")
+		pdf.CellFormat(0, 6, "Invoice created using TruERP by Gooseroot", "", 1, "C", false, 0, "")
 	}
 
 	var buf bytes.Buffer

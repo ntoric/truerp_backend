@@ -263,7 +263,7 @@ func SendPasswordResetOTPEmail(to, otp string) error {
 <p>We received a request to reset your TruERP account password.</p>
 <p>Your verification code is: <strong style="font-size:24px;letter-spacing:4px;">%s</strong></p>
 <p>This code expires in 15 minutes. If you did not request a password reset, you can ignore this email.</p>
-<p>— TruERP</p>`, otp)
+<p>— TruERP by Gooseroot</p>`, otp)
 
 	if err := SendEmail(to, subject, body); err != nil {
 		return err
