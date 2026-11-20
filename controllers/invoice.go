@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -1032,6 +1033,7 @@ func GenerateInvoicePDF(c *gin.Context) {
 
 	pdfBytes, err := buildInvoiceDocumentPDF(invoice, &business, settings)
 	if err != nil {
+		log.Printf("GenerateInvoicePDF: invoice %s: %v", invoice.ID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate invoice PDF"})
 		return
 	}

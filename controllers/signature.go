@@ -1,7 +1,6 @@
 package controllers
 
 import (
-	"bytes"
 	"encoding/base64"
 	"fmt"
 	"html"
@@ -34,10 +33,8 @@ func pdfDrawSignature(pdf *fpdf.Fpdf, signature string) {
 		return
 	}
 	name := fmt.Sprintf("signature-%d", time.Now().UnixNano())
-	if err := pdf.RegisterImageOptionsReader(name, fpdf.ImageOptions{
-		ImageType: imgType,
-		ReadDpi:   true,
-	}, bytes.NewReader(data)); err != nil {
+	info, name := safeRegisterImage(pdf, name, imgType, data)
+	if info == nil {
 		return
 	}
 

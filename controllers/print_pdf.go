@@ -61,7 +61,7 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 	if ps.PrintHeader && business != nil && business.LogoURL != "" {
 		if data, imgType := fetchThermalLogoBytes(business.LogoURL); len(data) > 0 {
 			name := "invoice-logo"
-			if info := pdf.RegisterImageOptionsReader(name, fpdf.ImageOptions{ImageType: imgType, ReadDpi: true}, bytes.NewReader(data)); info != nil {
+			if info, name := safeRegisterImage(pdf, name, imgType, data); info != nil && info.Width() > 0 && info.Height() > 0 {
 				imgW := 30.0
 				imgH := imgW
 				if info.Width() > 0 {
@@ -414,7 +414,7 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 		pdf.MultiCell(colW, 4.6, "UPI ID: "+sanitizePDFText(business.UPIID), "", "L", false)
 		if png := upiQRPNG(business.UPIID, business.Name, invoice.TotalAmount); png != nil {
 			name := "upi-qr"
-			if pdf.RegisterImageOptionsReader(name, fpdf.ImageOptions{ImageType: "PNG", ReadDpi: true}, bytes.NewReader(png)) != nil {
+			if info, name := safeRegisterImage(pdf, name, "PNG", png); info != nil {
 				qrSize := 26.0
 				pdf.ImageOptions(name, leftM, pdf.GetY()+1, qrSize, qrSize, false, fpdf.ImageOptions{}, 0, "")
 				pdf.SetY(pdf.GetY() + qrSize + 1)
@@ -542,7 +542,7 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 	}
 	if sigOK {
 		name := fmt.Sprintf("invoice-sig-%d", time.Now().UnixNano())
-		if pdf.RegisterImageOptionsReader(name, fpdf.ImageOptions{ImageType: sigType, ReadDpi: true}, bytes.NewReader(sigData)) != nil {
+		if info, name := safeRegisterImage(pdf, name, sigType, sigData); info != nil {
 			pdf.Ln(6)
 			imgW := 45.0
 			imgH := 15.0
@@ -624,13 +624,23 @@ func fetchThermalLogoBytes(logoURL string) ([]byte, string) {
 	if err != nil || len(data) == 0 {
 		return nil, ""
 	}
+	// Trust the file's magic bytes over the Content-Type header: storage often
+	// serves a JPEG as image/png (or vice versa), which makes fpdf fail.
+	switch {
+	case bytes.HasPrefix(data, []byte{0x89, 'P', 'N', 'G'}):
+		return data, "PNG"
+	case bytes.HasPrefix(data, []byte{0xff, 0xd8}):
+		return data, "JPG"
+	case bytes.HasPrefix(data, []byte("GIF")):
+		return data, "GIF"
+	}
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
 	switch {
-	case strings.Contains(ct, "png"), bytes.HasPrefix(data, []byte{0x89, 'P', 'N', 'G'}):
+	case strings.Contains(ct, "png"):
 		return data, "PNG"
-	case strings.Contains(ct, "jpeg"), strings.Contains(ct, "jpg"), bytes.HasPrefix(data, []byte{0xff, 0xd8}):
+	case strings.Contains(ct, "jpeg"), strings.Contains(ct, "jpg"):
 		return data, "JPG"
-	case strings.Contains(ct, "gif"), bytes.HasPrefix(data, []byte("GIF")):
+	case strings.Contains(ct, "gif"):
 		return data, "GIF"
 	default:
 		return nil, ""
@@ -690,8 +700,7 @@ func buildThermalReceiptPDF(content string, widthMM int, logoURL string) ([]byte
 
 	usableW := float64(widthMM) - margin*2
 	if len(logoBytes) > 0 && logoType != "" {
-		opt := fpdf.ImageOptions{ImageType: logoType, ReadDpi: true}
-		info := pdf.RegisterImageOptionsReader("thermal-logo", opt, bytes.NewReader(logoBytes))
+		info, logoName := safeRegisterImage(pdf, "thermal-logo", logoType, logoBytes)
 		if info != nil {
 			imgW := usableW * 0.55
 			if info.Width() > 0 && info.Height() > 0 {
@@ -702,7 +711,7 @@ func buildThermalReceiptPDF(content string, widthMM int, logoURL string) ([]byte
 					imgW = info.Width() * (imgH / info.Height())
 				}
 				x := margin + (usableW-imgW)/2
-				pdf.ImageOptions("thermal-logo", x, pdf.GetY(), imgW, imgH, false, opt, 0, "")
+				pdf.ImageOptions(logoName, x, pdf.GetY(), imgW, imgH, false, fpdf.ImageOptions{}, 0, "")
 				pdf.SetY(pdf.GetY() + imgH + 1)
 			}
 		}
