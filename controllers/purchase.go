@@ -1338,6 +1338,11 @@ func GetPurchaseBillStats(c *gin.Context) {
 		qPaid = qPaid.Where(lte, toDate)
 		qUnpaid = qUnpaid.Where(lte, toDate)
 	}
+	if partyID := c.Query("party_id"); partyID != "" {
+		qTotal = qTotal.Where("party_id = ?", partyID)
+		qPaid = qPaid.Where("party_id = ?", partyID)
+		qUnpaid = qUnpaid.Where("party_id = ?", partyID)
+	}
 
 	qTotal.Select("COALESCE(SUM(total_amount), 0)").Scan(&stats.TotalPurchase)
 	// Include partial payments, not only fully paid bills.

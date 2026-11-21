@@ -976,6 +976,9 @@ func invoiceListFilters(c *gin.Context) func(*gorm.DB) *gorm.DB {
 		if status := c.Query("status"); status != "" {
 			db = db.Where("status = ?", status)
 		}
+		if partyID := c.Query("party_id"); partyID != "" {
+			db = db.Where("party_id = ?", partyID)
+		}
 		return db
 	}
 }
