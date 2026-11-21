@@ -89,13 +89,15 @@ func firstNonEmpty(values ...string) string {
 }
 
 type publicB2BProduct struct {
-	ID          uuid.UUID `json:"id"`
-	Name        string    `json:"name"`
-	Category    string    `json:"category"`
-	Unit        string    `json:"unit"`
-	Price       float64   `json:"price"`
-	MRP         float64   `json:"mrp"`
-	MinOrderQty float64   `json:"min_order_qty"`
+	ID       uuid.UUID `json:"id"`
+	Name     string    `json:"name"`
+	Category string    `json:"category"`
+	Unit     string    `json:"unit"`
+	// Price and MRP are only sent when the shop shows prices; hiding them in
+	// the UI alone would leave them readable in the API response.
+	Price       *float64 `json:"price,omitempty"`
+	MRP         *float64 `json:"mrp,omitempty"`
+	MinOrderQty float64  `json:"min_order_qty"`
 	IsFeatured  bool      `json:"is_featured"`
 	Description string    `json:"description"`
 	ImageURL    string    `json:"image_url"`
@@ -256,8 +258,6 @@ func toPublicB2BProducts(shop *models.B2BShopSettings, rows []b2bCatalogRow) []p
 			Name:        p.Name,
 			Category:    p.Category,
 			Unit:        p.Unit,
-			Price:       b2bEffectivePrice(item, p),
-			MRP:         p.MRP,
 			MinOrderQty: minQty,
 			IsFeatured:  item.IsFeatured,
 			Description: description,
@@ -265,6 +265,12 @@ func toPublicB2BProducts(shop *models.B2BShopSettings, rows []b2bCatalogRow) []p
 			HSNCode:     p.HSNCode,
 			// Orderable only when stock covers the minimum order quantity.
 			InStock: isService || qty >= minQty || shop.AllowBackorders,
+		}
+		if shop.ShowPrice {
+			price := b2bEffectivePrice(item, p)
+			row.Price = &price
+			mrp := p.MRP
+			row.MRP = &mrp
 		}
 		if shop.ShowStock && !isService {
 			v := qty
@@ -492,17 +498,20 @@ func PlacePublicB2BOrder(c *gin.Context) {
 	}
 
 	notifyNewB2BOrder(order)
-	c.JSON(http.StatusCreated, gin.H{
+	res := gin.H{
 		"order_number": order.OrderNumber,
 		"party_id":     order.PartyID,
 		"buyer_match":  order.BuyerMatch,
 		"verified":     order.BuyerVerified,
 		"status":       order.Status,
-		"total_amount": order.TotalAmount,
 		"item_count":   order.ItemCount,
 		"buyer_name":   order.BuyerName,
 		"created_at":   order.CreatedAt,
-	})
+	}
+	if shop.ShowPrice {
+		res["total_amount"] = order.TotalAmount
+	}
+	c.JSON(http.StatusCreated, res)
 }
 
 func writeB2BOrderError(c *gin.Context, err error) {
@@ -848,16 +857,17 @@ func TrackPublicB2BOrder(c *gin.Context) {
 	sort.SliceStable(order.Items, func(i, j int) bool { return order.Items[i].CreatedAt.Before(order.Items[j].CreatedAt) })
 	items := make([]gin.H, 0, len(order.Items))
 	for _, it := range order.Items {
-		items = append(items, gin.H{
-			"name": it.Name, "unit": it.Unit, "quantity": it.Quantity,
-			"unit_price": it.UnitPrice, "total": it.Total,
-		})
+		line := gin.H{"name": it.Name, "unit": it.Unit, "quantity": it.Quantity}
+		if shop.ShowPrice {
+			line["unit_price"] = it.UnitPrice
+			line["total"] = it.Total
+		}
+		items = append(items, line)
 	}
-	c.JSON(http.StatusOK, gin.H{
+	res := gin.H{
 		"order_number":     order.OrderNumber,
 		"status":           order.Status,
 		"buyer_name":       order.BuyerName,
-		"total_amount":     order.TotalAmount,
 		"item_count":       order.ItemCount,
 		"shipping_address": order.ShippingAddress,
 		"city":             order.City,
@@ -867,5 +877,9 @@ func TrackPublicB2BOrder(c *gin.Context) {
 		"items":            items,
 		"invoiced":         order.InvoiceID != nil,
 		"tracked_at":       time.Now(),
-	})
+	}
+	if shop.ShowPrice {
+		res["total_amount"] = order.TotalAmount
+	}
+	c.JSON(http.StatusOK, res)
 }

@@ -46,7 +46,7 @@ func setupB2BShopTest(t *testing.T) *b2bFixture {
 	t.Cleanup(func() { utils.DB = prev })
 
 	f := &b2bFixture{db: db, owner: uuid.New()}
-	f.shop = models.B2BShopSettings{ID: uuid.New(), UserID: f.owner, IsEnabled: true, Slug: "acme", ShowStock: true, AllowNewBuyers: true}
+	f.shop = models.B2BShopSettings{ID: uuid.New(), UserID: f.owner, IsEnabled: true, Slug: "acme", ShowStock: true, ShowPrice: true, AllowNewBuyers: true}
 	f.listed = models.Product{ID: uuid.New(), UserID: f.owner, Name: "Rice 25kg", SKU: "R1", Unit: "BAG", SalePrice: 100, IsActive: true}
 	f.unlisted = models.Product{ID: uuid.New(), UserID: f.owner, Name: "Secret item", SKU: "S1", Unit: "PCS", SalePrice: 50, IsActive: true}
 	f.buyer = models.Party{ID: uuid.New(), UserID: f.owner, Name: "Sharma Traders", Phone: "+91 98765 43210", PartyType: "customer", IsActive: true}
@@ -106,11 +106,28 @@ func TestPublicB2BProductsOnlyListedWithWholesalePrice(t *testing.T) {
 		t.Fatalf("want only the listed product, got total=%d %+v", body.Total, body.Products)
 	}
 	p := body.Products[0]
-	if p.ID != f.listed.ID || p.Price != 80 || p.MinOrderQty != 2 || !p.InStock {
+	if p.ID != f.listed.ID || p.Price == nil || *p.Price != 80 || p.MinOrderQty != 2 || !p.InStock {
 		t.Fatalf("unexpected product %+v", p)
 	}
 	if p.StockQty == nil || *p.StockQty != 10 {
 		t.Fatalf("stock_qty = %v, want 10", p.StockQty)
+	}
+}
+
+func TestPublicB2BProductsHidePriceWhenDisabled(t *testing.T) {
+	f := setupB2BShopTest(t)
+	f.db.Model(&f.shop).Update("show_price", false)
+	c, rec := b2bRequest("GET", "/shop/acme/products", nil, gin.Params{{Key: "slug", Value: "acme"}})
+	ListPublicB2BProducts(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Products []publicB2BProduct `json:"products"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if len(body.Products) != 1 || body.Products[0].Price != nil || body.Products[0].MRP != nil {
+		t.Fatalf("expected price/mrp hidden, got %+v", body.Products)
 	}
 }
 
@@ -438,7 +455,7 @@ func TestGetPublicB2BProductDetail(t *testing.T) {
 		Related  []publicB2BProduct `json:"related"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if body.Product.Price != 80 || body.ItemCode != "RC-25" {
+	if body.Product.Price == nil || *body.Product.Price != 80 || body.ItemCode != "RC-25" {
 		t.Fatalf("unexpected product %+v code=%q", body.Product, body.ItemCode)
 	}
 	if len(body.Images) != 2 || body.Images[0] != "/uploads/rice.jpg" || body.Images[1] != "/uploads/rice-2.jpg" {
