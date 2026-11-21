@@ -25,6 +25,8 @@ type B2BShopSettings struct {
 	MinOrderValue float64 `json:"min_order_value" gorm:"default:0"`
 	// ShowStock exposes available quantities to buyers.
 	ShowStock bool `json:"show_stock" gorm:"default:true"`
+	// ShowPrice displays wholesale prices on the storefront's product cards.
+	ShowPrice bool `json:"show_price" gorm:"default:true"`
 	// AllowBackorders lets buyers order more than the available stock.
 	AllowBackorders bool `json:"allow_backorders" gorm:"default:false"`
 	// HideOutOfStock leaves goods with no available stock out of the

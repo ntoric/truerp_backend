@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
@@ -1501,19 +1502,7 @@ func GeneratePurchaseBillPDF(c *gin.Context) {
 	c.String(http.StatusOK, html)
 }
 
-func DownloadPurchaseBillPDF(c *gin.Context) {
-	userID := c.MustGet("user_id").(uuid.UUID)
-	id := c.Param("id")
-
-	var bill models.PurchaseBill
-	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).
-		Preload("Party").
-		Preload("Items").
-		First(&bill).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Purchase bill not found"})
-		return
-	}
-
+func buildPurchaseBillPDF(bill *models.PurchaseBill) ([]byte, error) {
 	pdf := fpdf.New("P", "mm", "A4", "")
 	pdf.AddPage()
 	pdf.SetAutoPageBreak(true, 15)
@@ -1692,13 +1681,134 @@ func DownloadPurchaseBillPDF(c *gin.Context) {
 
 	var buf bytes.Buffer
 	if err := pdf.Output(&buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func DownloadPurchaseBillPDF(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	id := c.Param("id")
+
+	var bill models.PurchaseBill
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).
+		Preload("Party").
+		Preload("Items").
+		First(&bill).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Purchase bill not found"})
+		return
+	}
+
+	pdfBytes, err := buildPurchaseBillPDF(&bill)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate purchase invoice PDF"})
 		return
 	}
 
 	c.Header("Content-Type", "application/pdf")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"Purchase_Invoice_%s.pdf\"", bill.BillNumber))
-	c.Data(http.StatusOK, "application/pdf", buf.Bytes())
+	c.Data(http.StatusOK, "application/pdf", pdfBytes)
+}
+
+// DownloadPurchaseBillsPDFZip streams a ZIP containing one PDF per requested
+// purchase bill. At most the user's configured bulk-download limit (default
+// 25) may be requested at once; unknown ids or PDF failures are reported in a
+// _skipped.csv manifest inside the ZIP.
+func DownloadPurchaseBillsPDFZip(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	var input struct {
+		IDs []uuid.UUID `json:"ids" binding:"required,min=1"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	limit := bulkDownloadLimit(userID)
+	if len(input.IDs) > limit {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("You can download up to %d invoices at once", limit),
+			"limit": limit,
+		})
+		return
+	}
+
+	// De-duplicate while preserving the requested order.
+	seen := make(map[uuid.UUID]bool, len(input.IDs))
+	ids := make([]uuid.UUID, 0, len(input.IDs))
+	for _, id := range input.IDs {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+
+	var bills []models.PurchaseBill
+	if err := utils.DB.Where("user_id = ? AND id IN ?", userID, ids).
+		Preload("Party").
+		Preload("Items").
+		Find(&bills).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load purchase bills"})
+		return
+	}
+
+	byID := make(map[uuid.UUID]*models.PurchaseBill, len(bills))
+	for i := range bills {
+		byID[bills[i].ID] = &bills[i]
+	}
+
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="purchase-invoices_%s.zip"`, time.Now().Format("20060102-150405")))
+
+	zw := zip.NewWriter(c.Writer)
+	manifest := bytes.NewBuffer(nil)
+	manifest.WriteString("bill_number,party,reason\n")
+	skipped := 0
+	for _, id := range ids {
+		bill, ok := byID[id]
+		if !ok {
+			fmt.Fprintf(manifest, "%s,,%s\n", id.String(), "not found")
+			skipped++
+			continue
+		}
+		pdfBytes, err := buildPurchaseBillPDF(bill)
+		if err != nil {
+			fmt.Fprintf(manifest, "%s,%s,%s\n",
+				sanitizeCSVField(bill.BillNumber),
+				sanitizeCSVField(bill.Party.Name),
+				"pdf generation failed")
+			skipped++
+			continue
+		}
+		name := sanitizeFilename(bill.BillNumber)
+		if name == "" {
+			name = bill.ID.String()
+		}
+		w, err := zw.Create(fmt.Sprintf("Purchase_Invoice_%s.pdf", name))
+		if err != nil {
+			fmt.Fprintf(manifest, "%s,%s,%s\n",
+				sanitizeCSVField(bill.BillNumber),
+				sanitizeCSVField(bill.Party.Name),
+				"zip write failed")
+			skipped++
+			continue
+		}
+		if _, err := w.Write(pdfBytes); err != nil {
+			fmt.Fprintf(manifest, "%s,%s,%s\n",
+				sanitizeCSVField(bill.BillNumber),
+				sanitizeCSVField(bill.Party.Name),
+				"zip write failed")
+			skipped++
+		}
+	}
+	if skipped > 0 {
+		if w, err := zw.Create("_skipped.csv"); err == nil {
+			w.Write(manifest.Bytes())
+		}
+	}
+	zw.Close()
 }
 
 type LabelConfig struct {

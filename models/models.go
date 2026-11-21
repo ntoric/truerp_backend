@@ -2856,6 +2856,11 @@ type DeveloperSettings struct {
 	// columns are computed live from transactions whenever the report is read.
 	AsyncDailyProfit bool `json:"async_daily_profit" gorm:"default:false"`
 
+	// BulkDownloadLimit caps how many invoices may be included in a single bulk
+	// PDF ZIP download (sales and purchase invoice lists). Values <= 0 fall
+	// back to the default of 25.
+	BulkDownloadLimit int `json:"bulk_download_limit" gorm:"default:25"`
+
 	// Encrypted fields (database storage only)
 	EncryptedSMTPPassword        string `json:"-" gorm:"column:smtp_password"`
 	EncryptedSendGridAPIKey      string `json:"-" gorm:"column:sendgrid_api_key"`

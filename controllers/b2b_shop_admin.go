@@ -73,6 +73,7 @@ func UpdateB2BShopSettings(c *gin.Context) {
 		ContactEmail           *string  `json:"contact_email"`
 		MinOrderValue          *float64 `json:"min_order_value"`
 		ShowStock              *bool    `json:"show_stock"`
+		ShowPrice              *bool    `json:"show_price"`
 		AllowBackorders        *bool    `json:"allow_backorders"`
 		HideOutOfStock         *bool    `json:"hide_out_of_stock"`
 		AllowNewBuyers         *bool    `json:"allow_new_buyers"`
@@ -126,6 +127,9 @@ func UpdateB2BShopSettings(c *gin.Context) {
 	}
 	if input.ShowStock != nil {
 		settings.ShowStock = *input.ShowStock
+	}
+	if input.ShowPrice != nil {
+		settings.ShowPrice = *input.ShowPrice
 	}
 	if input.AllowBackorders != nil {
 		settings.AllowBackorders = *input.AllowBackorders

@@ -9,6 +9,21 @@ import (
 	"github.com/google/uuid"
 )
 
+// DefaultBulkDownloadLimit caps how many invoices may be downloaded in a
+// single bulk PDF ZIP request when the user has not configured a limit in
+// Developer Settings.
+const DefaultBulkDownloadLimit = 25
+
+// bulkDownloadLimit returns the per-user cap for bulk invoice PDF downloads,
+// falling back to DefaultBulkDownloadLimit when unset or non-positive.
+func bulkDownloadLimit(userID uuid.UUID) int {
+	var settings models.DeveloperSettings
+	if err := utils.DB.Where("user_id = ?", userID).First(&settings).Error; err == nil && settings.BulkDownloadLimit > 0 {
+		return settings.BulkDownloadLimit
+	}
+	return DefaultBulkDownloadLimit
+}
+
 type developerSettingsInput struct {
 	EmailProvider             string `json:"email_provider"`
 	SMTPHost                  string `json:"smtp_host"`
@@ -43,6 +58,7 @@ type developerSettingsInput struct {
 	SendGridSMSAPIKey         string `json:"sendgrid_sms_api_key"`
 	Timezone                  string `json:"timezone"`
 	AsyncDailyProfit          bool   `json:"async_daily_profit"`
+	BulkDownloadLimit         int    `json:"bulk_download_limit"`
 }
 
 type testEmailInput struct {
@@ -84,6 +100,10 @@ func applyDeveloperSettingsInput(settings *models.DeveloperSettings, input devel
 	settings.AWSRegion = input.AWSRegion
 	settings.Timezone = input.Timezone
 	settings.AsyncDailyProfit = input.AsyncDailyProfit
+	settings.BulkDownloadLimit = input.BulkDownloadLimit
+	if settings.BulkDownloadLimit < 0 {
+		settings.BulkDownloadLimit = 0
+	}
 
 	var err error
 	if input.SMTPPassword != "" {
@@ -185,6 +205,7 @@ func developerSettingsUpdates(input developerSettingsInput) (map[string]interfac
 		"aws_region":                   input.AWSRegion,
 		"timezone":                     input.Timezone,
 		"async_daily_profit":           input.AsyncDailyProfit,
+		"bulk_download_limit":          input.BulkDownloadLimit,
 	}
 
 	secretFields := []struct {
@@ -228,10 +249,11 @@ func GetDeveloperSettings(c *gin.Context) {
 		c.JSON(http.StatusOK, models.DeveloperSettings{
 			ID:               uuid.New(),
 			UserID:           userID,
-			EmailProvider:    "smtp",
-			SMTPPort:         587,
-			WhatsAppProvider: "meta",
-			SMSProvider:      "twilio",
+			EmailProvider:     "smtp",
+			SMTPPort:          587,
+			WhatsAppProvider:  "meta",
+			SMSProvider:       "twilio",
+			BulkDownloadLimit: DefaultBulkDownloadLimit,
 		})
 		return
 	}
@@ -252,6 +274,9 @@ func UpdateDeveloperSettings(c *gin.Context) {
 	if err := ValidateTimezone(input.Timezone); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+	if input.BulkDownloadLimit < 0 {
+		input.BulkDownloadLimit = 0
 	}
 
 	var settings models.DeveloperSettings

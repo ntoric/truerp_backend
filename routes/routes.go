@@ -60,6 +60,7 @@ func SetupRoutes(r *gin.Engine) {
 		invoices.POST("", controllers.CreateInvoice)
 		invoices.POST("/:id/whatsapp", controllers.SendInvoiceWhatsApp)
 		invoices.POST("/check-stock", controllers.CheckInvoiceStock)
+		invoices.POST("/download-pdf", controllers.DownloadInvoicesPDFZip)
 		invoices.POST("/import/csv", controllers.ImportInvoicesCSV)
 		invoices.GET("/stats", controllers.GetInvoiceStats)
 		invoices.GET("/next-number", controllers.GetNextInvoiceNumber)
@@ -308,6 +309,8 @@ func SetupRoutes(r *gin.Engine) {
 		inventory.GET("/stocks/products/:id", controllers.GetProductStock)
 		inventory.GET("/stocks/search", controllers.SearchByItemCode)
 		inventory.POST("/stocks/adjust", controllers.AdjustStock)
+		inventory.POST("/stocks/bulk-adjust", controllers.BulkAdjustStockCSV)
+		inventory.GET("/stocks/bulk-adjust/jobs/:id", controllers.GetBulkAdjustStockJob)
 		inventory.POST("/stocks/bulk-update/csv", controllers.BulkUpdateStockCSV)
 		inventory.POST("/stocks/bulk-update/excel", controllers.BulkUpdateStockExcel)
 		inventory.POST("/stocks/reserve", controllers.ReserveStock)
@@ -372,6 +375,7 @@ func SetupRoutes(r *gin.Engine) {
 		purchase.POST("/bills/labels", controllers.PrintPurchaseBillLabels)
 		purchase.POST("/parse-bill-ai", controllers.ParseBillWithAI)
 		purchase.POST("/bills/import/csv", middleware.SuperAdminRequired(), controllers.ImportPurchaseBillsCSV)
+		purchase.POST("/bills/download-pdf", controllers.DownloadPurchaseBillsPDFZip)
 		purchase.POST("/bills/download-source", middleware.SuperAdminRequired(), controllers.DownloadSourcePurchaseBills)
 	}
 

@@ -1,6 +1,8 @@
 package controllers
 
 import (
+	"archive/zip"
+	"bytes"
 	"fmt"
 	"log"
 	"math"
@@ -1041,4 +1043,103 @@ func GenerateInvoicePDF(c *gin.Context) {
 	c.Header("Content-Type", "application/pdf")
 	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=\"Invoice_%s.pdf\"", invoice.InvoiceNumber))
 	c.Data(http.StatusOK, "application/pdf", pdfBytes)
+}
+
+// DownloadInvoicesPDFZip streams a ZIP containing one PDF per requested
+// invoice. At most the user's configured bulk-download limit (default 25) may
+// be requested at once; unknown ids or PDF failures are reported in a
+// _skipped.csv manifest inside the ZIP.
+func DownloadInvoicesPDFZip(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	var input struct {
+		IDs []uuid.UUID `json:"ids" binding:"required,min=1"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	limit := bulkDownloadLimit(userID)
+	if len(input.IDs) > limit {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("You can download up to %d invoices at once", limit),
+			"limit": limit,
+		})
+		return
+	}
+
+	// De-duplicate while preserving the requested order.
+	seen := make(map[uuid.UUID]bool, len(input.IDs))
+	ids := make([]uuid.UUID, 0, len(input.IDs))
+	for _, id := range input.IDs {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+
+	var invoices []models.Invoice
+	if err := utils.DB.Where("user_id = ? AND id IN ?", userID, ids).
+		Preload("Party").
+		Preload("Items").
+		Preload("Items.Product").
+		Find(&invoices).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load invoices"})
+		return
+	}
+	attachInvoicePaymentSplitsList(utils.DB, invoices)
+
+	byID := make(map[uuid.UUID]*models.Invoice, len(invoices))
+	for i := range invoices {
+		byID[invoices[i].ID] = &invoices[i]
+	}
+
+	settings := loadPrintSettings(userID)
+	storeID, _ := currentStoreID(c)
+	business := resolveSellerBusiness(userID, &storeID)
+
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="invoices_%s.zip"`, time.Now().Format("20060102-150405")))
+
+	zw := zip.NewWriter(c.Writer)
+	manifest := bytes.NewBuffer(nil)
+	manifest.WriteString("invoice_number,reason\n")
+	skipped := 0
+	for _, id := range ids {
+		inv, ok := byID[id]
+		if !ok {
+			fmt.Fprintf(manifest, "%s,%s\n", id.String(), "not found")
+			skipped++
+			continue
+		}
+		pdfBytes, err := buildInvoiceDocumentPDF(*inv, &business, settings)
+		if err != nil {
+			log.Printf("DownloadInvoicesPDFZip: invoice %s: %v", inv.ID, err)
+			fmt.Fprintf(manifest, "%s,%s\n", sanitizeCSVField(inv.InvoiceNumber), "pdf generation failed")
+			skipped++
+			continue
+		}
+		name := sanitizeFilename(inv.InvoiceNumber)
+		if name == "" {
+			name = inv.ID.String()
+		}
+		w, err := zw.Create(fmt.Sprintf("Invoice_%s.pdf", name))
+		if err != nil {
+			fmt.Fprintf(manifest, "%s,%s\n", sanitizeCSVField(inv.InvoiceNumber), "zip write failed")
+			skipped++
+			continue
+		}
+		if _, err := w.Write(pdfBytes); err != nil {
+			fmt.Fprintf(manifest, "%s,%s\n", sanitizeCSVField(inv.InvoiceNumber), "zip write failed")
+			skipped++
+		}
+	}
+	if skipped > 0 {
+		if w, err := zw.Create("_skipped.csv"); err == nil {
+			w.Write(manifest.Bytes())
+		}
+	}
+	zw.Close()
 }

@@ -85,6 +85,7 @@ func getOrCreateB2BShopSettings(userID uuid.UUID) (*models.B2BShopSettings, erro
 		Slug:                   slug,
 		Tagline:                "Wholesale ordering made simple",
 		ShowStock:              true,
+		ShowPrice:              true,
 		AllowBackorders:        false,
 		AllowNewBuyers:         true,
 		RequireDeliveryAddress: true,

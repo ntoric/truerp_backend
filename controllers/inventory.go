@@ -1,8 +1,10 @@
 package controllers
 
 import (
+	"bytes"
 	"encoding/csv"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"sort"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"time"
 	"truerp/models"
+	"truerp/services"
 	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
@@ -2464,4 +2467,165 @@ func BulkUpdateStockExcel(c *gin.Context) {
 		"updated": updatedCount,
 		"errors":  errors,
 	})
+}
+
+// BulkAdjustStockCSV enqueues a bulk stock adjustment import. The CSV (item
+// identifier + signed quantity) is processed in the background so large files
+// don't time out the request; poll GetBulkAdjustStockJob for progress. Every
+// created entry carries the note "bulk import".
+func BulkAdjustStockCSV(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	outletIDStr := strings.TrimSpace(c.PostForm("outlet_id"))
+	outletID, err := uuid.Parse(outletIDStr)
+	if outletIDStr == "" || err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Please select a warehouse"})
+		return
+	}
+
+	var warehouse models.Warehouse
+	if err := utils.DB.Where("user_id = ? AND id = ? AND is_active = ?", userID, outletID, true).First(&warehouse).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Warehouse not found"})
+		return
+	}
+
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No file uploaded"})
+		return
+	}
+
+	src, err := file.Open()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to open file"})
+		return
+	}
+	defer src.Close()
+
+	content, err := io.ReadAll(src)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read file"})
+		return
+	}
+
+	jobID, err := services.EnqueueMigrationJob(utils.DB, userID, "stock-bulk-adjust", file.Filename, content, map[string]string{
+		"outlet_id": warehouse.ID.String(),
+	})
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusAccepted, gin.H{"job_id": jobID, "status": "queued"})
+}
+
+// GetBulkAdjustStockJob returns the live state of a bulk stock adjustment job
+// so the frontend can poll for per-row progress.
+func GetBulkAdjustStockJob(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	jobID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid job id"})
+		return
+	}
+
+	job, ok := services.GetMigrationJob(utils.DB, jobID, userID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
+		return
+	}
+	c.JSON(http.StatusOK, job)
+}
+
+// importBulkStockAdjustRows is the migration runner for "stock-bulk-adjust".
+// It parses the uploaded CSV and posts one adjustment entry per row against
+// the warehouse chosen at upload time, reporting progress after every row.
+func importBulkStockAdjustRows(userID uuid.UUID, content []byte, outletID uuid.UUID, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
+	var warehouse models.Warehouse
+	if err := utils.DB.Where("user_id = ? AND id = ? AND is_active = ?", userID, outletID, true).First(&warehouse).Error; err != nil {
+		return nil, nil, fmt.Errorf("warehouse not found")
+	}
+
+	records, err := csv.NewReader(bytes.NewReader(content)).ReadAll()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read CSV: %w", err)
+	}
+	if len(records) < 2 {
+		return nil, nil, fmt.Errorf("CSV file is empty or has no data")
+	}
+
+	headers := records[0]
+	// Strip BOM/whitespace so files saved from Excel still match headers.
+	for i := range headers {
+		headers[i] = strings.TrimSpace(strings.TrimPrefix(headers[i], "\uFEFF"))
+	}
+
+	total := len(records) - 1
+	adjustedCount := 0
+	var errors []string
+
+	for i, record := range records[1:] {
+		if len(record) != len(headers) {
+			errors = append(errors, fmt.Sprintf("Row %d: Column count mismatch", i+2))
+		} else {
+			identifier := firstCSVValue(record, headers, "SKU", "Item Code", "Itemcode", "Product Code", "Product ID", "Barcode")
+			quantityStr := firstCSVValue(record, headers, "Quantity", "Adjustment Quantity", "Adjustment", "Qty")
+
+			if err := processBulkAdjustRow(userID, identifier, quantityStr, warehouse.ID); err != nil {
+				errors = append(errors, fmt.Sprintf("Row %d: %v", i+2, err))
+			} else {
+				adjustedCount++
+			}
+		}
+		if progress != nil {
+			progress(i+1, total, adjustedCount)
+		}
+	}
+
+	return map[string]interface{}{"adjusted": adjustedCount, "imported": adjustedCount}, errors, nil
+}
+
+// processBulkAdjustRow resolves the product by its unique identifier and posts
+// a single adjustment entry (note: "bulk import") against the given warehouse.
+func processBulkAdjustRow(userID uuid.UUID, identifier, quantityStr string, outletID uuid.UUID) error {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return fmt.Errorf("SKU is required")
+	}
+
+	quantityStr = strings.TrimSpace(quantityStr)
+	quantity, err := strconv.ParseFloat(quantityStr, 64)
+	if quantityStr == "" || err != nil {
+		return fmt.Errorf("invalid quantity %q", quantityStr)
+	}
+	if quantity == 0 {
+		return fmt.Errorf("quantity cannot be zero")
+	}
+
+	product, err := findProductForBulkStock(userID, identifier, identifier, identifier)
+	if err != nil {
+		return err
+	}
+
+	productID := product.ID
+	entry := models.StockEntry{
+		ID:        uuid.New(),
+		UserID:    userID,
+		ItemName:  product.Name,
+		ProductID: &productID,
+		OutletID:  outletID,
+		EntryType: "adjustment",
+		Quantity:  quantity,
+		ItemCode:  product.ItemCode,
+		Notes:     "bulk import",
+		EntryDate: time.Now(),
+	}
+
+	if err := utils.DB.Create(&entry).Error; err != nil {
+		return err
+	}
+
+	updateInventoryStock(userID, product.ID, outletID, "adjustment", quantity, 0, "", nil, nil)
+	return nil
 }

@@ -147,6 +147,15 @@ func RegisterMigrationRunners() {
 		_ = utils.EnsureDefaultCategories(utils.DB, userID)
 		return importProductsRows(userID, content, progress)
 	})
+
+	// --- Bulk stock adjustment importer (inventory.go) ---
+	register("stock-bulk-adjust", func(userID uuid.UUID, content []byte, options map[string]string, progress services.ProgressFunc) (map[string]interface{}, []string, error) {
+		outletID, err := uuid.Parse(strings.TrimSpace(options["outlet_id"]))
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid outlet_id")
+		}
+		return importBulkStockAdjustRows(userID, content, outletID, progress)
+	})
 }
 
 // -----------------------------------------------------------------------------

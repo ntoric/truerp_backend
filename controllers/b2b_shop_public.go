@@ -70,6 +70,7 @@ func GetPublicB2BShop(c *gin.Context) {
 		"contact_email":            firstNonEmpty(shop.ContactEmail, business.Email),
 		"min_order_value":          shop.MinOrderValue,
 		"show_stock":               shop.ShowStock,
+		"show_price":               shop.ShowPrice,
 		"allow_backorders":         shop.AllowBackorders,
 		"allow_new_buyers":         shop.AllowNewBuyers,
 		"require_delivery_address": shop.RequireDeliveryAddress,
