@@ -452,6 +452,7 @@ func PortalGetProfile(c *gin.Context) {
 			"email":          party.Email,
 			"balance":        party.Balance,
 			"loyalty_points": party.LoyaltyPoints,
+			"loyalty_cash":   party.LoyaltyCash,
 		},
 		"business": gin.H{
 			"name":     business.Name,
@@ -463,6 +464,7 @@ func PortalGetProfile(c *gin.Context) {
 			"welcome_message":       settings.WelcomeMessage,
 			"allow_support_tickets": settings.AllowSupportTickets,
 			"loyalty_enabled":       loyaltySettings.IsEnabled,
+			"loyalty_reward_type":   loyaltySettings.RewardType,
 			"slug":                  settings.Slug,
 		},
 	})
@@ -548,6 +550,8 @@ func PortalGetLoyalty(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"enabled":      true,
 		"points":       party.LoyaltyPoints,
+		"cash":         party.LoyaltyCash,
+		"reward_type":  settings.RewardType,
 		"settings":     settings,
 		"transactions": transactions,
 	})

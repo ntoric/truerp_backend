@@ -265,10 +265,14 @@ type Invoice struct {
 	LoyaltyPointsRedeemed int64              `json:"loyalty_points_redeemed" gorm:"default:0"`
 	LoyaltyPointsEarned   int64              `json:"loyalty_points_earned" gorm:"default:0"`
 	LoyaltyDiscount       float64            `json:"loyalty_discount" gorm:"default:0"`
-	PaymentMode           string             `json:"payment_mode"`
-	BankAccountID         *uuid.UUID         `json:"bank_account_id,omitempty" gorm:"type:uuid;index"`
-	PaymentSplits         []PaymentSplit     `json:"payment_splits,omitempty" gorm:"-"`
-	Notes                 string             `json:"notes"`
+	// Cash-mode loyalty: ₹ cashback credited to / redeemed from the customer's
+	// loyalty cash wallet on this invoice (see LoyaltySettings.RewardType).
+	LoyaltyCashEarned   float64        `json:"loyalty_cash_earned" gorm:"default:0"`
+	LoyaltyCashRedeemed float64        `json:"loyalty_cash_redeemed" gorm:"default:0"`
+	PaymentMode         string         `json:"payment_mode"`
+	BankAccountID       *uuid.UUID     `json:"bank_account_id,omitempty" gorm:"type:uuid;index"`
+	PaymentSplits       []PaymentSplit `json:"payment_splits,omitempty" gorm:"-"`
+	Notes               string         `json:"notes"`
 	// SourceURL is the original external invoice link (e.g. myBillBook
 	// https://mybillbook.in/csi/<id>). Populated during migration import so
 	// the source document can be re-opened later. Kept out of Notes so it is
@@ -535,6 +539,9 @@ type LoyaltyReportSummary struct {
 	EarnTransactions   int64   `json:"earn_transactions"`
 	RedeemTransactions int64   `json:"redeem_transactions"`
 	RedemptionValue    float64 `json:"redemption_value"`
+	RewardType         string  `json:"reward_type"`
+	CashEarned         float64 `json:"cash_earned"`
+	CashRedeemed       float64 `json:"cash_redeemed"`
 }
 
 // PeriodReport is a DailyReport-style summary over an arbitrary date range.
@@ -1317,6 +1324,7 @@ type Party struct {
 	PAN            string         `json:"pan"`
 	Notes          string         `json:"notes"`
 	LoyaltyPoints  int64          `json:"loyalty_points" gorm:"default:0"`
+	LoyaltyCash    float64        `json:"loyalty_cash" gorm:"default:0"` // ₹ cashback wallet (cash-mode loyalty)
 	IsActive       bool           `json:"is_active" gorm:"default:true"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
@@ -1324,40 +1332,60 @@ type Party struct {
 }
 
 type LoyaltySettings struct {
-	ID               uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID           uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
-	IsEnabled        bool           `json:"is_enabled" gorm:"default:false"`
-	SpendAmount      float64        `json:"spend_amount" gorm:"default:100"`   // ₹ spent to earn points
-	PointsPerSpend   int64          `json:"points_per_spend" gorm:"default:1"` // points earned per SpendAmount
-	PointValue       float64        `json:"point_value" gorm:"default:1"`      // ₹ discount per point redeemed
-	MinRedeemPoints  int64          `json:"min_redeem_points" gorm:"default:50"`
-	MaxRedeemPercent float64        `json:"max_redeem_percent" gorm:"default:25"` // max % of bill payable with points
+	ID               uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID           uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
+	IsEnabled        bool      `json:"is_enabled" gorm:"default:false"`
+	SpendAmount      float64   `json:"spend_amount" gorm:"default:100"`   // ₹ spent to earn points
+	PointsPerSpend   int64     `json:"points_per_spend" gorm:"default:1"` // points earned per SpendAmount
+	PointValue       float64   `json:"point_value" gorm:"default:1"`      // ₹ discount per point redeemed
+	MinRedeemPoints  int64     `json:"min_redeem_points" gorm:"default:50"`
+	MaxRedeemPercent float64   `json:"max_redeem_percent" gorm:"default:25"` // max % of bill payable with points / cashback
+	// RewardType selects how customers are rewarded: "points" (earn points,
+	// redeem at PointValue) or "cash" (earn CashbackPercent of the bill as ₹
+	// credit, redeemed rupee-for-rupee as a discount).
+	RewardType      string  `json:"reward_type" gorm:"default:'points'"`
+	CashbackPercent float64 `json:"cashback_percent" gorm:"default:1"`  // % of bill credited as ₹ (cash mode)
+	MinRedeemAmount float64 `json:"min_redeem_amount" gorm:"default:0"` // min ₹ cashback per redemption (cash mode)
+	// EarnBasis is what the earn rate applies to: "bill" (the invoice total)
+	// or "margin" (profit on eligible items: net sale − purchase cost, counting
+	// only items whose margin on selling price is at least MinMarginPercent).
+	// The same rates are used — points per SpendAmount, or CashbackPercent.
+	EarnBasis        string         `json:"earn_basis" gorm:"default:'bill'"`
+	MinMarginPercent float64        `json:"min_margin_percent" gorm:"default:0"`
 	CreatedAt        time.Time      `json:"created_at"`
 	UpdatedAt        time.Time      `json:"updated_at"`
 	DeletedAt        gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type LoyaltyTransaction struct {
-	ID              uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
-	PartyID         uuid.UUID      `json:"party_id" gorm:"type:uuid;not null;index"`
-	Party           Party          `json:"party,omitempty" gorm:"foreignKey:PartyID"`
-	TransactionType string         `json:"transaction_type" gorm:"not null"` // earn, redeem, adjust, expire
-	Points          int64          `json:"points" gorm:"not null"`           // positive = credit, negative = debit
-	BalanceAfter    int64          `json:"balance_after" gorm:"not null"`
-	ReferenceType   string         `json:"reference_type"` // invoice, manual
-	ReferenceID     *uuid.UUID     `json:"reference_id,omitempty" gorm:"type:uuid"`
-	ReferenceNumber string         `json:"reference_number"`
-	Notes           string         `json:"notes"`
-	CreatedAt       time.Time      `json:"created_at"`
-	DeletedAt       gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+	ID              uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID          uuid.UUID `json:"user_id" gorm:"type:uuid;not null;index"`
+	PartyID         uuid.UUID `json:"party_id" gorm:"type:uuid;not null;index"`
+	Party           Party     `json:"party,omitempty" gorm:"foreignKey:PartyID"`
+	TransactionType string    `json:"transaction_type" gorm:"not null"` // earn, redeem, adjust, expire
+	Points          int64     `json:"points" gorm:"not null"`           // positive = credit, negative = debit
+	BalanceAfter    int64     `json:"balance_after" gorm:"not null"`
+	// RewardType is "points" or "cash". Cash entries carry the ₹ movement in
+	// Amount / AmountBalanceAfter and leave Points / BalanceAfter at 0.
+	RewardType         string         `json:"reward_type" gorm:"default:'points'"`
+	Amount             float64        `json:"amount" gorm:"default:0"`
+	AmountBalanceAfter float64        `json:"amount_balance_after" gorm:"default:0"`
+	ReferenceType      string         `json:"reference_type"` // invoice, manual
+	ReferenceID        *uuid.UUID     `json:"reference_id,omitempty" gorm:"type:uuid"`
+	ReferenceNumber    string         `json:"reference_number"`
+	Notes              string         `json:"notes"`
+	CreatedAt          time.Time      `json:"created_at"`
+	DeletedAt          gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type LoyaltyStats struct {
-	TotalMembers            int64 `json:"total_members"`
-	TotalPointsOutstanding  int64 `json:"total_points_outstanding"`
-	PointsEarnedThisMonth   int64 `json:"points_earned_this_month"`
-	PointsRedeemedThisMonth int64 `json:"points_redeemed_this_month"`
+	TotalMembers            int64   `json:"total_members"`
+	TotalPointsOutstanding  int64   `json:"total_points_outstanding"`
+	PointsEarnedThisMonth   int64   `json:"points_earned_this_month"`
+	PointsRedeemedThisMonth int64   `json:"points_redeemed_this_month"`
+	CashOutstanding         float64 `json:"cash_outstanding"`
+	CashEarnedThisMonth     float64 `json:"cash_earned_this_month"`
+	CashRedeemedThisMonth   float64 `json:"cash_redeemed_this_month"`
 }
 
 // LoyaltyCardDesign holds the per-store artwork configuration used when a

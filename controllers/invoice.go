@@ -175,6 +175,7 @@ func CreateInvoice(c *gin.Context) {
 		AdditionalCharges     float64                   `json:"additional_charges"`
 		AdditionalChargeItems []models.AdditionalCharge `json:"additional_charge_items"`
 		LoyaltyPointsRedeemed int64                     `json:"loyalty_points_redeemed"`
+		LoyaltyCashRedeemed   float64                   `json:"loyalty_cash_redeemed"`
 		IsPOS                 bool                      `json:"is_pos"`
 		ClientSaleID          *uuid.UUID                `json:"client_sale_id"`
 		PosSessionID          *uuid.UUID                `json:"pos_session_id"`
@@ -370,7 +371,21 @@ func CreateInvoice(c *gin.Context) {
 
 	loyaltySettings, _ := GetOrCreateLoyaltySettings(userID)
 	var loyaltyDiscount float64
-	if input.LoyaltyPointsRedeemed > 0 {
+	if IsCashLoyalty(loyaltySettings) {
+		// Cash mode: redemption is a ₹ amount from the cashback wallet.
+		input.LoyaltyPointsRedeemed = 0
+		if input.LoyaltyCashRedeemed > 0 {
+			var redeemErr error
+			loyaltyDiscount, redeemErr = ComputeLoyaltyCashRedemption(loyaltySettings, &party, total, input.LoyaltyCashRedeemed)
+			if redeemErr != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": redeemErr.Error()})
+				return
+			}
+			total -= loyaltyDiscount
+		}
+		input.LoyaltyCashRedeemed = loyaltyDiscount
+	} else if input.LoyaltyPointsRedeemed > 0 {
+		input.LoyaltyCashRedeemed = 0
 		var redeemErr error
 		loyaltyDiscount, redeemErr = ComputeLoyaltyRedemption(loyaltySettings, &party, total, input.LoyaltyPointsRedeemed)
 		if redeemErr != nil {
@@ -395,6 +410,7 @@ func CreateInvoice(c *gin.Context) {
 	invoice.InvoiceDiscount = input.InvoiceDiscount
 	invoice.AdditionalCharges = input.AdditionalCharges
 	invoice.LoyaltyPointsRedeemed = input.LoyaltyPointsRedeemed
+	invoice.LoyaltyCashRedeemed = input.LoyaltyCashRedeemed
 	invoice.LoyaltyDiscount = loyaltyDiscount
 	invoice.TaxTotal = taxTotal
 	invoice.CGSTTotal = cgstTotal

@@ -579,14 +579,21 @@ func renderInvoiceBottom(invoice models.Invoice, custom models.InvoiceTemplateCu
 		left.WriteString(fmt.Sprintf(`<div class="kv-row" style="margin-top:10px"><span class="k">Payment:</span><span>%s</span></div>`, html.EscapeString(label)))
 	}
 	if lp := invoiceLoyaltyPrintSummary(invoice); lp != nil {
-		left.WriteString(`<div style="margin-top:14px"><div class="sec-label">LOYALTY POINTS</div>`)
 		kv := func(k, v string) {
 			left.WriteString(fmt.Sprintf(`<div class="kv-row"><span class="k">%s:</span><span>%s</span></div>`, k, html.EscapeString(v)))
 		}
-		kv("Points Redeemed", fmt.Sprintf("%d", lp.Redeemed))
-		kv("Points Discount", "₹ "+formatINR(lp.Discount))
-		kv("Points Credited", fmt.Sprintf("%d", lp.Earned))
-		kv("Points Balance", fmt.Sprintf("%d", lp.Balance))
+		if lp.IsCash {
+			left.WriteString(`<div style="margin-top:14px"><div class="sec-label">LOYALTY CASHBACK</div>`)
+			kv("Cashback Redeemed", "₹ "+formatINR(lp.CashRedeemed))
+			kv("Cashback Credited", "₹ "+formatINR(lp.CashEarned))
+			kv("Cashback Balance", "₹ "+formatINR(lp.CashBalance))
+		} else {
+			left.WriteString(`<div style="margin-top:14px"><div class="sec-label">LOYALTY POINTS</div>`)
+			kv("Points Redeemed", fmt.Sprintf("%d", lp.Redeemed))
+			kv("Points Discount", "₹ "+formatINR(lp.Discount))
+			kv("Points Credited", fmt.Sprintf("%d", lp.Earned))
+			kv("Points Balance", fmt.Sprintf("%d", lp.Balance))
+		}
 		left.WriteString(`</div>`)
 	}
 
@@ -611,6 +618,8 @@ func renderInvoiceBottom(invoice models.Invoice, custom models.InvoiceTemplateCu
 		label := "Loyalty Discount"
 		if invoice.LoyaltyPointsRedeemed > 0 {
 			label = fmt.Sprintf("Loyalty Discount (%d pts)", invoice.LoyaltyPointsRedeemed)
+		} else if invoice.LoyaltyCashRedeemed > 0 {
+			label = "Loyalty Cashback"
 		}
 		right.WriteString(totRow(label, "-₹ "+formatINR(invoice.LoyaltyDiscount), false))
 	}

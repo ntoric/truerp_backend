@@ -444,15 +444,25 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 		pdf.SetXY(leftM, leftEnd+3)
 		pdf.SetFont("Arial", "B", fontSize-1)
 		pdf.SetTextColor(30, 30, 30)
-		pdf.MultiCell(colW, 5, "LOYALTY POINTS", "", "L", false)
-		pdf.SetFont("Arial", "", fontSize-2)
-		pdf.SetTextColor(55, 55, 55)
-		for _, line := range []string{
+		heading := "LOYALTY POINTS"
+		lines := []string{
 			fmt.Sprintf("Points Redeemed: %d", lp.Redeemed),
 			"Points Discount: Rs. " + formatINR(lp.Discount),
 			fmt.Sprintf("Points Credited: %d", lp.Earned),
 			fmt.Sprintf("Points Balance: %d", lp.Balance),
-		} {
+		}
+		if lp.IsCash {
+			heading = "LOYALTY CASHBACK"
+			lines = []string{
+				"Cashback Redeemed: Rs. " + formatINR(lp.CashRedeemed),
+				"Cashback Credited: Rs. " + formatINR(lp.CashEarned),
+				"Cashback Balance: Rs. " + formatINR(lp.CashBalance),
+			}
+		}
+		pdf.MultiCell(colW, 5, heading, "", "L", false)
+		pdf.SetFont("Arial", "", fontSize-2)
+		pdf.SetTextColor(55, 55, 55)
+		for _, line := range lines {
 			pdf.SetX(leftM)
 			pdf.MultiCell(colW, 4.6, line, "", "L", false)
 		}
@@ -494,6 +504,8 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 		label := "Loyalty Discount"
 		if invoice.LoyaltyPointsRedeemed > 0 {
 			label = fmt.Sprintf("Loyalty Discount (%d pts)", invoice.LoyaltyPointsRedeemed)
+		} else if invoice.LoyaltyCashRedeemed > 0 {
+			label = "Loyalty Cashback"
 		}
 		totRow(label, -invoice.LoyaltyDiscount, false)
 	}
