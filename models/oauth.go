@@ -10,9 +10,11 @@ import (
 // OAuthClient represents a registered OAuth 2.0 client application
 // capable of authenticating via Authorization Code (with PKCE), Client Credentials, etc.
 type OAuthClient struct {
-	ID           uuid.UUID  `gorm:"type:uuid;primary_key;" json:"id"`
-	ClientID     string     `gorm:"type:varchar(128);uniqueIndex;not null" json:"client_id"`
-	ClientSecret string     `gorm:"type:varchar(255);not null" json:"client_secret,omitempty"`
+	ID       uuid.UUID `gorm:"type:uuid;primary_key;" json:"id"`
+	ClientID string    `gorm:"type:varchar(128);uniqueIndex;not null" json:"client_id"`
+	// ClientSecret stores "sha256:<hex>" of the secret. Legacy rows may hold
+	// a plaintext secret; they are upgraded to the hashed form on first use.
+	ClientSecret string     `gorm:"type:varchar(255);not null" json:"-"`
 	ClientName   string     `gorm:"type:varchar(255);not null" json:"client_name"`
 	RedirectURIs string     `gorm:"type:text;not null" json:"redirect_uris"` // comma-separated or space-separated list
 	GrantTypes   string     `gorm:"type:varchar(255);default:'authorization_code,client_credentials,refresh_token,password'" json:"grant_types"`
@@ -20,6 +22,8 @@ type OAuthClient struct {
 	IsPublic     bool       `gorm:"default:false" json:"is_public"` // e.g. SPA or native app using PKCE without secret
 	UserID       *uuid.UUID `gorm:"type:uuid;index" json:"user_id,omitempty"`
 	StoreID      *uuid.UUID `gorm:"type:uuid;index" json:"store_id,omitempty"`
+	Description  string     `gorm:"type:text" json:"description"`
+	IsActive     bool       `gorm:"default:true" json:"is_active"`
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`
 }
@@ -54,7 +58,8 @@ func (c *OAuthCode) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
-// OAuthRefreshToken represents a stored refresh token for issuing renewed access tokens
+// OAuthRefreshToken represents a stored refresh token for issuing renewed
+// access tokens. Token holds the SHA-256 hex digest of the issued token.
 type OAuthRefreshToken struct {
 	ID        uuid.UUID  `gorm:"type:uuid;primary_key;" json:"id"`
 	Token     string     `gorm:"type:varchar(128);uniqueIndex;not null" json:"token"`

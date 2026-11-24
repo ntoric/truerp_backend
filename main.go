@@ -83,14 +83,18 @@ func main() {
 	// current position.
 	controllers.StartDailyStockSummaryLogScheduler()
 
+	// Start the public API's change scanner (event feed), webhook delivery
+	// worker and integration data retention cleanup.
+	controllers.StartIntegrationScheduler()
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 
 	config := cors.DefaultConfig()
 	// Desktop Tauri WebView (local UI) and any web clients call this cloud API cross-origin.
 	config.AllowOrigins = []string{"*"}
-	config.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Store-ID", "Idempotency-Key"}
-	config.ExposeHeaders = []string{"X-Active-Store-ID"}
+	config.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Store-ID", "Idempotency-Key", "X-API-Key", "X-Request-ID"}
+	config.ExposeHeaders = []string{"X-Active-Store-ID", "X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After", "Idempotent-Replayed"}
 	r.Use(cors.New(config))
 
 	storageConfig := services.GetStorageConfig()

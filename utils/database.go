@@ -214,6 +214,14 @@ func allApplicationModels() []interface{} {
 		&models.OAuthClient{},
 		&models.OAuthCode{},
 		&models.OAuthRefreshToken{},
+		&models.APIKey{},
+		&models.IntegrationPolicy{},
+		&models.WebhookEndpoint{},
+		&models.IntegrationEvent{},
+		&models.IntegrationScanCursor{},
+		&models.WebhookDelivery{},
+		&models.APIIdempotencyRecord{},
+		&models.APIRequestLog{},
 	}
 }
 

@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TruERP Public API Reference</title>
+  <style>
+    body { margin: 0; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 20px;
+      background: #0f172a; color: #e2e8f0; font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .topbar strong { color: #fff; font-size: 15px; }
+    .topbar a { color: #c7d2fe; text-decoration: none; margin-left: 16px; }
+    .topbar a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <strong>TruERP Public API</strong>
+    <nav>
+      <a href="__BASE_URL__/api/public/docs/explorer">Try it (explorer)</a>
+      <a href="__BASE_URL__/api/public/v1/openapi.yaml">OpenAPI YAML</a>
+      <a href="__BASE_URL__/api/public/v1/openapi.json">OpenAPI JSON</a>
+    </nav>
+  </div>
+  <redoc spec-url="__BASE_URL__/api/public/v1/openapi.json"
+         hide-download-button="false"
+         expand-responses="200,201"
+         json-sample-expand-level="3"
+         path-in-middle-panel="true"
+         theme='{"colors":{"primary":{"main":"#4f46e5"}},"typography":{"fontSize":"15px","headings":{"fontWeight":"600"}},"sidebar":{"width":"280px"}}'></redoc>
+  <script src="https://cdn.redoc.ly/redoc/v2.1.5/bundles/redoc.standalone.js"></script>
+</body>
+</html>

@@ -28,6 +28,11 @@ var auditedTables = map[string]string{
 	"expense_categories": "expense_category",
 	// Parties
 	"parties": "party",
+	// Integrations (public API credentials and permissions)
+	"api_keys":             "api_key",
+	"integration_policies": "integration_policy",
+	"oauth_clients":        "oauth_client",
+	"webhook_endpoints":    "webhook_endpoint",
 	// Inventory
 	"warehouses":              "warehouse",
 	"inventory_stocks":        "inventory_stock",

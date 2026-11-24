@@ -6,10 +6,13 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"html/template"
+	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 	"truerp/models"
@@ -22,10 +25,35 @@ import (
 	"gorm.io/gorm"
 )
 
+// OAuth 2.0 authorization server (RFC 6749) with PKCE (RFC 7636), metadata
+// discovery (RFC 8414) and token revocation (RFC 7009).
+//
+// Security properties:
+//   - redirect_uri must exactly match one registered for the client;
+//   - client secrets and refresh tokens are stored as SHA-256 digests;
+//   - each client is limited to its registered grant types and scopes;
+//   - public clients must use PKCE with S256;
+//   - authorization codes are single-use (atomic claim) and short-lived;
+//   - refresh tokens rotate, and replaying a rotated token revokes the family;
+//   - client_credentials only works for confidential clients bound to a
+//     store, and acts as that store's owner — never as a super admin;
+//   - access tokens carry their scopes and expire after one hour.
+
 const (
 	oauthCodeTTL         = 10 * time.Minute
 	oauthRefreshTokenTTL = 30 * 24 * time.Hour
+
+	grantAuthorizationCode = "authorization_code"
+	grantRefreshToken      = "refresh_token"
+	grantClientCredentials = "client_credentials"
+	grantPassword          = "password"
+
+	hashedSecretPrefix = "sha256:"
+	legacyMCPSecret    = "truerp-mcp-secret"
+	defaultMCPClientID = "truerp-mcp-client"
 )
+
+var supportedGrantTypes = []string{grantAuthorizationCode, grantRefreshToken, grantClientCredentials, grantPassword}
 
 // generateRandomSecret generates a URL-safe random string of n bytes
 func generateRandomSecret(n int) (string, error) {
@@ -34,6 +62,15 @@ func generateRandomSecret(n int) (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func sha256Hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+func hashClientSecret(secret string) string {
+	return hashedSecretPrefix + sha256Hex(secret)
 }
 
 // verifyCodeChallenge implements PKCE validation (RFC 7636)
@@ -53,844 +90,869 @@ func verifyCodeChallenge(verifier, challenge, method string) bool {
 	}
 }
 
-// SeedDefaultOAuthClients creates standard clients (e.g. for MCP server) if not already present
+// verifyClientSecret checks a presented secret against the stored one,
+// upgrading legacy plaintext secrets to the hashed form.
+func verifyClientSecret(db *gorm.DB, client *models.OAuthClient, presented string) bool {
+	if presented == "" || client.ClientSecret == "" {
+		return false
+	}
+	if strings.HasPrefix(client.ClientSecret, hashedSecretPrefix) {
+		return subtle.ConstantTimeCompare([]byte(hashClientSecret(presented)), []byte(client.ClientSecret)) == 1
+	}
+	if subtle.ConstantTimeCompare([]byte(presented), []byte(client.ClientSecret)) != 1 {
+		return false
+	}
+	client.ClientSecret = hashClientSecret(presented)
+	db.Model(&models.OAuthClient{}).Where("id = ?", client.ID).Update("client_secret", client.ClientSecret)
+	return true
+}
+
+func splitList(raw string) []string {
+	return utils.ParseScopes(raw) // same separators: space, comma, newline
+}
+
+func clientAllowsGrant(client *models.OAuthClient, grant string) bool {
+	for _, g := range splitList(client.GrantTypes) {
+		if g == grant {
+			return true
+		}
+	}
+	return false
+}
+
+func clientRedirectURIs(client *models.OAuthClient) []string {
+	return splitList(client.RedirectURIs)
+}
+
+// resolveRedirectURI returns the redirect URI to use, which must exactly match
+// a registered one. When none is supplied and exactly one is registered, that
+// one is used.
+func resolveRedirectURI(client *models.OAuthClient, requested string) (string, bool) {
+	registered := clientRedirectURIs(client)
+	if requested == "" {
+		if len(registered) == 1 {
+			return registered[0], true
+		}
+		return "", false
+	}
+	for _, r := range registered {
+		if r == requested {
+			return requested, true
+		}
+	}
+	return "", false
+}
+
+// validateRedirectURIList enforces https (or http on loopback) and no fragments.
+func validateRedirectURIList(raw string) error {
+	uris := splitList(raw)
+	if len(uris) == 0 {
+		return errors.New("at least one redirect URI is required")
+	}
+	for _, u := range uris {
+		parsed, err := url.Parse(u)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("invalid redirect URI %q", u)
+		}
+		if parsed.Fragment != "" {
+			return fmt.Errorf("redirect URI %q must not contain a fragment", u)
+		}
+		host := parsed.Hostname()
+		loopback := host == "localhost" || host == "127.0.0.1" || host == "::1"
+		if parsed.Scheme != "https" && !(parsed.Scheme == "http" && loopback) {
+			return fmt.Errorf("redirect URI %q must use https (http is allowed only for localhost)", u)
+		}
+	}
+	return nil
+}
+
+// resolveGrantedScopes validates requested scopes against the client's
+// registered scopes. An empty request grants all of the client's scopes.
+func resolveGrantedScopes(client *models.OAuthClient, requested string) (string, error) {
+	clientScopes := splitList(client.Scopes)
+	req := splitList(requested)
+	if len(req) == 0 {
+		return utils.JoinScopes(clientScopes), nil
+	}
+	allowedRaw := map[string]bool{}
+	for _, s := range clientScopes {
+		allowedRaw[s] = true
+	}
+	expanded := utils.ExpandScopes(clientScopes)
+	for _, s := range req {
+		if !utils.IsKnownScope(s) {
+			return "", fmt.Errorf("unknown scope %q", s)
+		}
+		if allowedRaw[s] || expanded[s] {
+			continue
+		}
+		return "", fmt.Errorf("scope %q is not allowed for this client", s)
+	}
+	return utils.JoinScopes(req), nil
+}
+
+func oauthError(c *gin.Context, status int, code, description string) {
+	c.Header("Cache-Control", "no-store")
+	c.JSON(status, gin.H{"error": code, "error_description": description})
+}
+
+// SeedDefaultOAuthClients provisions the MCP server's client from the
+// TRUERP_MCP_CLIENT_SECRET environment variable. Without that variable no
+// client is created, and an existing client still using the publicly
+// documented legacy secret is deactivated.
 func SeedDefaultOAuthClients(db *gorm.DB) {
 	if !db.Migrator().HasTable(&models.OAuthClient{}) {
 		return
 	}
-	var count int64
-	db.Model(&models.OAuthClient{}).Where("client_id = ?", "truerp-mcp-client").Count(&count)
-	if count == 0 {
-		client := models.OAuthClient{
-			ClientID:     "truerp-mcp-client",
-			ClientSecret: "truerp-mcp-secret",
-			ClientName:   "TruERP MCP Server Client",
-			RedirectURIs: "http://localhost:3000/callback,http://localhost:8089/callback,http://127.0.0.1:8089/callback,https://oauth.pstmn.io/v1/callback,http://localhost:8088/api/v1/oauth/callback",
-			GrantTypes:   "authorization_code,client_credentials,refresh_token,password",
-			Scopes:       "read write admin erp",
-			IsPublic:     false,
+	secret := strings.TrimSpace(os.Getenv("TRUERP_MCP_CLIENT_SECRET"))
+
+	var existing models.OAuthClient
+	err := db.Where("client_id = ?", defaultMCPClientID).First(&existing).Error
+	if err == nil {
+		usesLegacy := existing.ClientSecret == legacyMCPSecret || existing.ClientSecret == hashClientSecret(legacyMCPSecret)
+		switch {
+		case secret != "" && existing.ClientSecret != hashClientSecret(secret):
+			db.Model(&existing).Updates(map[string]interface{}{"client_secret": hashClientSecret(secret), "is_active": true})
+		case secret == "" && usesLegacy && existing.IsActive:
+			log.Printf("SECURITY: deactivating OAuth client %q because it uses the publicly documented default secret; set TRUERP_MCP_CLIENT_SECRET to re-enable it", defaultMCPClientID)
+			db.Model(&existing).Update("is_active", false)
 		}
-		if err := db.Create(&client).Error; err != nil {
-			fmt.Printf("SeedDefaultOAuthClients error: %v\n", err)
-		}
+		return
+	}
+	if secret == "" {
+		return
+	}
+	client := models.OAuthClient{
+		ClientID:     defaultMCPClientID,
+		ClientSecret: hashClientSecret(secret),
+		ClientName:   "TruERP MCP Server",
+		RedirectURIs: "http://localhost:3000/callback,http://localhost:8089/callback,http://127.0.0.1:8089/callback,https://oauth.pstmn.io/v1/callback",
+		GrantTypes:   "authorization_code,refresh_token",
+		Scopes:       "read write admin erp",
+		IsActive:     true,
+	}
+	if err := db.Create(&client).Error; err != nil {
+		log.Printf("SeedDefaultOAuthClients error: %v", err)
 	}
 }
 
-// extractClientCredentials extracts client_id and client_secret from Basic Auth or form/JSON body
-func extractClientCredentials(c *gin.Context) (clientID string, clientSecret string) {
-	// 1. Check HTTP Basic Authentication Header
+// extractClientCredentials extracts client_id and client_secret from HTTP
+// Basic auth or the form/JSON body.
+func extractClientCredentials(c *gin.Context, body map[string]string) (clientID string, clientSecret string) {
 	if u, p, ok := c.Request.BasicAuth(); ok {
-		return u, p
+		uid, _ := url.QueryUnescape(u)
+		pw, _ := url.QueryUnescape(p)
+		return uid, pw
 	}
-	// 2. Check form/query/json
-	clientID = c.PostForm("client_id")
-	clientSecret = c.PostForm("client_secret")
+	return body["client_id"], body["client_secret"]
+}
+
+// readOAuthParams merges form, query and JSON parameters.
+func readOAuthParams(c *gin.Context) map[string]string {
+	out := map[string]string{}
+	if c.ContentType() == "application/json" {
+		var req map[string]interface{}
+		if err := c.ShouldBindJSON(&req); err == nil {
+			for k, v := range req {
+				if s, ok := v.(string); ok {
+					out[k] = s
+				}
+			}
+		}
+	} else {
+		_ = c.Request.ParseForm()
+		for k, v := range c.Request.PostForm {
+			if len(v) > 0 {
+				out[k] = v[0]
+			}
+		}
+	}
+	for k, v := range c.Request.URL.Query() {
+		if _, ok := out[k]; !ok && len(v) > 0 {
+			out[k] = v[0]
+		}
+	}
+	return out
+}
+
+// authenticateClient loads the client and verifies its credentials.
+// Confidential clients must present their secret; public clients must not
+// have one.
+func authenticateClient(c *gin.Context, params map[string]string) (*models.OAuthClient, bool) {
+	clientID, clientSecret := extractClientCredentials(c, params)
 	if clientID == "" {
-		clientID = c.Query("client_id")
+		oauthError(c, http.StatusUnauthorized, "invalid_client", "client authentication is required")
+		return nil, false
 	}
-	if clientSecret == "" {
-		clientSecret = c.Query("client_secret")
+	var client models.OAuthClient
+	if err := utils.DB.Where("client_id = ?", clientID).First(&client).Error; err != nil || !client.IsActive {
+		oauthError(c, http.StatusUnauthorized, "invalid_client", "unknown or inactive client")
+		return nil, false
 	}
-	return clientID, clientSecret
+	if client.IsPublic {
+		return &client, true
+	}
+	if !verifyClientSecret(utils.DB, &client, clientSecret) {
+		oauthError(c, http.StatusUnauthorized, "invalid_client", "invalid client credentials")
+		return nil, false
+	}
+	return &client, true
+}
+
+func requestBaseURL(c *gin.Context) string {
+	if base := strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_API_BASE_URL")), "/"); base != "" {
+		return base
+	}
+	scheme := "http"
+	if c.Request.TLS != nil || strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s", scheme, c.Request.Host)
 }
 
 // OAuthDiscovery handles RFC 8414 OAuth 2.0 Authorization Server Metadata
 func OAuthDiscovery(c *gin.Context) {
-	scheme := "http"
-	if c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https" {
-		scheme = "https"
-	}
-	host := c.Request.Host
-	baseURL := fmt.Sprintf("%s://%s", scheme, host)
-
+	baseURL := requestBaseURL(c)
+	scopes := append([]string{}, utils.AllPublicScopes()...)
+	scopes = append(scopes, utils.ScopeLegacyRead, utils.ScopeLegacyWrite, utils.ScopeInternalERP)
 	c.JSON(http.StatusOK, gin.H{
 		"issuer":                                baseURL,
 		"authorization_endpoint":                baseURL + "/api/v1/oauth/authorize",
 		"token_endpoint":                        baseURL + "/api/v1/oauth/token",
 		"userinfo_endpoint":                     baseURL + "/api/v1/oauth/userinfo",
 		"revocation_endpoint":                   baseURL + "/api/v1/oauth/revoke",
+		"service_documentation":                 baseURL + "/api/public/docs",
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code", "client_credentials", "refresh_token", "password"},
+		"grant_types_supported":                 supportedGrantTypes,
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post", "none"},
 		"code_challenge_methods_supported":      []string{"S256", "plain"},
-		"scopes_supported":                      []string{"read", "write", "admin", "erp"},
+		"scopes_supported":                      scopes,
 	})
 }
 
-// OAuthAuthorize handles GET and POST requests for OAuth 2.0 Authorization Code flow
-func OAuthAuthorize(c *gin.Context) {
-	clientID := c.Query("client_id")
-	if clientID == "" {
-		clientID = c.PostForm("client_id")
-	}
-	redirectURI := c.Query("redirect_uri")
-	if redirectURI == "" {
-		redirectURI = c.PostForm("redirect_uri")
-	}
-	responseType := c.Query("response_type")
-	if responseType == "" {
-		responseType = c.PostForm("response_type")
-	}
-	state := c.Query("state")
-	if state == "" {
-		state = c.PostForm("state")
-	}
-	scope := c.Query("scope")
-	if scope == "" {
-		scope = c.PostForm("scope")
-	}
-	codeChallenge := c.Query("code_challenge")
-	if codeChallenge == "" {
-		codeChallenge = c.PostForm("code_challenge")
-	}
-	codeChallengeMethod := c.Query("code_challenge_method")
-	if codeChallengeMethod == "" {
-		codeChallengeMethod = c.PostForm("code_challenge_method")
-	}
+type authorizeRequest struct {
+	client              *models.OAuthClient
+	redirectURI         string
+	state               string
+	scope               string
+	codeChallenge       string
+	codeChallengeMethod string
+}
 
+// validateAuthorizeRequest checks every authorization parameter. Errors that
+// occur before the redirect URI is trusted are shown to the user rather than
+// redirected (RFC 6749 §4.1.2.1).
+func validateAuthorizeRequest(c *gin.Context, p map[string]string) (*authorizeRequest, bool) {
+	clientID := p["client_id"]
 	if clientID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "error_description": "client_id is required"})
-		return
+		renderAuthorizeError(c, "client_id is required")
+		return nil, false
 	}
-
 	var client models.OAuthClient
-	if err := utils.DB.Where("client_id = ?", clientID).First(&client).Error; err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unauthorized_client", "error_description": "Unknown client_id"})
+	if err := utils.DB.Where("client_id = ?", clientID).First(&client).Error; err != nil || !client.IsActive {
+		renderAuthorizeError(c, "Unknown or inactive client application.")
+		return nil, false
+	}
+	redirectURI, ok := resolveRedirectURI(&client, p["redirect_uri"])
+	if !ok {
+		renderAuthorizeError(c, "The redirect_uri does not match any URI registered for this application.")
+		return nil, false
+	}
+	req := &authorizeRequest{
+		client:              &client,
+		redirectURI:         redirectURI,
+		state:               p["state"],
+		codeChallenge:       p["code_challenge"],
+		codeChallengeMethod: p["code_challenge_method"],
+	}
+	if rt := p["response_type"]; rt != "" && rt != "code" {
+		redirectWithError(c, req, "unsupported_response_type", "only response_type=code is supported")
+		return nil, false
+	}
+	if !clientAllowsGrant(&client, grantAuthorizationCode) {
+		redirectWithError(c, req, "unauthorized_client", "this client may not use the authorization code grant")
+		return nil, false
+	}
+	if req.codeChallenge != "" && req.codeChallengeMethod == "" {
+		req.codeChallengeMethod = "plain"
+	}
+	if m := strings.ToUpper(req.codeChallengeMethod); m != "" && m != "S256" && m != "PLAIN" {
+		redirectWithError(c, req, "invalid_request", "unsupported code_challenge_method")
+		return nil, false
+	}
+	if client.IsPublic && (req.codeChallenge == "" || strings.ToUpper(req.codeChallengeMethod) != "S256") {
+		redirectWithError(c, req, "invalid_request", "public clients must use PKCE with code_challenge_method=S256")
+		return nil, false
+	}
+	scope, err := resolveGrantedScopes(&client, p["scope"])
+	if err != nil {
+		redirectWithError(c, req, "invalid_scope", err.Error())
+		return nil, false
+	}
+	req.scope = scope
+	return req, true
+}
+
+func redirectWithError(c *gin.Context, req *authorizeRequest, code, description string) {
+	parsed, err := url.Parse(req.redirectURI)
+	if err != nil {
+		renderAuthorizeError(c, description)
+		return
+	}
+	q := parsed.Query()
+	q.Set("error", code)
+	q.Set("error_description", description)
+	if req.state != "" {
+		q.Set("state", req.state)
+	}
+	parsed.RawQuery = q.Encode()
+	c.Redirect(http.StatusFound, parsed.String())
+}
+
+func setConsentPageHeaders(c *gin.Context) {
+	c.Header("X-Frame-Options", "DENY")
+	c.Header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' *; frame-ancestors 'none'")
+	c.Header("Cache-Control", "no-store")
+	c.Header("Referrer-Policy", "no-referrer")
+}
+
+func renderAuthorizeError(c *gin.Context, message string) {
+	setConsentPageHeaders(c)
+	if strings.Contains(c.GetHeader("Accept"), "application/json") || c.ContentType() == "application/json" {
+		oauthError(c, http.StatusBadRequest, "invalid_request", message)
+		return
+	}
+	c.Status(http.StatusBadRequest)
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	_ = consentTemplate.Execute(c.Writer, map[string]interface{}{"Error": message})
+}
+
+type scopeLine struct{ Scope, Description string }
+
+func describeScopes(scope string) []scopeLine {
+	lines := []scopeLine{}
+	for _, s := range splitList(scope) {
+		desc := s
+		switch s {
+		case utils.ScopeInternalERP, utils.ScopeAdmin:
+			desc = "Full access to your TruERP account, the same as signing in"
+		case utils.ScopeLegacyRead:
+			desc = "Read all of your business data"
+		case utils.ScopeLegacyWrite:
+			desc = "Read, create and update your business data"
+		default:
+			for _, info := range utils.PublicScopeCatalog {
+				if info.Scope == s {
+					desc = info.Description
+				}
+			}
+		}
+		lines = append(lines, scopeLine{Scope: s, Description: desc})
+	}
+	return lines
+}
+
+// OAuthAuthorize renders the consent page (GET) and issues an authorization
+// code after the user signs in and approves (POST).
+func OAuthAuthorize(c *gin.Context) {
+	params := readOAuthParams(c)
+	req, ok := validateAuthorizeRequest(c, params)
+	if !ok {
 		return
 	}
 
-	if redirectURI == "" {
-		uris := strings.Split(client.RedirectURIs, ",")
-		if len(uris) > 0 {
-			redirectURI = strings.TrimSpace(uris[0])
+	if c.Request.Method == http.MethodGet {
+		setConsentPageHeaders(c)
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		_ = consentTemplate.Execute(c.Writer, map[string]interface{}{
+			"ClientID":            req.client.ClientID,
+			"ClientName":          req.client.ClientName,
+			"RedirectHost":        hostOf(req.redirectURI),
+			"RedirectURI":         req.redirectURI,
+			"State":               req.state,
+			"Scope":               req.scope,
+			"Scopes":              describeScopes(req.scope),
+			"CodeChallenge":       req.codeChallenge,
+			"CodeChallengeMethod": req.codeChallengeMethod,
+		})
+		return
+	}
+
+	if params["action"] == "deny" {
+		redirectWithError(c, req, "access_denied", "the user denied the request")
+		return
+	}
+
+	email, password, totpCode := params["email"], params["password"], params["totp_code"]
+	if email == "" || password == "" {
+		renderAuthorizeError(c, "Email and password are required.")
+		return
+	}
+	var user models.User
+	if err := utils.DB.Where("LOWER(email) = LOWER(?)", strings.TrimSpace(email)).First(&user).Error; err != nil ||
+		bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)) != nil {
+		renderAuthorizeError(c, "Invalid email or password.")
+		return
+	}
+	if !user.IsActive {
+		renderAuthorizeError(c, "This account is deactivated.")
+		return
+	}
+	if user.TwoFactorEnabled && (totpCode == "" || !totp.Validate(totpCode, user.TotpSecret)) {
+		renderAuthorizeError(c, "Invalid or missing two-factor authentication code.")
+		return
+	}
+	// A client bound to a store may only be authorized by that store's users.
+	if req.client.StoreID != nil && !userBelongsToStore(user, *req.client.StoreID) {
+		redirectWithError(c, req, "access_denied", "this application is restricted to another store")
+		return
+	}
+
+	codeBytes := make([]byte, 32)
+	if _, err := rand.Read(codeBytes); err != nil {
+		oauthError(c, http.StatusInternalServerError, "server_error", "failed to generate authorization code")
+		return
+	}
+	authCode := hex.EncodeToString(codeBytes)
+	storeID := user.StoreID
+	if req.client.StoreID != nil {
+		storeID = req.client.StoreID
+	}
+	codeRecord := models.OAuthCode{
+		Code:                sha256Hex(authCode),
+		ClientID:            req.client.ClientID,
+		UserID:              user.ID,
+		StoreID:             storeID,
+		RedirectURI:         req.redirectURI,
+		Scope:               req.scope,
+		CodeChallenge:       req.codeChallenge,
+		CodeChallengeMethod: req.codeChallengeMethod,
+		ExpiresAt:           time.Now().Add(oauthCodeTTL),
+	}
+	if err := utils.DB.Create(&codeRecord).Error; err != nil {
+		oauthError(c, http.StatusInternalServerError, "server_error", "failed to save authorization code")
+		return
+	}
+
+	parsed, _ := url.Parse(req.redirectURI)
+	q := parsed.Query()
+	q.Set("code", authCode)
+	if req.state != "" {
+		q.Set("state", req.state)
+	}
+	parsed.RawQuery = q.Encode()
+
+	if c.ContentType() == "application/json" || strings.Contains(c.GetHeader("Accept"), "application/json") {
+		c.JSON(http.StatusOK, gin.H{"code": authCode, "state": req.state, "redirect_uri": parsed.String()})
+		return
+	}
+	c.Redirect(http.StatusFound, parsed.String())
+}
+
+func hostOf(raw string) string {
+	if u, err := url.Parse(raw); err == nil {
+		return u.Host
+	}
+	return raw
+}
+
+func userBelongsToStore(user models.User, storeID uuid.UUID) bool {
+	if utils.IsSuperAdminRole(user.Role) {
+		return true
+	}
+	for _, id := range utils.AssignedStoreIDs(utils.DB, user.ID, user.StoreID) {
+		if id == storeID {
+			return true
 		}
 	}
+	return false
+}
 
-	if responseType != "" && responseType != "code" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported_response_type", "error_description": "Only response_type=code is supported"})
+type issuedTokens struct {
+	Access  string
+	Refresh string
+}
+
+func issueOAuthTokens(user models.User, storeID *uuid.UUID, clientID, scope string, withRefresh bool) (*issuedTokens, error) {
+	access, err := utils.GenerateOAuthAccessToken(user.ID, user.Name, user.Email, user.Role, storeID, clientID, scope)
+	if err != nil {
+		return nil, err
+	}
+	out := &issuedTokens{Access: access}
+	if withRefresh {
+		refresh, err := generateRandomSecret(32)
+		if err != nil {
+			return nil, err
+		}
+		rec := models.OAuthRefreshToken{
+			Token:     sha256Hex(refresh),
+			ClientID:  clientID,
+			UserID:    user.ID,
+			StoreID:   storeID,
+			Scope:     scope,
+			ExpiresAt: time.Now().Add(oauthRefreshTokenTTL),
+		}
+		if err := utils.DB.Create(&rec).Error; err != nil {
+			return nil, err
+		}
+		out.Refresh = refresh
+	}
+	return out, nil
+}
+
+func writeTokenResponse(c *gin.Context, t *issuedTokens, scope string) {
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
+	resp := gin.H{
+		"access_token": t.Access,
+		"token_type":   "Bearer",
+		"expires_in":   int(utils.OAuthAccessTokenTTL.Seconds()),
+		"scope":        scope,
+	}
+	if t.Refresh != "" {
+		resp["refresh_token"] = t.Refresh
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// OAuthToken handles POST /api/v1/oauth/token for all supported grant types.
+func OAuthToken(c *gin.Context) {
+	p := readOAuthParams(c)
+	grantType := p["grant_type"]
+	if grantType == "" {
+		oauthError(c, http.StatusBadRequest, "invalid_request", "grant_type is required")
+		return
+	}
+	client, ok := authenticateClient(c, p)
+	if !ok {
+		return
+	}
+	if !clientAllowsGrant(client, grantType) {
+		oauthError(c, http.StatusBadRequest, "unauthorized_client", fmt.Sprintf("this client may not use the %s grant", grantType))
 		return
 	}
 
-	// GET: Render the interactive OAuth login and authorization consent form
-	if c.Request.Method == http.MethodGet {
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		tmpl := `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TruERP — Authorize {{.ClientName}}</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-      color: #f8fafc;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 1.5rem;
-    }
-    .card {
-      background: rgba(30, 41, 59, 0.85);
-      backdrop-filter: blur(16px);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 1rem;
-      width: 100%;
-      max-width: 440px;
-      padding: 2.5rem;
-      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-    }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin-bottom: 1.5rem;
-    }
-    .brand-logo {
-      width: 40px;
-      height: 40px;
-      border-radius: 8px;
-      background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-weight: 700;
-      font-size: 1.25rem;
-      color: #fff;
-    }
-    .brand-title {
-      font-size: 1.25rem;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-    }
-    h2 {
-      font-size: 1.15rem;
-      font-weight: 600;
-      margin-bottom: 0.5rem;
-    }
-    p.desc {
-      font-size: 0.875rem;
-      color: #94a3b8;
-      margin-bottom: 1.5rem;
-      line-height: 1.5;
-    }
-    .scopes-box {
-      background: rgba(15, 23, 42, 0.6);
-      border: 1px solid rgba(255, 255, 255, 0.05);
-      border-radius: 0.5rem;
-      padding: 0.75rem 1rem;
-      margin-bottom: 1.5rem;
-      font-size: 0.8125rem;
-    }
-    .scope-item {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: #cbd5e1;
-      margin: 0.35rem 0;
-    }
-    .scope-item svg {
-      width: 16px;
-      height: 16px;
-      color: #10b981;
-      flex-shrink: 0;
-    }
-    .form-group {
-      margin-bottom: 1rem;
-    }
-    label {
-      display: block;
-      font-size: 0.8125rem;
-      font-weight: 500;
-      color: #cbd5e1;
-      margin-bottom: 0.35rem;
-    }
-    input[type="email"], input[type="password"], input[type="text"] {
-      width: 100%;
-      background: #0f172a;
-      border: 1px solid #334155;
-      border-radius: 0.5rem;
-      padding: 0.65rem 0.875rem;
-      color: #fff;
-      font-size: 0.9375rem;
-      outline: none;
-      transition: border-color 0.2s;
-    }
-    input:focus {
-      border-color: #6366f1;
-    }
-    .actions {
-      display: flex;
-      gap: 0.75rem;
-      margin-top: 1.5rem;
-    }
-    button {
-      flex: 1;
-      padding: 0.75rem 1rem;
-      border-radius: 0.5rem;
-      font-weight: 600;
-      font-size: 0.875rem;
-      cursor: pointer;
-      border: none;
-      transition: all 0.2s;
-    }
-    button.btn-primary {
-      background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
-      color: #ffffff;
-    }
-    button.btn-primary:hover {
-      opacity: 0.95;
-      transform: translateY(-1px);
-    }
-    button.btn-secondary {
-      background: rgba(51, 65, 85, 0.5);
-      color: #cbd5e1;
-    }
-    button.btn-secondary:hover {
-      background: rgba(51, 65, 85, 0.8);
-    }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="brand">
-      <div class="brand-logo">T</div>
-      <div class="brand-title">TruERP Authorization</div>
-    </div>
-    <h2>Sign in & Grant Access</h2>
-    <p class="desc"><strong style="color: #f1f5f9;">{{.ClientName}}</strong> is requesting authorization to connect with your TruERP account.</p>
+	switch grantType {
+	case grantAuthorizationCode:
+		tokenFromAuthorizationCode(c, client, p)
+	case grantRefreshToken:
+		tokenFromRefreshToken(c, client, p)
+	case grantClientCredentials:
+		tokenFromClientCredentials(c, client, p)
+	case grantPassword:
+		tokenFromPassword(c, client, p)
+	default:
+		oauthError(c, http.StatusBadRequest, "unsupported_grant_type", fmt.Sprintf("grant type %s is not supported", grantType))
+	}
+}
 
-    <div class="scopes-box">
-      <div style="font-size: 0.75rem; text-transform: uppercase; color: #64748b; font-weight: 600; margin-bottom: 0.25rem;">Requested Permissions</div>
-      <div class="scope-item">
-        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"></path></svg>
-        <span>Full ERP & Billing API Access (Invoices, Parties, Stock, Ledgers)</span>
-      </div>
-      <div class="scope-item">
-        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"></path></svg>
-        <span>AI MCP Server Integration</span>
-      </div>
-    </div>
-
-    <form method="POST" action="/api/v1/oauth/authorize">
-      <input type="hidden" name="client_id" value="{{.ClientID}}">
-      <input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
-      <input type="hidden" name="response_type" value="code">
-      <input type="hidden" name="state" value="{{.State}}">
-      <input type="hidden" name="scope" value="{{.Scope}}">
-      <input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
-      <input type="hidden" name="code_challenge_method" value="{{.CodeChallengeMethod}}">
-
-      <div class="form-group">
-        <label for="email">Account Email</label>
-        <input type="email" id="email" name="email" required placeholder="admin@example.com" autocomplete="username">
-      </div>
-      <div class="form-group">
-        <label for="password">Password</label>
-        <input type="password" id="password" name="password" required placeholder="••••••••" autocomplete="current-password">
-      </div>
-      <div class="form-group">
-        <label for="totp_code">2FA Code (Optional)</label>
-        <input type="text" id="totp_code" name="totp_code" placeholder="6-digit code if enabled" autocomplete="one-time-code">
-      </div>
-
-      <div class="actions">
-        <button type="button" class="btn-secondary" onclick="window.history.back()">Cancel</button>
-        <button type="submit" class="btn-primary">Authorize Access</button>
-      </div>
-    </form>
-  </div>
-</body>
-</html>`
-		t, err := template.New("authorize").Parse(tmpl)
-		if err != nil {
-			c.String(http.StatusInternalServerError, "Template parse error")
+func tokenFromAuthorizationCode(c *gin.Context, client *models.OAuthClient, p map[string]string) {
+	code := p["code"]
+	if code == "" {
+		oauthError(c, http.StatusBadRequest, "invalid_request", "code is required")
+		return
+	}
+	codeHash := sha256Hex(code)
+	// Claim the code atomically so concurrent exchanges cannot both succeed.
+	res := utils.DB.Model(&models.OAuthCode{}).Where("code = ? AND used = ?", codeHash, false).Update("used", true)
+	if res.Error != nil || res.RowsAffected != 1 {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "invalid, expired or already used authorization code")
+		return
+	}
+	var rec models.OAuthCode
+	if err := utils.DB.Where("code = ?", codeHash).First(&rec).Error; err != nil {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "invalid authorization code")
+		return
+	}
+	if time.Now().After(rec.ExpiresAt) {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "authorization code expired")
+		return
+	}
+	if rec.ClientID != client.ClientID {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "authorization code was issued to another client")
+		return
+	}
+	if p["redirect_uri"] != rec.RedirectURI && !(p["redirect_uri"] == "" && len(clientRedirectURIs(client)) == 1) {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "redirect_uri mismatch")
+		return
+	}
+	if rec.CodeChallenge != "" {
+		if p["code_verifier"] == "" || !verifyCodeChallenge(p["code_verifier"], rec.CodeChallenge, rec.CodeChallengeMethod) {
+			oauthError(c, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
 			return
 		}
-		data := map[string]string{
-			"ClientID":            client.ClientID,
-			"ClientName":          client.ClientName,
-			"RedirectURI":         redirectURI,
-			"State":               state,
-			"Scope":               scope,
-			"CodeChallenge":       codeChallenge,
-			"CodeChallengeMethod": codeChallengeMethod,
-		}
-		t.Execute(c.Writer, data)
-		return
-	}
-
-	// POST: Authenticate user credentials and issue authorization code
-	var email, password, totpCode string
-	if c.ContentType() == "application/json" {
-		var req struct {
-			Email    string `json:"email"`
-			Password string `json:"password"`
-			TotpCode string `json:"totp_code"`
-		}
-		if err := c.ShouldBindJSON(&req); err == nil {
-			email = req.Email
-			password = req.Password
-			totpCode = req.TotpCode
-		}
-	} else {
-		email = c.PostForm("email")
-		password = c.PostForm("password")
-		totpCode = c.PostForm("totp_code")
-	}
-
-	if email == "" || password == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "error_description": "email and password are required"})
+	} else if client.IsPublic {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "PKCE is required for public clients")
 		return
 	}
 
 	var user models.User
-	if err := utils.DB.Where("LOWER(email) = LOWER(?)", strings.TrimSpace(email)).First(&user).Error; err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "access_denied", "error_description": "Invalid email or password"})
+	if err := utils.DB.First(&user, "id = ?", rec.UserID).Error; err != nil || !user.IsActive {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "the authorizing user is unavailable")
 		return
 	}
-
-	if !user.IsActive {
-		c.JSON(http.StatusForbidden, gin.H{"error": "access_denied", "error_description": "User account is inactive"})
+	tokens, err := issueOAuthTokens(user, rec.StoreID, client.ClientID, rec.Scope, clientAllowsGrant(client, grantRefreshToken))
+	if err != nil {
+		oauthError(c, http.StatusInternalServerError, "server_error", "failed to issue tokens")
 		return
 	}
+	writeTokenResponse(c, tokens, rec.Scope)
+}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "access_denied", "error_description": "Invalid email or password"})
+func tokenFromRefreshToken(c *gin.Context, client *models.OAuthClient, p map[string]string) {
+	presented := p["refresh_token"]
+	if presented == "" {
+		oauthError(c, http.StatusBadRequest, "invalid_request", "refresh_token is required")
 		return
 	}
-
-	if user.TwoFactorEnabled {
-		if totpCode == "" || !totp.Validate(totpCode, user.TotpSecret) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "access_denied", "error_description": "Invalid or missing two-factor authentication code"})
-			return
+	var rf models.OAuthRefreshToken
+	if err := utils.DB.Where("token = ?", sha256Hex(presented)).First(&rf).Error; err != nil {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "invalid refresh token")
+		return
+	}
+	if rf.ClientID != client.ClientID {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "refresh token was issued to another client")
+		return
+	}
+	if rf.Revoked {
+		// Replay of a rotated token: assume theft and revoke the whole family.
+		utils.DB.Model(&models.OAuthRefreshToken{}).
+			Where("client_id = ? AND user_id = ? AND revoked = ?", rf.ClientID, rf.UserID, false).
+			Update("revoked", true)
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "refresh token has been revoked")
+		return
+	}
+	if time.Now().After(rf.ExpiresAt) {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "refresh token expired")
+		return
+	}
+	scope := rf.Scope
+	if requested := p["scope"]; requested != "" {
+		// A refresh may narrow, never widen, the original grant.
+		granted := map[string]bool{}
+		for s := range utils.ExpandScopes(splitList(rf.Scope)) {
+			granted[s] = true
 		}
-	}
-
-	// Generate authorization code
-	codeBytes := make([]byte, 32)
-	if _, err := rand.Read(codeBytes); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "error_description": "Failed to generate authorization code"})
-		return
-	}
-	authCode := hex.EncodeToString(codeBytes)
-
-	codeRecord := models.OAuthCode{
-		Code:                authCode,
-		ClientID:            client.ClientID,
-		UserID:              user.ID,
-		StoreID:             user.StoreID,
-		RedirectURI:         redirectURI,
-		Scope:               scope,
-		CodeChallenge:       codeChallenge,
-		CodeChallengeMethod: codeChallengeMethod,
-		ExpiresAt:           time.Now().Add(oauthCodeTTL),
-		Used:                false,
-	}
-
-	if err := utils.DB.Create(&codeRecord).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "error_description": "Database error saving code"})
-		return
-	}
-
-	// Build callback URL
-	if redirectURI != "" {
-		parsed, err := url.Parse(redirectURI)
-		if err == nil {
-			q := parsed.Query()
-			q.Set("code", authCode)
-			if state != "" {
-				q.Set("state", state)
-			}
-			parsed.RawQuery = q.Encode()
-
-			// If submitted via browser form, perform 302 redirect
-			if !strings.Contains(c.GetHeader("Accept"), "application/json") && c.ContentType() != "application/json" {
-				c.Redirect(http.StatusFound, parsed.String())
+		for _, s := range splitList(rf.Scope) {
+			granted[s] = true
+		}
+		for _, s := range splitList(requested) {
+			if !granted[s] {
+				oauthError(c, http.StatusBadRequest, "invalid_scope", fmt.Sprintf("scope %q exceeds the original grant", s))
 				return
 			}
 		}
+		scope = utils.JoinScopes(splitList(requested))
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"code":         authCode,
-		"state":        state,
-		"redirect_uri": redirectURI,
-	})
+	res := utils.DB.Model(&models.OAuthRefreshToken{}).Where("id = ? AND revoked = ?", rf.ID, false).Update("revoked", true)
+	if res.Error != nil || res.RowsAffected != 1 {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "refresh token has been revoked")
+		return
+	}
+	var user models.User
+	if err := utils.DB.First(&user, "id = ?", rf.UserID).Error; err != nil || !user.IsActive {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "user is inactive or not found")
+		return
+	}
+	tokens, err := issueOAuthTokens(user, rf.StoreID, client.ClientID, scope, true)
+	if err != nil {
+		oauthError(c, http.StatusInternalServerError, "server_error", "failed to issue tokens")
+		return
+	}
+	writeTokenResponse(c, tokens, scope)
 }
 
-// OAuthToken handles POST /api/v1/oauth/token for all standard grant types
-func OAuthToken(c *gin.Context) {
-	grantType := c.PostForm("grant_type")
-	code := c.PostForm("code")
-	redirectURI := c.PostForm("redirect_uri")
-	codeVerifier := c.PostForm("code_verifier")
-	refreshToken := c.PostForm("refresh_token")
-	username := c.PostForm("username")
+func tokenFromClientCredentials(c *gin.Context, client *models.OAuthClient, p map[string]string) {
+	if client.IsPublic {
+		oauthError(c, http.StatusBadRequest, "unauthorized_client", "public clients cannot use client_credentials")
+		return
+	}
+	if client.StoreID == nil {
+		oauthError(c, http.StatusBadRequest, "unauthorized_client", "client_credentials requires a client bound to a store")
+		return
+	}
+	store, err := utils.FindStoreByID(utils.DB, *client.StoreID)
+	if err != nil || !store.IsActive {
+		oauthError(c, http.StatusBadRequest, "invalid_client", "the client's store is unavailable")
+		return
+	}
+	var owner models.User
+	if err := utils.DB.First(&owner, "id = ?", store.OwnerUserID).Error; err != nil || !owner.IsActive {
+		oauthError(c, http.StatusBadRequest, "invalid_client", "the client's store owner is unavailable")
+		return
+	}
+	scope, err := resolveGrantedScopes(client, p["scope"])
+	if err != nil {
+		oauthError(c, http.StatusBadRequest, "invalid_scope", err.Error())
+		return
+	}
+	// Machine tokens never get internal-API access.
+	scopes := []string{}
+	for _, s := range splitList(scope) {
+		if s != utils.ScopeInternalERP && s != utils.ScopeAdmin {
+			scopes = append(scopes, s)
+		}
+	}
+	scope = utils.JoinScopes(scopes)
+	storeID := store.ID
+	tokens, err := issueOAuthTokens(owner, &storeID, client.ClientID, scope, false)
+	if err != nil {
+		oauthError(c, http.StatusInternalServerError, "server_error", "failed to issue token")
+		return
+	}
+	writeTokenResponse(c, tokens, scope)
+}
+
+func tokenFromPassword(c *gin.Context, client *models.OAuthClient, p map[string]string) {
+	if client.IsPublic {
+		oauthError(c, http.StatusBadRequest, "unauthorized_client", "public clients cannot use the password grant")
+		return
+	}
+	username := p["username"]
 	if username == "" {
-		username = c.PostForm("email")
+		username = p["email"]
 	}
-	password := c.PostForm("password")
-	totpCode := c.PostForm("totp_code")
-	scope := c.PostForm("scope")
-
-	// Fallback to JSON payload if form is empty
-	if grantType == "" && c.ContentType() == "application/json" {
-		var req map[string]string
-		if err := c.ShouldBindJSON(&req); err == nil {
-			grantType = req["grant_type"]
-			code = req["code"]
-			redirectURI = req["redirect_uri"]
-			codeVerifier = req["code_verifier"]
-			refreshToken = req["refresh_token"]
-			username = req["username"]
-			if username == "" {
-				username = req["email"]
-			}
-			password = req["password"]
-			totpCode = req["totp_code"]
-			scope = req["scope"]
-		}
-	}
-
-	clientID, clientSecret := extractClientCredentials(c)
-
-	if grantType == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "error_description": "grant_type is required"})
+	password := p["password"]
+	if username == "" || password == "" {
+		oauthError(c, http.StatusBadRequest, "invalid_request", "username and password are required")
 		return
 	}
-
-	// -------------------------------------------------------------
-	// 1. Grant Type: authorization_code
-	// -------------------------------------------------------------
-	if grantType == "authorization_code" {
-		if code == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "error_description": "code is required"})
-			return
-		}
-
-		var codeRecord models.OAuthCode
-		if err := utils.DB.Where("code = ?", code).First(&codeRecord).Error; err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "Invalid or expired authorization code"})
-			return
-		}
-
-		if codeRecord.Used {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "Authorization code has already been used"})
-			return
-		}
-
-		if time.Now().After(codeRecord.ExpiresAt) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "Authorization code expired"})
-			return
-		}
-
-		// Verify client_id matches
-		if clientID != "" && codeRecord.ClientID != clientID {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "Client ID mismatch"})
-			return
-		}
-
-		// Verify redirect_uri matches if provided
-		if redirectURI != "" && codeRecord.RedirectURI != "" && codeRecord.RedirectURI != redirectURI {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "redirect_uri mismatch"})
-			return
-		}
-
-		// Verify PKCE code_verifier if challenge was set
-		if codeRecord.CodeChallenge != "" {
-			if codeVerifier == "" || !verifyCodeChallenge(codeVerifier, codeRecord.CodeChallenge, codeRecord.CodeChallengeMethod) {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "PKCE verification failed"})
-				return
-			}
-		}
-
-		// Mark code as used
-		codeRecord.Used = true
-		utils.DB.Save(&codeRecord)
-
-		var user models.User
-		if err := utils.DB.First(&user, "id = ?", codeRecord.UserID).Error; err != nil || !user.IsActive {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_grant", "error_description": "Associated user account is unavailable"})
-			return
-		}
-
-		accessToken, err := utils.GenerateToken(user.ID, user.Name, user.Email, user.Role, user.StoreID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "error_description": "Failed to create access token"})
-			return
-		}
-
-		newRefreshToken, _ := generateRandomSecret(32)
-		rfRecord := models.OAuthRefreshToken{
-			Token:     newRefreshToken,
-			ClientID:  codeRecord.ClientID,
-			UserID:    user.ID,
-			StoreID:   user.StoreID,
-			Scope:     codeRecord.Scope,
-			ExpiresAt: time.Now().Add(oauthRefreshTokenTTL),
-			Revoked:   false,
-		}
-		utils.DB.Create(&rfRecord)
-
-		c.JSON(http.StatusOK, gin.H{
-			"access_token":  accessToken,
-			"token_type":    "Bearer",
-			"expires_in":    86400,
-			"refresh_token": newRefreshToken,
-			"scope":         codeRecord.Scope,
-		})
+	var user models.User
+	if err := utils.DB.Where("LOWER(email) = LOWER(?)", strings.TrimSpace(username)).First(&user).Error; err != nil ||
+		bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)) != nil {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "invalid credentials")
 		return
 	}
-
-	// -------------------------------------------------------------
-	// 2. Grant Type: refresh_token
-	// -------------------------------------------------------------
-	if grantType == "refresh_token" {
-		if refreshToken == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "error_description": "refresh_token is required"})
-			return
-		}
-
-		var rf models.OAuthRefreshToken
-		if err := utils.DB.Where("token = ? AND revoked = ?", refreshToken, false).First(&rf).Error; err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "Invalid or revoked refresh token"})
-			return
-		}
-
-		if time.Now().After(rf.ExpiresAt) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "Refresh token expired"})
-			return
-		}
-
-		var user models.User
-		if err := utils.DB.First(&user, "id = ?", rf.UserID).Error; err != nil || !user.IsActive {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_grant", "error_description": "User is inactive or not found"})
-			return
-		}
-
-		// Rotate refresh token
-		rf.Revoked = true
-		utils.DB.Save(&rf)
-
-		newRefreshToken, _ := generateRandomSecret(32)
-		nextRf := models.OAuthRefreshToken{
-			Token:     newRefreshToken,
-			ClientID:  rf.ClientID,
-			UserID:    user.ID,
-			StoreID:   user.StoreID,
-			Scope:     rf.Scope,
-			ExpiresAt: time.Now().Add(oauthRefreshTokenTTL),
-			Revoked:   false,
-		}
-		utils.DB.Create(&nextRf)
-
-		accessToken, err := utils.GenerateToken(user.ID, user.Name, user.Email, user.Role, user.StoreID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "error_description": "Failed to create access token"})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"access_token":  accessToken,
-			"token_type":    "Bearer",
-			"expires_in":    86400,
-			"refresh_token": newRefreshToken,
-			"scope":         rf.Scope,
-		})
+	if !user.IsActive {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "account is deactivated")
 		return
 	}
-
-	// -------------------------------------------------------------
-	// 3. Grant Type: client_credentials
-	// -------------------------------------------------------------
-	if grantType == "client_credentials" {
-		if clientID == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client", "error_description": "client_id is required"})
-			return
-		}
-
-		var client models.OAuthClient
-		if err := utils.DB.Where("client_id = ?", clientID).First(&client).Error; err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client", "error_description": "Unknown client_id"})
-			return
-		}
-
-		if client.ClientSecret != "" && client.ClientSecret != clientSecret {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client", "error_description": "Invalid client_secret"})
-			return
-		}
-
-		// Find associated user for machine-to-machine requests
-		var user models.User
-		if client.UserID != nil {
-			utils.DB.First(&user, "id = ?", *client.UserID)
-		}
-		if user.ID == uuid.Nil {
-			// Find primary owner or super_admin
-			utils.DB.Where("role IN ('super_admin', 'owner') AND is_active = ?", true).Order("created_at ASC").First(&user)
-		}
-
-		if user.ID == uuid.Nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "error_description": "No active administrative user available for client credentials"})
-			return
-		}
-
-		accessToken, err := utils.GenerateToken(user.ID, user.Name, user.Email, user.Role, user.StoreID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "error_description": "Failed to create access token"})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"access_token": accessToken,
-			"token_type":   "Bearer",
-			"expires_in":   86400,
-			"scope":        client.Scopes,
-		})
+	if user.TwoFactorEnabled && (p["totp_code"] == "" || !totp.Validate(p["totp_code"], user.TotpSecret)) {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "invalid or missing two-factor code")
 		return
 	}
-
-	// -------------------------------------------------------------
-	// 4. Grant Type: password
-	// -------------------------------------------------------------
-	if grantType == "password" {
-		if username == "" || password == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "error_description": "username and password are required"})
-			return
-		}
-
-		var user models.User
-		if err := utils.DB.Where("LOWER(email) = LOWER(?)", strings.TrimSpace(username)).First(&user).Error; err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_grant", "error_description": "Invalid credentials"})
-			return
-		}
-
-		if !user.IsActive {
-			c.JSON(http.StatusForbidden, gin.H{"error": "invalid_grant", "error_description": "Account is deactivated"})
-			return
-		}
-
-		if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_grant", "error_description": "Invalid credentials"})
-			return
-		}
-
-		if user.TwoFactorEnabled {
-			if totpCode == "" || !totp.Validate(totpCode, user.TotpSecret) {
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_grant", "error_description": "Invalid or missing two-factor code"})
-				return
-			}
-		}
-
-		accessToken, err := utils.GenerateToken(user.ID, user.Name, user.Email, user.Role, user.StoreID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "error_description": "Failed to create access token"})
-			return
-		}
-
-		newRefreshToken, _ := generateRandomSecret(32)
-		rfRecord := models.OAuthRefreshToken{
-			Token:     newRefreshToken,
-			ClientID:  clientID,
-			UserID:    user.ID,
-			StoreID:   user.StoreID,
-			Scope:     scope,
-			ExpiresAt: time.Now().Add(oauthRefreshTokenTTL),
-			Revoked:   false,
-		}
-		utils.DB.Create(&rfRecord)
-
-		c.JSON(http.StatusOK, gin.H{
-			"access_token":  accessToken,
-			"token_type":    "Bearer",
-			"expires_in":    86400,
-			"refresh_token": newRefreshToken,
-			"scope":         scope,
-		})
+	if client.StoreID != nil && !userBelongsToStore(user, *client.StoreID) {
+		oauthError(c, http.StatusBadRequest, "invalid_grant", "this client is restricted to another store")
 		return
 	}
-
-	c.JSON(http.StatusBadRequest, gin.H{
-		"error":             "unsupported_grant_type",
-		"error_description": fmt.Sprintf("Grant type %s is not supported", grantType),
-	})
+	scope, err := resolveGrantedScopes(client, p["scope"])
+	if err != nil {
+		oauthError(c, http.StatusBadRequest, "invalid_scope", err.Error())
+		return
+	}
+	storeID := user.StoreID
+	if client.StoreID != nil {
+		storeID = client.StoreID
+	}
+	tokens, err := issueOAuthTokens(user, storeID, client.ClientID, scope, clientAllowsGrant(client, grantRefreshToken))
+	if err != nil {
+		oauthError(c, http.StatusInternalServerError, "server_error", "failed to issue tokens")
+		return
+	}
+	writeTokenResponse(c, tokens, scope)
 }
 
-// OAuthUserInfo returns user claims for authenticated OAuth Bearer token
+// OAuthUserInfo returns user claims for an authenticated OAuth Bearer token
 func OAuthUserInfo(c *gin.Context) {
 	userID, ok := c.Get("actor_user_id")
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
-
 	userName, _ := c.Get("user_name")
 	email, _ := c.Get("email")
 	role, _ := c.Get("role")
 	storeID, _ := currentStoreID(c)
-
+	scope, _ := c.Get("token_scope")
 	c.JSON(http.StatusOK, gin.H{
 		"sub":      userID,
 		"name":     userName,
 		"email":    email,
 		"role":     role,
 		"store_id": storeID,
+		"scope":    scope,
 	})
 }
 
-// OAuthRevoke revokes an issued refresh token
+// OAuthRevoke revokes a refresh token (RFC 7009). It always answers 200 so
+// callers cannot probe for valid tokens.
 func OAuthRevoke(c *gin.Context) {
-	token := c.PostForm("token")
-	if token == "" {
-		var req struct {
-			Token string `json:"token"`
-		}
-		c.ShouldBindJSON(&req)
-		token = req.Token
+	p := readOAuthParams(c)
+	client, ok := authenticateClient(c, p)
+	if !ok {
+		return
 	}
-
-	if token != "" {
-		utils.DB.Model(&models.OAuthRefreshToken{}).Where("token = ?", token).Update("revoked", true)
+	if token := p["token"]; token != "" {
+		utils.DB.Model(&models.OAuthRefreshToken{}).
+			Where("token = ? AND client_id = ?", sha256Hex(token), client.ClientID).
+			Update("revoked", true)
 	}
-
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-// ListOAuthClients lists all registered OAuth clients (super admin)
-func ListOAuthClients(c *gin.Context) {
-	var clients []models.OAuthClient
-	if err := utils.DB.Order("created_at DESC").Find(&clients).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, clients)
-}
-
-// CreateOAuthClient registers a new OAuth client application (super admin)
-func CreateOAuthClient(c *gin.Context) {
-	var input struct {
-		ClientID     string `json:"client_id"`
-		ClientSecret string `json:"client_secret"`
-		ClientName   string `json:"client_name" binding:"required"`
-		RedirectURIs string `json:"redirect_uris" binding:"required"`
-		GrantTypes   string `json:"grant_types"`
-		Scopes       string `json:"scopes"`
-		IsPublic     bool   `json:"is_public"`
-	}
-
-	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	clientID := input.ClientID
-	if clientID == "" {
-		idHex, _ := generateRandomSecret(16)
-		clientID = "client_" + idHex
-	}
-
-	clientSecret := input.ClientSecret
-	if clientSecret == "" && !input.IsPublic {
-		clientSecret, _ = generateRandomSecret(32)
-	}
-
-	grantTypes := input.GrantTypes
-	if grantTypes == "" {
-		grantTypes = "authorization_code,client_credentials,refresh_token,password"
-	}
-
-	scopes := input.Scopes
-	if scopes == "" {
-		scopes = "read write admin erp"
-	}
-
-	client := models.OAuthClient{
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		ClientName:   input.ClientName,
-		RedirectURIs: input.RedirectURIs,
-		GrantTypes:   grantTypes,
-		Scopes:       scopes,
-		IsPublic:     input.IsPublic,
-	}
-
-	if err := utils.DB.Create(&client).Error; err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to create client or client_id already exists"})
-		return
-	}
-
-	c.JSON(http.StatusCreated, client)
-}
-
-// DeleteOAuthClient removes an OAuth client (super admin)
-func DeleteOAuthClient(c *gin.Context) {
-	id := c.Param("id")
-	if err := utils.DB.Where("id = ? OR client_id = ?", id, id).Delete(&models.OAuthClient{}).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "OAuth client deleted"})
-}
+var consentTemplate = template.Must(template.New("authorize").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TruERP — Authorize{{if .ClientName}} {{.ClientName}}{{end}}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#f1f5f9;color:#0f172a;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1.5rem}
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:14px;width:100%;max-width:440px;padding:2rem;box-shadow:0 10px 30px -12px rgba(15,23,42,.18)}
+.brand{display:flex;align-items:center;gap:.6rem;margin-bottom:1.25rem;font-weight:700}
+.logo{width:34px;height:34px;border-radius:8px;background:#4f46e5;color:#fff;display:flex;align-items:center;justify-content:center}
+h1{font-size:1.1rem;margin-bottom:.35rem}
+p{font-size:.875rem;color:#475569;line-height:1.5}
+.scopes{margin:1rem 0 1.25rem;border:1px solid #e2e8f0;border-radius:10px;padding:.75rem 1rem;background:#f8fafc}
+.scopes h2{font-size:.7rem;text-transform:uppercase;letter-spacing:.04em;color:#64748b;margin-bottom:.4rem}
+.scopes li{list-style:none;font-size:.85rem;padding:.2rem 0;color:#334155}
+.scopes code{font-size:.75rem;color:#4f46e5}
+label{display:block;font-size:.8rem;font-weight:600;color:#334155;margin:.75rem 0 .3rem}
+input{width:100%;border:1px solid #cbd5e1;border-radius:8px;padding:.6rem .75rem;font-size:.9rem}
+input:focus{outline:2px solid #c7d2fe;border-color:#4f46e5}
+.actions{display:flex;gap:.6rem;margin-top:1.25rem}
+button{flex:1;padding:.7rem;border-radius:8px;font-weight:600;font-size:.875rem;cursor:pointer;border:1px solid transparent}
+.primary{background:#4f46e5;color:#fff}
+.secondary{background:#fff;border-color:#cbd5e1;color:#334155}
+.error{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;border-radius:8px;padding:.75rem;font-size:.875rem}
+.note{font-size:.75rem;color:#64748b;margin-top:1rem}
+</style>
+</head>
+<body>
+<div class="card">
+<div class="brand"><div class="logo">T</div>TruERP</div>
+{{if .Error}}
+<h1>Authorization failed</h1>
+<div class="error">{{.Error}}</div>
+{{else}}
+<h1>Allow {{.ClientName}} to access your account?</h1>
+<p>After you approve, you will be returned to <strong>{{.RedirectHost}}</strong>.</p>
+<div class="scopes"><h2>This application will be able to</h2><ul>
+{{range .Scopes}}<li>{{.Description}} <code>{{.Scope}}</code></li>{{end}}
+</ul></div>
+<form method="POST" action="/api/v1/oauth/authorize" autocomplete="on">
+<input type="hidden" name="client_id" value="{{.ClientID}}">
+<input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
+<input type="hidden" name="response_type" value="code">
+<input type="hidden" name="state" value="{{.State}}">
+<input type="hidden" name="scope" value="{{.Scope}}">
+<input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
+<input type="hidden" name="code_challenge_method" value="{{.CodeChallengeMethod}}">
+<label for="email">Email</label>
+<input type="email" id="email" name="email" autocomplete="username">
+<label for="password">Password</label>
+<input type="password" id="password" name="password" autocomplete="current-password">
+<label for="totp_code">Two-factor code (if enabled)</label>
+<input type="text" id="totp_code" name="totp_code" inputmode="numeric" autocomplete="one-time-code">
+<div class="actions">
+<button type="submit" name="action" value="deny" class="secondary" formnovalidate>Deny</button>
+<button type="submit" name="action" value="allow" class="primary">Allow access</button>
+</div>
+</form>
+<p class="note">Only approve applications you trust. You can revoke access at any time.</p>
+{{end}}
+</div>
+</body>
+</html>`))

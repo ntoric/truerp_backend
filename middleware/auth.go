@@ -34,6 +34,23 @@ func AuthRequired() gin.HandlerFunc {
 			return
 		}
 
+		if claims.Role == "portal" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
+			c.Abort()
+			return
+		}
+		// OAuth tokens scoped to the public API cannot call the internal API;
+		// only tokens granted "erp"/"admin" (e.g. the MCP server) may.
+		if claims.Scope != "" {
+			c.Set("token_scope", claims.Scope)
+			c.Set("oauth_client_id", claims.ClientID)
+			if !utils.GrantsInternalAPI(utils.ParseScopes(claims.Scope)) && c.Request.URL.Path != "/api/v1/oauth/userinfo" {
+				c.JSON(http.StatusForbidden, gin.H{"error": "This access token is limited to the public API (/api/public/v1)"})
+				c.Abort()
+				return
+			}
+		}
+
 		actorID := claims.UserID
 		c.Set("actor_user_id", actorID)
 		c.Set("user_name", claims.UserName)
@@ -61,86 +78,11 @@ func AuthRequired() gin.HandlerFunc {
 			return
 		}
 
-		scopeUserID := actorID
-		var activeStoreID *uuid.UUID
-
-		if utils.IsSuperAdminRole(claims.Role) {
-			headerStore := strings.TrimSpace(c.GetHeader("X-Store-ID"))
-			resolved := false
-			if headerStore != "" {
-				if storeUUID, parseErr := uuid.Parse(headerStore); parseErr == nil {
-					if store, storeErr := utils.FindStoreByID(utils.DB, storeUUID); storeErr == nil && store.IsActive {
-						scopeUserID = store.OwnerUserID
-						activeStoreID = &store.ID
-						resolved = true
-					}
-				}
-			}
-			if !resolved && claims.StoreID != nil && *claims.StoreID != uuid.Nil {
-				if store, storeErr := utils.FindStoreByID(utils.DB, *claims.StoreID); storeErr == nil && store.IsActive {
-					scopeUserID = store.OwnerUserID
-					activeStoreID = &store.ID
-					resolved = true
-				}
-			}
-			if !resolved {
-				// Fall back to the first active store so backoffice data stays store-scoped.
-				var first models.Store
-				if err := utils.DB.Where("is_active = ?", true).Order("name ASC").First(&first).Error; err == nil {
-					scopeUserID = first.OwnerUserID
-					activeStoreID = &first.ID
-				}
-			}
-		} else {
-			var actor models.User
-			if err := utils.DB.Select("id", "store_id", "is_store_owner").First(&actor, "id = ?", actorID).Error; err != nil {
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
-				c.Abort()
-				return
-			}
-			storeID := actor.StoreID
-			if storeID == nil && claims.StoreID != nil {
-				storeID = claims.StoreID
-			}
-			resolved := false
-			headerStore := strings.TrimSpace(c.GetHeader("X-Store-ID"))
-			if headerStore != "" {
-				if storeUUID, parseErr := uuid.Parse(headerStore); parseErr == nil && (storeID == nil || *storeID != storeUUID) {
-					// Users with multiple assigned stores may switch between
-					// them — but only into stores they are assigned to.
-					for _, id := range utils.AssignedStoreIDs(utils.DB, actor.ID, actor.StoreID) {
-						if id != storeUUID {
-							continue
-						}
-						if store, storeErr := utils.FindStoreByID(utils.DB, storeUUID); storeErr == nil && store.IsActive {
-							scopeUserID = store.OwnerUserID
-							activeStoreID = &store.ID
-							resolved = true
-						}
-						break
-					}
-				}
-			}
-			if !resolved {
-				if storeID == nil {
-					c.JSON(http.StatusForbidden, gin.H{"error": "No store assigned. Contact your administrator."})
-					c.Abort()
-					return
-				}
-				store, storeErr := utils.FindStoreByID(utils.DB, *storeID)
-				if storeErr != nil {
-					c.JSON(http.StatusForbidden, gin.H{"error": "Assigned store not found"})
-					c.Abort()
-					return
-				}
-				if !store.IsActive {
-					c.JSON(http.StatusForbidden, gin.H{"error": "Assigned store is inactive"})
-					c.Abort()
-					return
-				}
-				scopeUserID = store.OwnerUserID
-				activeStoreID = &store.ID
-			}
+		scopeUserID, activeStoreID, status, errMsg := ResolveStoreScope(c, claims)
+		if status != 0 {
+			c.JSON(status, gin.H{"error": errMsg})
+			c.Abort()
+			return
 		}
 
 		c.Set("user_id", scopeUserID)
@@ -170,6 +112,88 @@ func AuthRequired() gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// ResolveStoreScope decides which store a token acts in: the X-Store-ID
+// header when the user may switch into it, otherwise the token's / user's
+// assigned store (super admins fall back to the first active store). It
+// returns the store owner's user ID (the data scope) and the store ID, or a
+// non-zero HTTP status with an error message.
+func ResolveStoreScope(c *gin.Context, claims *utils.Claims) (scopeUserID uuid.UUID, activeStoreID *uuid.UUID, status int, errMsg string) {
+	actorID := claims.UserID
+	scopeUserID = actorID
+
+	if utils.IsSuperAdminRole(claims.Role) {
+		headerStore := strings.TrimSpace(c.GetHeader("X-Store-ID"))
+		resolved := false
+		if headerStore != "" {
+			if storeUUID, parseErr := uuid.Parse(headerStore); parseErr == nil {
+				if store, storeErr := utils.FindStoreByID(utils.DB, storeUUID); storeErr == nil && store.IsActive {
+					scopeUserID = store.OwnerUserID
+					activeStoreID = &store.ID
+					resolved = true
+				}
+			}
+		}
+		if !resolved && claims.StoreID != nil && *claims.StoreID != uuid.Nil {
+			if store, storeErr := utils.FindStoreByID(utils.DB, *claims.StoreID); storeErr == nil && store.IsActive {
+				scopeUserID = store.OwnerUserID
+				activeStoreID = &store.ID
+				resolved = true
+			}
+		}
+		if !resolved {
+			// Fall back to the first active store so backoffice data stays store-scoped.
+			var first models.Store
+			if err := utils.DB.Where("is_active = ?", true).Order("name ASC").First(&first).Error; err == nil {
+				scopeUserID = first.OwnerUserID
+				activeStoreID = &first.ID
+			}
+		}
+	} else {
+		var actor models.User
+		if err := utils.DB.Select("id", "store_id", "is_store_owner").First(&actor, "id = ?", actorID).Error; err != nil {
+			return scopeUserID, activeStoreID, http.StatusUnauthorized, "User not found"
+		}
+		storeID := actor.StoreID
+		if storeID == nil && claims.StoreID != nil {
+			storeID = claims.StoreID
+		}
+		resolved := false
+		headerStore := strings.TrimSpace(c.GetHeader("X-Store-ID"))
+		if headerStore != "" {
+			if storeUUID, parseErr := uuid.Parse(headerStore); parseErr == nil && (storeID == nil || *storeID != storeUUID) {
+				// Users with multiple assigned stores may switch between
+				// them — but only into stores they are assigned to.
+				for _, id := range utils.AssignedStoreIDs(utils.DB, actor.ID, actor.StoreID) {
+					if id != storeUUID {
+						continue
+					}
+					if store, storeErr := utils.FindStoreByID(utils.DB, storeUUID); storeErr == nil && store.IsActive {
+						scopeUserID = store.OwnerUserID
+						activeStoreID = &store.ID
+						resolved = true
+					}
+					break
+				}
+			}
+		}
+		if !resolved {
+			if storeID == nil {
+				return scopeUserID, activeStoreID, http.StatusForbidden, "No store assigned. Contact your administrator."
+			}
+			store, storeErr := utils.FindStoreByID(utils.DB, *storeID)
+			if storeErr != nil {
+				return scopeUserID, activeStoreID, http.StatusForbidden, "Assigned store not found"
+			}
+			if !store.IsActive {
+				return scopeUserID, activeStoreID, http.StatusForbidden, "Assigned store is inactive"
+			}
+			scopeUserID = store.OwnerUserID
+			activeStoreID = &store.ID
+		}
+	}
+	return scopeUserID, activeStoreID, 0, ""
 }
 
 func isPasswordChangeAllowedPath(c *gin.Context) bool {

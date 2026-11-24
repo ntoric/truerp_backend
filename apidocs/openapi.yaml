@@ -1,0 +1,1752 @@
+openapi: 3.1.0
+info:
+  title: TruERP Public API
+  version: "2026-11-01"
+  summary: Integrate billing, inventory and accounting data from TruERP with other platforms.
+  contact:
+    name: TruERP Support
+  description: |
+    The TruERP Public API lets e-commerce platforms, accounting tools, CRMs, logistics
+    providers and custom applications read and write a store's business data:
+    customers and vendors, products, stock, sales invoices, payments and purchase bills.
+    It also sends **webhooks** when that data changes.
+
+    Every request acts within **one store**. Records created through the API go through
+    the same business rules as the TruERP web and mobile apps: stock movements, party
+    balances, ledger entries, numbering and audit trails.
+
+    ## Base URL
+
+    ```
+    __BASE_URL__/api/public/v1
+    ```
+
+    All requests and responses use JSON (`Content-Type: application/json`) over HTTPS.
+
+    ## Authentication
+
+    The API accepts two kinds of credential, both sent as a bearer token:
+
+    ```http
+    Authorization: Bearer <credential>
+    ```
+
+    | Credential | Use it for | How to get one |
+    |---|---|---|
+    | **API key** (`trp_live_…`) | Server-to-server integrations for a single store | A TruERP super admin creates it under **API Management → API Keys** and picks its scopes. The key is shown once. |
+    | **OAuth 2.0 access token** | Third-party apps that a store connects to | Register an application under **API Management → OAuth Apps**, then use the Authorization Code flow (with PKCE), or Client Credentials for a store-bound app. |
+
+    API keys may also be sent in an `X-API-Key` header. Keep keys secret: never embed them in
+    browser or mobile apps.
+
+    ### OAuth 2.0
+
+    * Discovery: `GET __BASE_URL__/.well-known/oauth-authorization-server`
+    * Authorize: `GET __BASE_URL__/api/v1/oauth/authorize?response_type=code&client_id=…&redirect_uri=…&scope=…&state=…&code_challenge=…&code_challenge_method=S256`
+    * Token: `POST __BASE_URL__/api/v1/oauth/token` (form-encoded; client authentication via HTTP Basic or `client_id`/`client_secret` fields)
+    * Revoke: `POST __BASE_URL__/api/v1/oauth/revoke`
+
+    Access tokens last **1 hour**. Refresh tokens last 30 days and are **rotated** on every
+    use; replaying an old refresh token revokes the whole grant. `redirect_uri` must
+    exactly match a registered URI. Public clients (SPAs, mobile apps) must use PKCE with `S256`.
+
+    ## Scopes and permissions
+
+    Each credential carries scopes. What a request may actually do is the credential's
+    scopes **intersected with the store's API policy**, which a TruERP super admin manages
+    under **API Management → Permissions**. A super admin can also disable API access
+    for a store, restrict API keys to IP addresses, or turn off webhooks.
+
+    | Scope | Grants |
+    |---|---|
+    | `parties:read` / `parties:write` | Customers and vendors |
+    | `products:read` / `products:write` | Products and services |
+    | `stock:read` | Stock levels and warehouses |
+    | `invoices:read` / `invoices:write` | Sales invoices |
+    | `payments:read` / `payments:write` | Payments received |
+    | `purchases:read` / `purchases:write` | Purchase bills |
+    | `events:read` | The event feed |
+    | `webhooks:manage` | Webhook endpoints |
+
+    For OAuth, `read` is shorthand for every `*:read` scope and `write` for every scope.
+    Call `GET /me` to see the effective scopes of a credential.
+
+    ## Representations
+
+    * **IDs** are UUIDs.
+    * **Money** is a JSON number in rupees with up to 2 decimals; every monetary resource has `currency: "INR"`.
+    * **Calendar dates** (`date`, `due_date`, `expiry_date`) are `YYYY-MM-DD` in the store's timezone.
+    * **Timestamps** (`created_at`, `updated_at`) are RFC 3339 in UTC.
+    * Every resource has an `object` field naming its type (`party`, `invoice`, …).
+    * Fields are never removed from a version; new fields may be added at any time, so ignore fields you do not recognise.
+    * Request bodies are strict: an unknown field is rejected with `400`, so typos surface immediately.
+
+    ## Pagination
+
+    List endpoints return newest records first, wrapped in a list object:
+
+    ```json
+    { "object": "list", "data": [ … ], "has_more": true, "next_cursor": "MjAyNi0xMS0yNFQxMD…" }
+    ```
+
+    Pass `limit` (1–100, default 25) and, for the next page, `cursor=<next_cursor>`.
+    To sync incrementally, filter with `updated_since=<RFC 3339 timestamp>`, or use the
+    [event feed](#tag/Events) or [webhooks](#tag/Webhooks).
+
+    ## Errors
+
+    Errors use standard HTTP status codes and a consistent body:
+
+    ```json
+    {
+      "error": {
+        "type": "invalid_request_error",
+        "code": "parameter_invalid",
+        "message": "quantity must be greater than 0",
+        "param": "line_items[0].quantity",
+        "request_id": "5c0d6a0e-6a39-4b0f-9b0e-8f2f5a0b1c2d"
+      }
+    }
+    ```
+
+    | Status | `type` | Meaning |
+    |---|---|---|
+    | 400 | `invalid_request_error` | Malformed body, invalid or missing parameter |
+    | 401 | `authentication_error` | Missing, invalid, expired or revoked credential |
+    | 403 | `permission_error` | Missing scope, API disabled for the store, IP not allowed |
+    | 404 | `not_found_error` | No such resource in this store |
+    | 409 | `conflict_error` | Duplicate (e.g. item code already used) |
+    | 422 | `invalid_request_error` | `Idempotency-Key` reused with a different body |
+    | 429 | `rate_limit_error` | Rate limit exceeded; see `Retry-After` |
+    | 5xx | `api_error` | Something went wrong on our side; retry with the same `Idempotency-Key` |
+
+    Quote the `request_id` (also in the `X-Request-ID` response header) when contacting support.
+
+    ## Idempotency
+
+    Send an `Idempotency-Key` header (any unique string up to 255 characters, such as a UUID)
+    with every `POST` and `PATCH`. If the network fails, retry with the **same key and body**:
+    TruERP returns the original response (with header `Idempotent-Replayed: true`) instead of
+    creating a duplicate invoice or payment. Keys are remembered for 24 hours per credential.
+
+    ## Rate limits
+
+    Each credential may make a store-specific number of requests per minute (default 120).
+    Every response includes `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`
+    (Unix seconds). When the limit is exceeded the API returns `429` with a `Retry-After` header.
+
+    ## Webhooks
+
+    Register an HTTPS endpoint (`POST /webhook-endpoints`) to be notified when data changes.
+    Changes from **every** channel trigger events: the web app, mobile app, POS and this API.
+    Events are usually delivered within 30 seconds.
+
+    Each delivery is a `POST` with a JSON [event](#tag/Events) body and these headers:
+
+    | Header | Value |
+    |---|---|
+    | `TruERP-Event-Id` | Event ID; use it to de-duplicate (delivery is at-least-once) |
+    | `TruERP-Event-Type` | e.g. `invoice.created` |
+    | `TruERP-Signature` | `t=<unix seconds>,v1=<hex HMAC-SHA256>` |
+
+    **Verify the signature** before trusting a delivery: compute HMAC-SHA256 with your
+    endpoint's signing secret (`whsec_…`) over `"<t>.<raw request body>"`, compare it to `v1`
+    in constant time, and reject timestamps more than 5 minutes old.
+
+    ```js
+    // Node.js (Express with express.raw({ type: 'application/json' }))
+    const crypto = require('crypto');
+    function verify(rawBody, header, secret) {
+      const parts = Object.fromEntries(header.split(',').map(p => p.split('=')));
+      if (Math.abs(Date.now() / 1000 - Number(parts.t)) > 300) return false;
+      const expected = crypto.createHmac('sha256', secret).update(`${parts.t}.${rawBody}`).digest('hex');
+      return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(parts.v1));
+    }
+    ```
+
+    ```python
+    # Python
+    import hmac, hashlib, time
+    def verify(raw_body: bytes, header: str, secret: str) -> bool:
+        parts = dict(p.split("=", 1) for p in header.split(","))
+        if abs(time.time() - int(parts["t"])) > 300:
+            return False
+        expected = hmac.new(secret.encode(), f"{parts['t']}.".encode() + raw_body, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, parts["v1"])
+    ```
+
+    Respond with any `2xx` status within 10 seconds. Failed deliveries are retried after
+    1 min, 5 min, 30 min, 2 h, 6 h, 12 h and 24 h. An endpoint is disabled automatically
+    after 50 consecutive failures; re-enable it with `PATCH /webhook-endpoints/{id}`.
+
+    ## Versioning
+
+    This is version `2026-11-01` of the API at path `/api/public/v1`. Additive changes
+    (new endpoints, fields, event types) happen without notice; breaking changes ship
+    under a new path version.
+servers:
+  - url: __BASE_URL__/api/public/v1
+    description: This TruERP server
+security:
+  - ApiKey: []
+  - OAuth2: []
+tags:
+  - name: Account
+    description: Information about the calling credential.
+  - name: Parties
+    description: Customers and vendors. `balance` is the running ledger balance — positive means the party owes the store (receivable), negative means the store owes the party (payable).
+  - name: Products
+    description: Products and services that can be sold or purchased.
+  - name: Stock
+    description: Current stock levels per product, warehouse and batch. Stock changes via invoices, purchase bills and adjustments in TruERP; it cannot be set directly.
+  - name: Invoices
+    description: Sales invoices. Creating an invoice deducts stock, updates the customer's balance and records any payment received with it.
+  - name: Payments
+    description: Payments received from customers (payment in).
+  - name: Purchase Bills
+    description: Bills from vendors. Creating a bill adds stock and updates the vendor's balance.
+  - name: Events
+    description: |
+      A chronological feed of changes in the store, retained for 30 days. Poll it as an
+      alternative to webhooks: store the `next_cursor` from each response and pass it back
+      as `cursor` next time. Unlike other lists, the feed is ordered **oldest first** and
+      always returns `next_cursor` once you have seen at least one event.
+  - name: Webhooks
+    description: Manage endpoints that receive signed event notifications.
+x-tagGroups:
+  - name: Getting started
+    tags: [Account]
+  - name: Master data
+    tags: [Parties, Products, Stock]
+  - name: Transactions
+    tags: [Invoices, Payments, Purchase Bills]
+  - name: Change notifications
+    tags: [Events, Webhooks]
+paths:
+  /me:
+    get:
+      tags: [Account]
+      operationId: getMe
+      summary: Inspect the current credential
+      description: Returns the credential type, its store, effective scopes and rate limit. Use it as a "test connection" call.
+      responses:
+        "200":
+          description: The credential
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Credential" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /parties:
+    get:
+      tags: [Parties]
+      operationId: listParties
+      summary: List parties
+      security: [{ ApiKey: [] }, { OAuth2: [parties:read] }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/UpdatedSince"
+        - $ref: "#/components/parameters/CreatedSince"
+        - name: type
+          in: query
+          schema: { type: string, enum: [customer, vendor] }
+        - name: q
+          in: query
+          description: Case-insensitive search on name, phone, email and GSTIN.
+          schema: { type: string }
+        - name: gstin
+          in: query
+          description: Exact GSTIN match.
+          schema: { type: string }
+        - name: phone
+          in: query
+          description: Exact phone match.
+          schema: { type: string }
+      responses:
+        "200":
+          description: A page of parties
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PartyList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    post:
+      tags: [Parties]
+      operationId: createParty
+      summary: Create a party
+      security: [{ ApiKey: [] }, { OAuth2: [parties:write] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PartyCreate" }
+            example:
+              type: customer
+              name: Sharma Traders
+              phone: "9876543210"
+              email: accounts@sharmatraders.in
+              gstin: 29ABCDE1234F1Z5
+              billing_address: { line: 12 MG Road, city: Bengaluru, state: Karnataka, state_code: "29", pincode: "560001" }
+              credit_limit: 50000
+      responses:
+        "201":
+          description: The created party
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Party" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/IdempotencyMismatch" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /parties/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      tags: [Parties]
+      operationId: getParty
+      summary: Retrieve a party
+      security: [{ ApiKey: [] }, { OAuth2: [parties:read] }]
+      responses:
+        "200":
+          description: The party
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Party" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Parties]
+      operationId: updateParty
+      summary: Update a party
+      description: Only the fields you send are changed. Changing `opening_balance` shifts `balance` by the same amount.
+      security: [{ ApiKey: [] }, { OAuth2: [parties:write] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PartyUpdate" }
+            example: { phone: "9876500000", credit_limit: 75000 }
+      responses:
+        "200":
+          description: The updated party
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Party" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /products:
+    get:
+      tags: [Products]
+      operationId: listProducts
+      summary: List products
+      security: [{ ApiKey: [] }, { OAuth2: [products:read] }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/UpdatedSince"
+        - $ref: "#/components/parameters/CreatedSince"
+        - { name: q, in: query, description: "Search name, SKU and item code., schema: { type: string }" }
+        - { name: sku, in: query, description: "Exact SKU., schema: { type: string }" }
+        - { name: item_code, in: query, description: "Exact item code (barcode)., schema: { type: string }" }
+        - { name: category, in: query, schema: { type: string } }
+        - { name: type, in: query, schema: { type: string, enum: [product, service] } }
+      responses:
+        "200":
+          description: A page of products
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Products]
+      operationId: createProduct
+      summary: Create a product
+      description: A SKU and scale PLU are assigned automatically. Pass `opening_stock` to record initial stock.
+      security: [{ ApiKey: [] }, { OAuth2: [products:write] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductCreate" }
+            example:
+              name: Basmati Rice 5kg
+              type: product
+              item_code: "8901234567890"
+              category: Groceries
+              unit: BAG
+              hsn_code: "1006"
+              sale_price: 650
+              purchase_price: 540
+              mrp: 699
+              tax_rate: 5
+              gst_enabled: true
+              opening_stock: { quantity: 40, cost_price: 540 }
+      responses:
+        "201":
+          description: The created product
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Product" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /products/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      tags: [Products]
+      operationId: getProduct
+      summary: Retrieve a product
+      security: [{ ApiKey: [] }, { OAuth2: [products:read] }]
+      responses:
+        "200":
+          description: The product
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Product" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Products]
+      operationId: updateProduct
+      summary: Update a product
+      description: Only the fields you send are changed. Stock cannot be changed here.
+      security: [{ ApiKey: [] }, { OAuth2: [products:write] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductUpdate" }
+            example: { sale_price: 675, mrp: 720 }
+      responses:
+        "200":
+          description: The updated product
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Product" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /products/{id}/stock:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      tags: [Stock]
+      operationId: getProductStock
+      summary: Retrieve a product's stock level
+      security: [{ ApiKey: [] }, { OAuth2: [stock:read] }]
+      responses:
+        "200":
+          description: The stock level
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StockLevel" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /stock:
+    get:
+      tags: [Stock]
+      operationId: listStock
+      summary: List stock levels
+      description: One entry per product (services are excluded). `updated_since` matches products whose stock changed since that time.
+      security: [{ ApiKey: [] }, { OAuth2: [stock:read] }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/UpdatedSince"
+        - { name: product_id, in: query, schema: { type: string, format: uuid } }
+        - { name: warehouse_id, in: query, description: "Only products with stock rows in this warehouse., schema: { type: string, format: uuid }" }
+        - { name: low_stock, in: query, description: "Only products at or below their minimum stock., schema: { type: boolean }" }
+      responses:
+        "200":
+          description: A page of stock levels
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StockLevelList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /warehouses:
+    get:
+      tags: [Stock]
+      operationId: listWarehouses
+      summary: List warehouses
+      security: [{ ApiKey: [] }, { OAuth2: [stock:read] }]
+      responses:
+        "200":
+          description: All warehouses (not paginated)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: "#/components/schemas/Warehouse" } }
+
+  /invoices:
+    get:
+      tags: [Invoices]
+      operationId: listInvoices
+      summary: List invoices
+      security: [{ ApiKey: [] }, { OAuth2: [invoices:read] }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/UpdatedSince"
+        - $ref: "#/components/parameters/CreatedSince"
+        - $ref: "#/components/parameters/DateFrom"
+        - $ref: "#/components/parameters/DateTo"
+        - { name: party_id, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, description: "Comma-separated statuses, e.g. `sent,partial`.", schema: { type: string } }
+        - { name: number, in: query, description: "Exact invoice number., schema: { type: string }" }
+      responses:
+        "200":
+          description: A page of invoices
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InvoiceList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    post:
+      tags: [Invoices]
+      operationId: createInvoice
+      summary: Create an invoice
+      description: |
+        Creates a sales invoice, deducts stock for product lines and updates the customer's
+        balance. When `amount_paid` is greater than 0, the payment is recorded against the
+        invoice using `payment_mode`.
+
+        For lines with a `product_id`, `description`, `unit`, `hsn_code` and `unit_price`
+        default to the product's values.
+
+        **Tax:** TruERP bills sales at tax-inclusive prices. Each line total is
+        `quantity × unit_price − discount + cess`, and line GST (`cgst`/`sgst`/`igst`) is
+        recorded as 0. `tax_rate` is accepted for forward compatibility but does not change
+        totals. The invoice total is the sum of lines − `invoice_discount` + additional
+        charges, rounded per the store's settings. The response shows the authoritative amounts.
+
+        The invoice number is assigned from the store's sequence unless you pass `number`.
+        If that number is taken, the next free number is used.
+      security: [{ ApiKey: [] }, { OAuth2: [invoices:write] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InvoiceCreate" }
+            example:
+              party_id: 3f0c7a52-3f5e-4f0e-9d0c-6a1b2c3d4e5f
+              date: "2026-11-24"
+              payment_terms_days: 15
+              line_items:
+                - product_id: 9b2d4c1e-7a6f-4e3d-8c2b-1a0f9e8d7c6b
+                  quantity: 2
+                - description: Delivery & handling
+                  quantity: 1
+                  unit_price: 150
+              amount_paid: 500
+              payment_mode: upi
+              notes: Order #SHOP-10293
+      responses:
+        "201":
+          description: The created invoice
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invoice" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/IdempotencyMismatch" }
+  /invoices/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      tags: [Invoices]
+      operationId: getInvoice
+      summary: Retrieve an invoice
+      security: [{ ApiKey: [] }, { OAuth2: [invoices:read] }]
+      responses:
+        "200":
+          description: The invoice
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invoice" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /invoices/{id}/cancel:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    post:
+      tags: [Invoices]
+      operationId: cancelInvoice
+      summary: Cancel an invoice
+      description: Cancels the invoice, reverses its stock and balance effects, and records the reason. Cancelling an already-cancelled invoice returns it unchanged.
+      security: [{ ApiKey: [] }, { OAuth2: [invoices:write] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason]
+              properties:
+                reason: { type: string, description: Why the invoice is cancelled. }
+            example: { reason: Order cancelled by customer }
+      responses:
+        "200":
+          description: The cancelled invoice
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invoice" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /invoices/{id}/pdf:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      tags: [Invoices]
+      operationId: getInvoicePdf
+      summary: Download an invoice PDF
+      description: Renders the invoice with the store's print template.
+      security: [{ ApiKey: [] }, { OAuth2: [invoices:read] }]
+      responses:
+        "200":
+          description: The PDF document
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /payments:
+    get:
+      tags: [Payments]
+      operationId: listPayments
+      summary: List payments
+      security: [{ ApiKey: [] }, { OAuth2: [payments:read] }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/UpdatedSince"
+        - $ref: "#/components/parameters/CreatedSince"
+        - $ref: "#/components/parameters/DateFrom"
+        - $ref: "#/components/parameters/DateTo"
+        - { name: party_id, in: query, schema: { type: string, format: uuid } }
+        - { name: invoice_id, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { type: string, enum: [active, cancelled] } }
+      responses:
+        "200":
+          description: A page of payments
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentList" }
+    post:
+      tags: [Payments]
+      operationId: createPayment
+      summary: Record a payment
+      description: Records money received from a customer, reduces their balance and, when `invoice_id` is given, applies it to that invoice. Use for payment-gateway settlements, bank feeds and similar.
+      security: [{ ApiKey: [] }, { OAuth2: [payments:write] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentCreate" }
+            example:
+              party_id: 3f0c7a52-3f5e-4f0e-9d0c-6a1b2c3d4e5f
+              invoice_id: 0a4f1c2e-5b6d-4e7f-8a9b-0c1d2e3f4a5b
+              amount: 1300
+              mode: upi
+              date: "2026-11-24"
+              reference: pay_Nx8K2mQ4
+      responses:
+        "201":
+          description: The recorded payment
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /payments/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      tags: [Payments]
+      operationId: getPayment
+      summary: Retrieve a payment
+      security: [{ ApiKey: [] }, { OAuth2: [payments:read] }]
+      responses:
+        "200":
+          description: The payment
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /purchase-bills:
+    get:
+      tags: [Purchase Bills]
+      operationId: listPurchaseBills
+      summary: List purchase bills
+      security: [{ ApiKey: [] }, { OAuth2: [purchases:read] }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/UpdatedSince"
+        - $ref: "#/components/parameters/CreatedSince"
+        - $ref: "#/components/parameters/DateFrom"
+        - $ref: "#/components/parameters/DateTo"
+        - { name: party_id, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, description: "Comma-separated: `unpaid`, `partial`, `paid`.", schema: { type: string } }
+      responses:
+        "200":
+          description: A page of purchase bills
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PurchaseBillList" }
+    post:
+      tags: [Purchase Bills]
+      operationId: createPurchaseBill
+      summary: Create a purchase bill
+      description: |
+        Records a vendor's bill, adds stock for each line and updates the vendor's balance.
+        Lines without `product_id` create new products in the store.
+        `amounts.total` is calculated as the sum of lines (after line discount and tax) minus
+        `invoice_discount` plus additional charges. When `amount_paid` > 0, a payment out
+        is recorded.
+      security: [{ ApiKey: [] }, { OAuth2: [purchases:write] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PurchaseBillCreate" }
+            example:
+              party_id: 6d5c4b3a-2f1e-4d0c-9b8a-7f6e5d4c3b2a
+              number: INV/2026/0412
+              date: "2026-11-22"
+              line_items:
+                - product_id: 9b2d4c1e-7a6f-4e3d-8c2b-1a0f9e8d7c6b
+                  quantity: 50
+                  unit_price: 540
+                  tax_rate: 5
+                  batch_no: B-1122
+                  expiry_date: "2027-11-30"
+      responses:
+        "201":
+          description: The created bill
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PurchaseBill" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /purchase-bills/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      tags: [Purchase Bills]
+      operationId: getPurchaseBill
+      summary: Retrieve a purchase bill
+      security: [{ ApiKey: [] }, { OAuth2: [purchases:read] }]
+      responses:
+        "200":
+          description: The bill
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PurchaseBill" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /events:
+    get:
+      tags: [Events]
+      operationId: listEvents
+      summary: List events
+      description: Oldest first. Only events for resources your credential can read are returned.
+      security: [{ ApiKey: [] }, { OAuth2: [events:read] }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CreatedSince"
+        - { name: type, in: query, description: "Comma-separated event types, e.g. `invoice.created,payment.created`.", schema: { type: string } }
+      responses:
+        "200":
+          description: A page of events
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventList" }
+  /events/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      tags: [Events]
+      operationId: getEvent
+      summary: Retrieve an event
+      security: [{ ApiKey: [] }, { OAuth2: [events:read] }]
+      responses:
+        "200":
+          description: The event
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Event" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /event-types:
+    get:
+      tags: [Events]
+      operationId: listEventTypes
+      summary: List event types
+      responses:
+        "200":
+          description: Every event type and the scope required to receive it
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            object: { type: string, const: event_type }
+                            type: { $ref: "#/components/schemas/EventType" }
+                            description: { type: string }
+                            required_scope: { type: string }
+
+  /webhook-endpoints:
+    get:
+      tags: [Webhooks]
+      operationId: listWebhookEndpoints
+      summary: List webhook endpoints
+      security: [{ ApiKey: [] }, { OAuth2: [webhooks:manage] }]
+      responses:
+        "200":
+          description: All endpoints for the store
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: "#/components/schemas/WebhookEndpoint" } }
+    post:
+      tags: [Webhooks]
+      operationId: createWebhookEndpoint
+      summary: Create a webhook endpoint
+      description: The response includes the signing `secret` **once**. Store it securely. A store can have up to 20 endpoints.
+      security: [{ ApiKey: [] }, { OAuth2: [webhooks:manage] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookEndpointCreate" }
+            example:
+              url: https://example.com/hooks/truerp
+              description: Sync orders to warehouse system
+              events: [invoice.created, invoice.cancelled, stock.updated]
+      responses:
+        "201":
+          description: The created endpoint, including its signing secret
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookEndpoint" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /webhook-endpoints/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      tags: [Webhooks]
+      operationId: getWebhookEndpoint
+      summary: Retrieve a webhook endpoint
+      security: [{ ApiKey: [] }, { OAuth2: [webhooks:manage] }]
+      responses:
+        "200":
+          description: The endpoint
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookEndpoint" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Webhooks]
+      operationId: updateWebhookEndpoint
+      summary: Update a webhook endpoint
+      description: Setting `is_active` to `true` also clears the failure count of an automatically disabled endpoint.
+      security: [{ ApiKey: [] }, { OAuth2: [webhooks:manage] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookEndpointUpdate" }
+      responses:
+        "200":
+          description: The updated endpoint
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookEndpoint" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Webhooks]
+      operationId: deleteWebhookEndpoint
+      summary: Delete a webhook endpoint
+      security: [{ ApiKey: [] }, { OAuth2: [webhooks:manage] }]
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Deleted" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /webhook-endpoints/{id}/rotate-secret:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    post:
+      tags: [Webhooks]
+      operationId: rotateWebhookSecret
+      summary: Rotate the signing secret
+      description: Returns the endpoint with a new `secret`. The previous secret stops working immediately.
+      security: [{ ApiKey: [] }, { OAuth2: [webhooks:manage] }]
+      responses:
+        "200":
+          description: The endpoint with its new secret
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookEndpoint" }
+  /webhook-endpoints/{id}/test:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    post:
+      tags: [Webhooks]
+      operationId: testWebhookEndpoint
+      summary: Send a test event
+      description: Immediately sends a signed `ping` event and reports how the endpoint responded.
+      security: [{ ApiKey: [] }, { OAuth2: [webhooks:manage] }]
+      responses:
+        "200":
+          description: Test result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, const: webhook_test }
+                  endpoint_id: { type: string, format: uuid }
+                  succeeded: { type: boolean }
+                  response_status: { type: integer, description: 0 when no HTTP response was received }
+                  response_body: { type: string, description: First 1 KB of the response }
+                  error: { type: string }
+  /webhook-endpoints/{id}/deliveries:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      tags: [Webhooks]
+      operationId: listWebhookDeliveries
+      summary: List deliveries
+      description: Delivery attempts for this endpoint, newest first (retained 30 days).
+      security: [{ ApiKey: [] }, { OAuth2: [webhooks:manage] }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - { name: status, in: query, schema: { type: string, enum: [pending, succeeded, failed] } }
+      responses:
+        "200":
+          description: A page of deliveries
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: "#/components/schemas/WebhookDelivery" } }
+
+webhooks:
+  event:
+    post:
+      tags: [Webhooks]
+      summary: Event notification
+      description: Sent to your endpoint for each subscribed event. Verify `TruERP-Signature` before processing, and respond 2xx within 10 seconds.
+      parameters:
+        - { name: TruERP-Event-Id, in: header, required: true, schema: { type: string, format: uuid } }
+        - { name: TruERP-Event-Type, in: header, required: true, schema: { $ref: "#/components/schemas/EventType" } }
+        - name: TruERP-Signature
+          in: header
+          required: true
+          description: "`t=<unix seconds>,v1=<hex HMAC-SHA256(secret, \"<t>.<raw body>\")>`"
+          schema: { type: string, example: "t=1764000000,v1=5257a869e7ecebeda32affa62cdca3fa51cad7e77a0e56ff536d0ce8e108d8bd" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookEvent" }
+      responses:
+        "200":
+          description: Any 2xx acknowledges the delivery.
+
+components:
+  securitySchemes:
+    ApiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: trp_live_…
+      description: A store API key created by a TruERP super admin. Its scopes are fixed when the key is created.
+    OAuth2:
+      type: oauth2
+      description: OAuth 2.0 access token issued to a registered application.
+      flows:
+        authorizationCode:
+          authorizationUrl: __BASE_URL__/api/v1/oauth/authorize
+          tokenUrl: __BASE_URL__/api/v1/oauth/token
+          refreshUrl: __BASE_URL__/api/v1/oauth/token
+          scopes: &scopes
+            read: All read scopes
+            write: All scopes
+            parties:read: Read customers and vendors
+            parties:write: Create and update customers and vendors
+            products:read: Read products and services
+            products:write: Create and update products and services
+            stock:read: Read stock levels and warehouses
+            invoices:read: Read sales invoices
+            invoices:write: Create and cancel sales invoices
+            payments:read: Read payments received
+            payments:write: Record payments received
+            purchases:read: Read purchase bills
+            purchases:write: Create purchase bills
+            events:read: Read the event feed
+            webhooks:manage: Manage webhook endpoints
+        clientCredentials:
+          tokenUrl: __BASE_URL__/api/v1/oauth/token
+          scopes: *scopes
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Limit:
+      name: limit
+      in: query
+      description: Page size, 1–100.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+    Cursor:
+      name: cursor
+      in: query
+      description: The `next_cursor` of the previous page.
+      schema: { type: string }
+    UpdatedSince:
+      name: updated_since
+      in: query
+      description: Only records updated at or after this time (RFC 3339 or `YYYY-MM-DD`).
+      schema: { type: string, format: date-time }
+    CreatedSince:
+      name: created_since
+      in: query
+      description: Only records created at or after this time (RFC 3339 or `YYYY-MM-DD`).
+      schema: { type: string, format: date-time }
+    DateFrom:
+      name: date_from
+      in: query
+      description: Document date on or after this day.
+      schema: { type: string, format: date }
+    DateTo:
+      name: date_to
+      in: query
+      description: Document date on or before this day.
+      schema: { type: string, format: date }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: A unique key (≤ 255 chars) that makes retries safe. See [Idempotency](#section/Idempotency).
+      schema: { type: string, maxLength: 255 }
+
+  headers:
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema: { type: integer }
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: { type: invalid_request_error, code: parameter_invalid, message: party_id is required, param: party_id, request_id: 5c0d6a0e-6a39-4b0f-9b0e-8f2f5a0b1c2d }
+    Unauthorized:
+      description: Missing or invalid credential
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: { type: authentication_error, code: invalid_api_key, message: The API key is invalid., request_id: 5c0d6a0e-6a39-4b0f-9b0e-8f2f5a0b1c2d }
+    Forbidden:
+      description: Not permitted
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: { type: permission_error, code: insufficient_scope, message: "This credential is missing the \"invoices:write\" scope (or the store's policy does not allow it).", required_scope: "invoices:write", request_id: 5c0d6a0e-6a39-4b0f-9b0e-8f2f5a0b1c2d }
+    NotFound:
+      description: No such resource in this store
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: { type: not_found_error, code: resource_missing, message: "No such invoice: 0a4f1c2e-5b6d-4e7f-8a9b-0c1d2e3f4a5b", request_id: 5c0d6a0e-6a39-4b0f-9b0e-8f2f5a0b1c2d }
+    Conflict:
+      description: Conflicts with an existing record
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    IdempotencyMismatch:
+      description: The Idempotency-Key was used with a different request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: Too many requests
+      headers:
+        Retry-After: { $ref: "#/components/headers/RetryAfter" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [type, code, message]
+          properties:
+            type:
+              type: string
+              enum: [invalid_request_error, authentication_error, permission_error, not_found_error, conflict_error, rate_limit_error, api_error]
+            code: { type: string, description: "Machine-readable error code, e.g. `parameter_invalid`, `insufficient_scope`." }
+            message: { type: string, description: Human-readable explanation. }
+            param: { type: string, description: The request field the error relates to. }
+            fields: { type: object, additionalProperties: { type: string }, description: Per-field messages when several fields are invalid. }
+            required_scope: { type: string }
+            request_id: { type: string }
+
+    ListEnvelope:
+      type: object
+      required: [object, data, has_more, next_cursor]
+      properties:
+        object: { type: string, const: list }
+        data: { type: array, items: {} }
+        has_more: { type: boolean }
+        next_cursor: { type: [string, "null"] }
+
+    Deleted:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        object: { type: string }
+        deleted: { type: boolean, const: true }
+
+    Money:
+      type: number
+      description: Amount in rupees (INR), up to 2 decimal places.
+      example: 1299.5
+
+    Credential:
+      type: object
+      properties:
+        object: { type: string, const: credential }
+        credential:
+          type: object
+          properties:
+            type: { type: string, enum: [api_key, oauth, session] }
+            id: { type: string }
+            name: { type: string }
+        store:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            code: { type: string }
+            gstin: { type: string }
+            state_code: { type: string }
+        scopes: { type: array, items: { type: string } }
+        rate_limit_per_minute: { type: integer }
+        api_version: { type: string }
+
+    Address:
+      type: object
+      properties:
+        line: { type: string, description: Street address }
+        city: { type: string }
+        state: { type: string }
+        state_code: { type: string, description: "Two-digit GST state code, example: \"29\"" }
+        pincode: { type: string }
+
+    Party:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        object: { type: string, const: party }
+        type: { type: string, enum: [customer, vendor] }
+        name: { type: string }
+        phone: { type: string }
+        email: { type: string }
+        gstin: { type: string, description: 15-character GSTIN, empty for unregistered parties }
+        pan: { type: string }
+        billing_address: { $ref: "#/components/schemas/Address" }
+        category: { type: string }
+        credit_limit: { $ref: "#/components/schemas/Money" }
+        opening_balance: { $ref: "#/components/schemas/Money" }
+        balance:
+          allOf: [{ $ref: "#/components/schemas/Money" }]
+          description: Current balance. Positive = the party owes the store; negative = the store owes the party.
+        currency: { type: string, const: INR }
+        notes: { type: string }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PartyCreate:
+      type: object
+      additionalProperties: false
+      required: [type, name]
+      properties:
+        type: { type: string, enum: [customer, vendor] }
+        name: { type: string }
+        phone: { type: string }
+        email: { type: string, format: email }
+        gstin: { type: string, minLength: 15, maxLength: 15 }
+        pan: { type: string }
+        billing_address: { $ref: "#/components/schemas/Address" }
+        category: { type: string }
+        credit_limit: { type: number, minimum: 0 }
+        opening_balance: { type: number, description: Positive = receivable from the party. }
+        notes: { type: string }
+    PartyUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        type: { type: string, enum: [customer, vendor] }
+        name: { type: string }
+        phone: { type: string }
+        email: { type: string, format: email }
+        gstin: { type: string }
+        pan: { type: string }
+        billing_address: { $ref: "#/components/schemas/Address" }
+        category: { type: string }
+        credit_limit: { type: number, minimum: 0 }
+        opening_balance: { type: number }
+        notes: { type: string }
+        is_active: { type: boolean }
+    PartyList:
+      allOf:
+        - $ref: "#/components/schemas/ListEnvelope"
+        - type: object
+          properties:
+            data: { type: array, items: { $ref: "#/components/schemas/Party" } }
+
+    Product:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        object: { type: string, const: product }
+        type: { type: string, enum: [product, service] }
+        name: { type: string }
+        sku: { type: string, description: Assigned by TruERP }
+        item_code: { type: string, description: Barcode / item code, unique per store }
+        category: { type: string }
+        unit: { type: string, example: PCS }
+        hsn_code: { type: string }
+        sale_price: { $ref: "#/components/schemas/Money" }
+        purchase_price: { $ref: "#/components/schemas/Money" }
+        mrp: { $ref: "#/components/schemas/Money" }
+        tax_rate: { type: number, description: "GST rate in percent, example: 18" }
+        gst_enabled: { type: boolean }
+        sale_price_includes_tax: { type: boolean }
+        purchase_price_includes_tax: { type: boolean }
+        min_stock: { type: number, description: Low-stock threshold }
+        track_batches: { type: boolean, description: Whether stock is tracked per batch and expiry }
+        description: { type: string }
+        image_url: { type: string }
+        currency: { type: string, const: INR }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ProductCreate:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string }
+        type: { type: string, enum: [product, service], default: product }
+        item_code: { type: string }
+        category: { type: string }
+        unit: { type: string, default: PCS }
+        hsn_code: { type: string }
+        sale_price: { type: number, minimum: 0 }
+        purchase_price: { type: number, minimum: 0 }
+        mrp: { type: number, minimum: 0 }
+        tax_rate: { type: number, minimum: 0, maximum: 100, description: "When omitted with `gst_enabled` and an HSN code, the rate is looked up from the HSN." }
+        gst_enabled: { type: boolean, default: false }
+        sale_price_includes_tax: { type: boolean, default: true }
+        purchase_price_includes_tax: { type: boolean, default: true }
+        min_stock: { type: number, minimum: 0 }
+        track_batches: { type: boolean, default: false }
+        description: { type: string }
+        is_active: { type: boolean, default: true }
+        opening_stock:
+          type: object
+          additionalProperties: false
+          required: [quantity]
+          properties:
+            quantity: { type: number }
+            cost_price: { type: number, minimum: 0 }
+            warehouse_id: { type: string, format: uuid, description: Defaults to the main warehouse }
+            batch_no: { type: string }
+            expiry_date: { type: string, format: date }
+    ProductUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        type: { type: string, enum: [product, service] }
+        item_code: { type: string }
+        category: { type: string }
+        unit: { type: string }
+        hsn_code: { type: string }
+        sale_price: { type: number, minimum: 0 }
+        purchase_price: { type: number, minimum: 0 }
+        mrp: { type: number, minimum: 0 }
+        tax_rate: { type: number, minimum: 0, maximum: 100 }
+        gst_enabled: { type: boolean }
+        sale_price_includes_tax: { type: boolean }
+        purchase_price_includes_tax: { type: boolean }
+        min_stock: { type: number, minimum: 0 }
+        track_batches: { type: boolean }
+        description: { type: string }
+        is_active: { type: boolean }
+    ProductList:
+      allOf:
+        - $ref: "#/components/schemas/ListEnvelope"
+        - type: object
+          properties:
+            data: { type: array, items: { $ref: "#/components/schemas/Product" } }
+
+    StockLevel:
+      type: object
+      properties:
+        object: { type: string, const: stock_level }
+        product_id: { type: string, format: uuid }
+        product_name: { type: string }
+        sku: { type: string }
+        unit: { type: string }
+        quantity: { type: number, description: On hand across all warehouses and batches }
+        reserved: { type: number }
+        available: { type: number, description: quantity − reserved }
+        value: { allOf: [{ $ref: "#/components/schemas/Money" }], description: Quantity × weighted average cost }
+        min_stock: { type: number }
+        low_stock: { type: boolean }
+        locations:
+          type: array
+          items:
+            type: object
+            properties:
+              warehouse_id: { type: string, format: uuid }
+              warehouse_name: { type: string }
+              batch_no: { type: string }
+              expiry_date: { type: [string, "null"], format: date }
+              quantity: { type: number }
+              reserved: { type: number }
+              available: { type: number }
+              average_cost: { $ref: "#/components/schemas/Money" }
+        updated_at: { type: [string, "null"], format: date-time }
+    StockLevelList:
+      allOf:
+        - $ref: "#/components/schemas/ListEnvelope"
+        - type: object
+          properties:
+            data: { type: array, items: { $ref: "#/components/schemas/StockLevel" } }
+    Warehouse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        object: { type: string, const: warehouse }
+        name: { type: string }
+        code: { type: string }
+        city: { type: string }
+        state: { type: string }
+        is_default: { type: boolean }
+        is_active: { type: boolean }
+
+    PartyRef:
+      type: [object, "null"]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        gstin: { type: string }
+        phone: { type: string }
+    Charge:
+      type: object
+      required: [label, amount]
+      properties:
+        label: { type: string, example: Freight }
+        amount: { type: number }
+
+    InvoiceLine:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        product_id: { type: [string, "null"], format: uuid }
+        description: { type: string }
+        quantity: { type: number }
+        unit: { type: string }
+        unit_price: { $ref: "#/components/schemas/Money" }
+        discount_percent: { type: number }
+        tax_rate: { type: number }
+        cgst: { $ref: "#/components/schemas/Money" }
+        sgst: { $ref: "#/components/schemas/Money" }
+        igst: { $ref: "#/components/schemas/Money" }
+        cess_rate: { type: number }
+        cess_amount: { $ref: "#/components/schemas/Money" }
+        hsn_code: { type: string }
+        batch_no: { type: string }
+        expiry_date: { type: [string, "null"], format: date }
+        total: { $ref: "#/components/schemas/Money" }
+    Invoice:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        object: { type: string, const: invoice }
+        number: { type: string, example: INV-1042 }
+        type: { type: string, enum: [tax_invoice, bill_of_supply, export] }
+        status: { type: string, enum: [draft, sent, partial, paid, overdue, cancelled] }
+        party_id: { type: string, format: uuid }
+        party: { $ref: "#/components/schemas/PartyRef" }
+        date: { type: string, format: date }
+        due_date: { type: [string, "null"], format: date }
+        currency: { type: string, const: INR }
+        place_of_supply: { type: string, description: GST state code }
+        is_inter_state: { type: boolean }
+        reverse_charge: { type: boolean }
+        line_items: { type: array, items: { $ref: "#/components/schemas/InvoiceLine" } }
+        additional_charge_items: { type: array, items: { $ref: "#/components/schemas/Charge" } }
+        amounts:
+          type: object
+          properties:
+            subtotal: { $ref: "#/components/schemas/Money" }
+            line_discount: { $ref: "#/components/schemas/Money" }
+            invoice_discount: { $ref: "#/components/schemas/Money" }
+            additional_charges: { $ref: "#/components/schemas/Money" }
+            tax: { $ref: "#/components/schemas/Money" }
+            cgst: { $ref: "#/components/schemas/Money" }
+            sgst: { $ref: "#/components/schemas/Money" }
+            igst: { $ref: "#/components/schemas/Money" }
+            cess: { $ref: "#/components/schemas/Money" }
+            round_off: { $ref: "#/components/schemas/Money" }
+            total: { $ref: "#/components/schemas/Money" }
+            paid: { $ref: "#/components/schemas/Money" }
+            due: { $ref: "#/components/schemas/Money" }
+        payment_mode: { type: string }
+        notes: { type: string }
+        terms: { type: string }
+        shipping_address: { type: string }
+        custom_fields: { type: object, additionalProperties: true }
+        irn: { type: string, description: E-invoice reference number, when generated }
+        e_invoice_status: { type: string }
+        eway_bill_number: { type: string }
+        source: { type: string, enum: [backoffice, pos], description: Where the invoice was raised }
+        cancelled_at: { type: [string, "null"], format: date-time }
+        cancel_reason: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    InvoiceCreate:
+      type: object
+      additionalProperties: false
+      required: [party_id, line_items]
+      properties:
+        party_id: { type: string, format: uuid }
+        number: { type: string, description: Optional invoice number; defaults to the next in sequence. }
+        type: { type: string, enum: [tax_invoice, bill_of_supply, export], default: tax_invoice }
+        status: { type: string, enum: [draft, sent, partial, paid], default: sent }
+        date: { type: string, format: date, description: Defaults to today in the store's timezone. }
+        due_date: { type: string, format: date }
+        payment_terms_days: { type: integer, minimum: 0, description: "Used to compute `due_date` when it is omitted." }
+        line_items:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            type: object
+            additionalProperties: false
+            required: [quantity]
+            properties:
+              product_id: { type: string, format: uuid, description: "Required unless `description` and `unit_price` are given." }
+              description: { type: string }
+              quantity: { type: number, exclusiveMinimum: 0 }
+              unit: { type: string }
+              unit_price: { type: number, minimum: 0 }
+              discount_percent: { type: number, minimum: 0, maximum: 100 }
+              tax_rate: { type: number, minimum: 0, maximum: 100, description: Accepted but currently not applied — sales are billed at tax-inclusive prices. }
+              cess_rate: { type: number, minimum: 0 }
+              hsn_code: { type: string }
+              batch_no: { type: string, description: Batch to sell from, for batch-tracked products. }
+              expiry_date: { type: string, format: date }
+        invoice_discount: { type: number, minimum: 0 }
+        additional_charge_items: { type: array, items: { $ref: "#/components/schemas/Charge" } }
+        amount_paid: { type: number, minimum: 0, description: Amount received with the invoice. }
+        payment_mode: { type: string, enum: [cash, upi, bank_transfer, cheque, card] }
+        bank_account_id: { type: string, format: uuid, description: Bank account the payment was received into. }
+        place_of_supply: { type: string, description: GST state code; defaults from the customer's state. }
+        is_inter_state: { type: boolean }
+        reverse_charge: { type: boolean }
+        shipping_address: { type: string }
+        notes: { type: string }
+        terms: { type: string }
+        custom_fields: { type: object, additionalProperties: true, description: Values for custom fields defined in TruERP settings. }
+    InvoiceList:
+      allOf:
+        - $ref: "#/components/schemas/ListEnvelope"
+        - type: object
+          properties:
+            data: { type: array, items: { $ref: "#/components/schemas/Invoice" } }
+
+    Payment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        object: { type: string, const: payment }
+        number: { type: string }
+        party_id: { type: string, format: uuid }
+        party: { $ref: "#/components/schemas/PartyRef" }
+        invoice_id: { type: [string, "null"], format: uuid }
+        amount: { $ref: "#/components/schemas/Money" }
+        discount: { $ref: "#/components/schemas/Money" }
+        net_amount: { allOf: [{ $ref: "#/components/schemas/Money" }], description: amount − discount; reduces the party balance }
+        currency: { type: string, const: INR }
+        mode: { type: string, enum: [cash, upi, bank_transfer, cheque, card] }
+        bank_account_id: { type: [string, "null"], format: uuid }
+        date: { type: string, format: date }
+        reference: { type: string, description: e.g. UTR, cheque number or gateway payment ID }
+        notes: { type: string }
+        status: { type: string, enum: [active, cancelled] }
+        cancelled_at: { type: [string, "null"], format: date-time }
+        cancel_reason: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PaymentCreate:
+      type: object
+      additionalProperties: false
+      required: [party_id, amount]
+      properties:
+        party_id: { type: string, format: uuid }
+        invoice_id: { type: string, format: uuid, description: Invoice to apply the payment to; must belong to the same party. }
+        amount: { type: number, exclusiveMinimum: 0 }
+        discount: { type: number, minimum: 0, description: Settlement discount given; must be less than amount. }
+        mode: { type: string, enum: [cash, upi, bank_transfer, cheque, card], default: cash }
+        bank_account_id: { type: string, format: uuid }
+        date: { type: string, format: date }
+        number: { type: string, description: Optional receipt number; must be unique. }
+        reference: { type: string }
+        notes: { type: string }
+    PaymentList:
+      allOf:
+        - $ref: "#/components/schemas/ListEnvelope"
+        - type: object
+          properties:
+            data: { type: array, items: { $ref: "#/components/schemas/Payment" } }
+
+    PurchaseLine:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        product_id: { type: [string, "null"], format: uuid }
+        item_code: { type: string }
+        description: { type: string }
+        quantity: { type: number }
+        unit: { type: string }
+        unit_price: { $ref: "#/components/schemas/Money" }
+        discount_percent: { type: number }
+        tax_rate: { type: number }
+        tax_amount: { $ref: "#/components/schemas/Money" }
+        mrp: { $ref: "#/components/schemas/Money" }
+        sale_price: { $ref: "#/components/schemas/Money" }
+        hsn_code: { type: string }
+        batch_no: { type: string }
+        mfg_date: { type: [string, "null"], format: date }
+        expiry_date: { type: [string, "null"], format: date }
+        total: { $ref: "#/components/schemas/Money" }
+    PurchaseBill:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        object: { type: string, const: purchase_bill }
+        number: { type: string, description: The vendor's bill number }
+        status: { type: string, enum: [unpaid, partial, paid] }
+        party_id: { type: string, format: uuid }
+        party: { $ref: "#/components/schemas/PartyRef" }
+        date: { type: string, format: date }
+        due_date: { type: [string, "null"], format: date }
+        warehouse_id: { type: [string, "null"], format: uuid }
+        stock_status: { type: string, description: "Stock approval state: none, pending, approved, rejected, partial" }
+        tax_exempt: { type: boolean }
+        currency: { type: string, const: INR }
+        line_items: { type: array, items: { $ref: "#/components/schemas/PurchaseLine" } }
+        additional_charge_items: { type: array, items: { $ref: "#/components/schemas/Charge" } }
+        amounts:
+          type: object
+          properties:
+            subtotal: { $ref: "#/components/schemas/Money" }
+            tax: { $ref: "#/components/schemas/Money" }
+            invoice_discount: { $ref: "#/components/schemas/Money" }
+            additional_charges: { $ref: "#/components/schemas/Money" }
+            total: { $ref: "#/components/schemas/Money" }
+            paid: { $ref: "#/components/schemas/Money" }
+            due: { $ref: "#/components/schemas/Money" }
+        payment_mode: { type: string }
+        notes: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PurchaseBillCreate:
+      type: object
+      additionalProperties: false
+      required: [party_id, number, line_items]
+      properties:
+        party_id: { type: string, format: uuid, description: The vendor }
+        number: { type: string, description: The vendor's bill number }
+        date: { type: string, format: date }
+        due_date: { type: string, format: date }
+        warehouse_id: { type: string, format: uuid, description: Warehouse receiving the stock }
+        tax_exempt: { type: boolean, default: false }
+        line_items:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            type: object
+            additionalProperties: false
+            required: [quantity]
+            properties:
+              product_id: { type: string, format: uuid, description: Omit to create a new product from this line. }
+              item_code: { type: string }
+              description: { type: string, description: Required when product_id is omitted. }
+              quantity: { type: number, exclusiveMinimum: 0 }
+              unit: { type: string }
+              unit_price: { type: number, minimum: 0 }
+              discount_percent: { type: number, minimum: 0, maximum: 100 }
+              tax_rate: { type: number, minimum: 0, maximum: 100 }
+              mrp: { type: number, minimum: 0 }
+              sale_price: { type: number, minimum: 0 }
+              hsn_code: { type: string }
+              batch_no: { type: string }
+              mfg_date: { type: string, format: date }
+              expiry_date: { type: string, format: date }
+        invoice_discount: { type: number, minimum: 0 }
+        additional_charge_items: { type: array, items: { $ref: "#/components/schemas/Charge" } }
+        amount_paid: { type: number, minimum: 0, description: Amount already paid to the vendor; recorded as a payment out. }
+        payment_mode: { type: string, enum: [cash, upi, bank_transfer, cheque, card] }
+        bank_account_id: { type: string, format: uuid }
+        notes: { type: string }
+    PurchaseBillList:
+      allOf:
+        - $ref: "#/components/schemas/ListEnvelope"
+        - type: object
+          properties:
+            data: { type: array, items: { $ref: "#/components/schemas/PurchaseBill" } }
+
+    EventType:
+      type: string
+      enum:
+        - party.created
+        - party.updated
+        - party.deleted
+        - product.created
+        - product.updated
+        - product.deleted
+        - stock.updated
+        - invoice.created
+        - invoice.updated
+        - invoice.cancelled
+        - invoice.deleted
+        - payment.created
+        - payment.updated
+        - payment.cancelled
+        - payment.deleted
+        - purchase_bill.created
+        - purchase_bill.updated
+        - purchase_bill.deleted
+    Event:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        object: { type: string, const: event }
+        type: { $ref: "#/components/schemas/EventType" }
+        created_at: { type: string, format: date-time }
+        data:
+          type: object
+          properties:
+            object:
+              description: Snapshot of the resource when the event was produced. `stock.updated` carries a StockLevel.
+              oneOf:
+                - $ref: "#/components/schemas/Party"
+                - $ref: "#/components/schemas/Product"
+                - $ref: "#/components/schemas/StockLevel"
+                - $ref: "#/components/schemas/Invoice"
+                - $ref: "#/components/schemas/Payment"
+                - $ref: "#/components/schemas/PurchaseBill"
+    EventList:
+      allOf:
+        - $ref: "#/components/schemas/ListEnvelope"
+        - type: object
+          properties:
+            data: { type: array, items: { $ref: "#/components/schemas/Event" } }
+    WebhookEvent:
+      allOf:
+        - $ref: "#/components/schemas/Event"
+        - type: object
+          properties:
+            api_version: { type: string, example: "2026-11-01" }
+            store_id: { type: string, format: uuid }
+
+    WebhookEndpoint:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        object: { type: string, const: webhook_endpoint }
+        url: { type: string, format: uri }
+        description: { type: string }
+        events: { type: array, items: { type: string }, description: 'Subscribed event types; "*" means all and "invoice.*" all invoice events.' }
+        is_active: { type: boolean }
+        disabled_reason: { type: string }
+        failure_count: { type: integer, description: Consecutive failed deliveries }
+        secret: { type: string, description: "Signing secret (`whsec_…`). Returned only when created or rotated." }
+        last_delivery_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    WebhookEndpointCreate:
+      type: object
+      additionalProperties: false
+      required: [url]
+      properties:
+        url: { type: string, format: uri, description: Public HTTPS URL. }
+        description: { type: string }
+        events: { type: array, items: { type: string }, default: ["*"] }
+        is_active: { type: boolean, default: true }
+    WebhookEndpointUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        url: { type: string, format: uri }
+        description: { type: string }
+        events: { type: array, items: { type: string } }
+        is_active: { type: boolean }
+    WebhookDelivery:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        object: { type: string, const: webhook_delivery }
+        endpoint_id: { type: string, format: uuid }
+        event_id: { type: string, format: uuid }
+        event_type: { type: string }
+        status: { type: string, enum: [pending, succeeded, failed] }
+        attempts: { type: integer }
+        next_attempt_at: { type: [string, "null"], format: date-time }
+        response_status: { type: integer }
+        last_error: { type: string }
+        delivered_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
