@@ -113,6 +113,7 @@ func allApplicationModels() []interface{} {
 		&models.DeliveryChallanItem{},
 		&models.Party{},
 		&models.LoyaltySettings{},
+		&models.LoyaltyCategory{},
 		&models.LoyaltyTransaction{},
 		&models.LoyaltyCardDesign{},
 		&models.LoyaltyCard{},

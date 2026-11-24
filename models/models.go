@@ -1350,11 +1350,17 @@ type LoyaltySettings struct {
 	// or "margin" (profit on eligible items: net sale − purchase cost, counting
 	// only items whose margin on selling price is at least MinMarginPercent).
 	// The same rates are used — points per SpendAmount, or CashbackPercent.
-	EarnBasis        string         `json:"earn_basis" gorm:"default:'bill'"`
-	MinMarginPercent float64        `json:"min_margin_percent" gorm:"default:0"`
-	CreatedAt        time.Time      `json:"created_at"`
-	UpdatedAt        time.Time      `json:"updated_at"`
-	DeletedAt        gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+	// "category" ignores those rates and rewards per LoyaltyCategory instead.
+	EarnBasis        string  `json:"earn_basis" gorm:"default:'bill'"`
+	MinMarginPercent float64 `json:"min_margin_percent" gorm:"default:0"`
+	// CategoryScope (category basis): "item" matches each invoice line to a
+	// category on its own margin/profit; "invoice" matches the whole bill once.
+	CategoryScope string `json:"category_scope" gorm:"default:'item'"`
+	// Categories is not a column; handlers fill it from loyalty_categories.
+	Categories []LoyaltyCategory `json:"categories" gorm:"-"`
+	CreatedAt  time.Time         `json:"created_at"`
+	UpdatedAt  time.Time         `json:"updated_at"`
+	DeletedAt  gorm.DeletedAt    `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type LoyaltyTransaction struct {

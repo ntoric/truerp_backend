@@ -19,6 +19,7 @@ func GetLoyaltySettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load loyalty settings"})
 		return
 	}
+	settings.Categories = loadLoyaltyCategories(utils.DB, userID)
 	c.JSON(http.StatusOK, settings)
 }
 
@@ -35,6 +36,9 @@ func UpdateLoyaltySettings(c *gin.Context) {
 	var input struct {
 		models.LoyaltySettings
 		MinMarginPercent *float64 `json:"min_margin_percent"`
+		// Categories replaces the whole category list when present; omitted
+		// (older clients) leaves the stored categories untouched.
+		Categories *[]models.LoyaltyCategory `json:"categories"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -67,12 +71,20 @@ func UpdateLoyaltySettings(c *gin.Context) {
 		return
 	}
 	switch input.EarnBasis {
-	case LoyaltyEarnOnBill, LoyaltyEarnOnMargin:
+	case LoyaltyEarnOnBill, LoyaltyEarnOnMargin, LoyaltyEarnOnCategory:
 		settings.EarnBasis = input.EarnBasis
 	case "":
 		// Older clients don't send earn_basis — keep the stored value.
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "earn_basis must be 'bill' or 'margin'"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "earn_basis must be 'bill', 'margin' or 'category'"})
+		return
+	}
+	switch input.CategoryScope {
+	case LoyaltyCategoryScopeItem, LoyaltyCategoryScopeInvoice:
+		settings.CategoryScope = input.CategoryScope
+	case "":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "category_scope must be 'item' or 'invoice'"})
 		return
 	}
 	if input.MinMarginPercent != nil {
@@ -89,10 +101,45 @@ func UpdateLoyaltySettings(c *gin.Context) {
 		settings.MinRedeemAmount = input.MinRedeemAmount
 	}
 
-	if err := utils.DB.Save(settings).Error; err != nil {
+	var categories []models.LoyaltyCategory
+	if input.Categories != nil {
+		categories, err = validateLoyaltyCategories(userID, *input.Categories, IsCashLoyalty(settings))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if IsCategoryLoyalty(settings) {
+		active := 0
+		list := categories
+		if input.Categories == nil {
+			list = loadLoyaltyCategories(utils.DB, userID)
+		}
+		for _, cat := range list {
+			if cat.IsActive {
+				active++
+			}
+		}
+		if active == 0 && settings.IsEnabled {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Add at least one active category to earn by category"})
+			return
+		}
+	}
+
+	settings.Categories = nil
+	if err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(settings).Error; err != nil {
+			return err
+		}
+		if input.Categories != nil {
+			return replaceLoyaltyCategories(tx, userID, categories)
+		}
+		return nil
+	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update loyalty settings"})
 		return
 	}
+	settings.Categories = loadLoyaltyCategories(utils.DB, userID)
 	c.JSON(http.StatusOK, settings)
 }
 

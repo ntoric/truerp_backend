@@ -133,6 +133,33 @@ func loyaltyEarnBase(tx *gorm.DB, userID uuid.UUID, settings *models.LoyaltySett
 	return computeEligibleMarginProfit(invoice.Items, costs, invoice.InvoiceDiscount+invoice.LoyaltyDiscount, settings.MinMarginPercent)
 }
 
+// invoiceLoyaltyEarnCash is the ₹ cashback an invoice earns, plus a note
+// naming the matched categories in category mode.
+func invoiceLoyaltyEarnCash(tx *gorm.DB, userID uuid.UUID, settings *models.LoyaltySettings, invoice *models.Invoice) (float64, string) {
+	if IsCategoryLoyalty(settings) {
+		e := invoiceCategoryLoyaltyEarn(tx, userID, settings, invoice)
+		return e.Value, e.summary()
+	}
+	return CalculateEarnCash(settings, loyaltyEarnBase(tx, userID, settings, invoice)), ""
+}
+
+// invoiceLoyaltyEarnPoints is the points an invoice earns, plus a note
+// naming the matched categories in category mode.
+func invoiceLoyaltyEarnPoints(tx *gorm.DB, userID uuid.UUID, settings *models.LoyaltySettings, invoice *models.Invoice) (int64, string) {
+	if IsCategoryLoyalty(settings) {
+		e := invoiceCategoryLoyaltyEarn(tx, userID, settings, invoice)
+		return int64(e.Value), e.summary()
+	}
+	return CalculateEarnPoints(settings, loyaltyEarnBase(tx, userID, settings, invoice)), ""
+}
+
+func earnNote(base, categories string) string {
+	if categories == "" {
+		return base
+	}
+	return base + " (" + categories + ")"
+}
+
 // IsCashLoyalty reports whether the store rewards customers with ₹ cashback
 // instead of points.
 func IsCashLoyalty(settings *models.LoyaltySettings) bool {
@@ -276,11 +303,11 @@ func applyLoyaltyCashForInvoice(tx *gorm.DB, userID uuid.UUID, party *models.Par
 	}
 
 	if invoice.Status != "draft" && invoice.Status != "cancelled" {
-		earned := CalculateEarnCash(settings, loyaltyEarnBase(tx, userID, settings, invoice))
+		earned, cats := invoiceLoyaltyEarnCash(tx, userID, settings, invoice)
 		if earned > 0 {
 			balance = roundMoney(balance + earned)
 			invoice.LoyaltyCashEarned = earned
-			if err := recordLoyaltyCashTransaction(tx, userID, party.ID, "earn", earned, balance, "invoice", &invoice.ID, invoice.InvoiceNumber, "Cashback earned on invoice"); err != nil {
+			if err := recordLoyaltyCashTransaction(tx, userID, party.ID, "earn", earned, balance, "invoice", &invoice.ID, invoice.InvoiceNumber, earnNote("Cashback earned on invoice", cats)); err != nil {
 				return err
 			}
 		}
@@ -319,11 +346,11 @@ func applyLoyaltyForInvoice(tx *gorm.DB, userID uuid.UUID, party *models.Party, 
 	}
 
 	if invoice.Status != "draft" && invoice.Status != "cancelled" {
-		earnPoints := CalculateEarnPoints(settings, loyaltyEarnBase(tx, userID, settings, invoice))
+		earnPoints, cats := invoiceLoyaltyEarnPoints(tx, userID, settings, invoice)
 		if earnPoints > 0 {
 			balance += earnPoints
 			invoice.LoyaltyPointsEarned = earnPoints
-			if err := recordLoyaltyTransaction(tx, userID, party.ID, "earn", earnPoints, balance, "invoice", &invoice.ID, invoice.InvoiceNumber, "Earned on invoice"); err != nil {
+			if err := recordLoyaltyTransaction(tx, userID, party.ID, "earn", earnPoints, balance, "invoice", &invoice.ID, invoice.InvoiceNumber, earnNote("Earned on invoice", cats)); err != nil {
 				return err
 			}
 		}
