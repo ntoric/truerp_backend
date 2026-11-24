@@ -39,6 +39,8 @@ func GetOrCreateLoyaltySettings(userID uuid.UUID) (*models.LoyaltySettings, erro
 	return &settings, nil
 }
 
+var errLoyaltyExcluded = errors.New("this customer is excluded from the loyalty program")
+
 const (
 	LoyaltyRewardPoints = "points"
 	LoyaltyRewardCash   = "cash"
@@ -190,6 +192,9 @@ func ComputeLoyaltyCashRedemption(settings *models.LoyaltySettings, party *model
 	if party.PartyType != "customer" {
 		return 0, errors.New("loyalty cashback applies to customers only")
 	}
+	if party.LoyaltyExcluded {
+		return 0, errLoyaltyExcluded
+	}
 	if settings.MinRedeemAmount > 0 && amount < settings.MinRedeemAmount {
 		return 0, fmt.Errorf("minimum ₹%.2f cashback required to redeem", settings.MinRedeemAmount)
 	}
@@ -231,6 +236,9 @@ func ComputeLoyaltyRedemption(settings *models.LoyaltySettings, party *models.Pa
 	}
 	if party.PartyType != "customer" {
 		return 0, errors.New("loyalty points apply to customers only")
+	}
+	if party.LoyaltyExcluded {
+		return 0, errLoyaltyExcluded
 	}
 	if pointsToRedeem < settings.MinRedeemPoints {
 		return 0, fmt.Errorf("minimum %d points required to redeem", settings.MinRedeemPoints)
@@ -329,7 +337,7 @@ func applyLoyaltyCashForInvoice(tx *gorm.DB, userID uuid.UUID, party *models.Par
 }
 
 func applyLoyaltyForInvoice(tx *gorm.DB, userID uuid.UUID, party *models.Party, invoice *models.Invoice, settings *models.LoyaltySettings, pointsRedeemed int64) error {
-	if party.PartyType != "customer" || settings == nil || !settings.IsEnabled {
+	if party.PartyType != "customer" || party.LoyaltyExcluded || settings == nil || !settings.IsEnabled {
 		return nil
 	}
 	if IsCashLoyalty(settings) {
@@ -487,6 +495,12 @@ type invoiceLoyaltyPrint struct {
 // the invoice has no loyalty ledger entries). Expects invoice.Party preloaded.
 func invoiceLoyaltyPrintSummary(invoice models.Invoice) *invoiceLoyaltyPrint {
 	if utils.DB == nil || invoice.Party.ID == uuid.Nil || invoice.Party.PartyType != "customer" {
+		return nil
+	}
+	// Excluded customers get no loyalty block unless this invoice predates
+	// the exclusion and actually moved their balance.
+	if invoice.Party.LoyaltyExcluded && invoice.LoyaltyDiscount == 0 &&
+		invoice.LoyaltyPointsEarned == 0 && invoice.LoyaltyCashEarned == 0 {
 		return nil
 	}
 	var settings models.LoyaltySettings

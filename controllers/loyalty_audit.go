@@ -17,6 +17,8 @@ import (
 const (
 	auditEntityLoyaltySettings = "loyalty_settings"
 	auditEntityLoyaltyCategory = "loyalty_category"
+	// Customer excluded from / re-included in the program.
+	auditEntityLoyaltyExclusion = "loyalty_exclusion"
 )
 
 // loyaltyAuditEntry is one audit log row produced by a loyalty settings save.

@@ -566,6 +566,8 @@ func SetupRoutes(r *gin.Engine) {
 		loyalty.GET("/customers", controllers.GetLoyaltyCustomers)
 		loyalty.GET("/parties/:party_id", controllers.GetPartyLoyaltyBalance)
 		loyalty.POST("/parties/:party_id/adjust", controllers.AdjustPartyLoyalty)
+		loyalty.GET("/excluded", controllers.GetLoyaltyExcludedParties)
+		loyalty.PUT("/parties/:party_id/exclusion", controllers.SetPartyLoyaltyExclusion)
 		loyalty.POST("/calculate-redemption", controllers.CalculateLoyaltyRedemption)
 		loyalty.GET("/card-design", controllers.GetLoyaltyCardDesign)
 		loyalty.PUT("/card-design", controllers.UpdateLoyaltyCardDesign)

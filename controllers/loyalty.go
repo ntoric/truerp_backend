@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -161,7 +162,7 @@ func GetLoyaltyStats(c *gin.Context) {
 	var stats models.LoyaltyStats
 
 	utils.DB.Model(&models.Party{}).
-		Where("user_id = ? AND party_type = ? AND (loyalty_points > 0 OR loyalty_cash > 0)", userID, "customer").
+		Where("user_id = ? AND party_type = ? AND loyalty_excluded = ? AND (loyalty_points > 0 OR loyalty_cash > 0)", userID, "customer", false).
 		Count(&stats.TotalMembers)
 
 	utils.DB.Model(&models.Party{}).
@@ -368,4 +369,71 @@ func CalculateLoyaltyRedemption(c *gin.Context) {
 		"points":           input.Points,
 		"available_points": party.LoyaltyPoints,
 	})
+}
+
+// GetLoyaltyExcludedParties lists customers excluded from the loyalty program.
+func GetLoyaltyExcludedParties(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	var parties []models.Party
+	if err := utils.DB.Where("user_id = ? AND party_type = ? AND loyalty_excluded = ?", userID, "customer", true).
+		Order("name ASC").Find(&parties).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch excluded customers"})
+		return
+	}
+	c.JSON(http.StatusOK, parties)
+}
+
+// SetPartyLoyaltyExclusion excludes a customer from (or re-includes them in)
+// the loyalty program. Balances are left as they are.
+func SetPartyLoyaltyExclusion(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	partyID, err := uuid.Parse(c.Param("party_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid party id"})
+		return
+	}
+	var input struct {
+		Excluded *bool  `json:"excluded"`
+		Reason   string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil || input.Excluded == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "excluded (true/false) is required"})
+		return
+	}
+
+	var party models.Party
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, partyID).First(&party).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Party not found"})
+		return
+	}
+	if party.PartyType != "customer" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Only customers take part in the loyalty program"})
+		return
+	}
+	if party.LoyaltyExcluded == *input.Excluded {
+		c.JSON(http.StatusOK, party)
+		return
+	}
+	if err := utils.DB.Model(&party).Update("loyalty_excluded", *input.Excluded).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update customer"})
+		return
+	}
+	party.LoyaltyExcluded = *input.Excluded
+
+	desc := "Included " + party.Name + " in the loyalty program"
+	if party.LoyaltyExcluded {
+		desc = "Excluded " + party.Name + " from the loyalty program"
+	}
+	if reason := strings.TrimSpace(input.Reason); reason != "" {
+		desc += " — reason: " + reason
+	}
+	if party.LoyaltyPoints != 0 || party.LoyaltyCash != 0 {
+		desc += fmt.Sprintf(" (balance kept: %d points, %s cashback)", party.LoyaltyPoints, fmtRupees(party.LoyaltyCash))
+	}
+	LogDataChangeWithDiff(c, "update", auditEntityLoyaltyExclusion, &party.ID, party.Name, desc,
+		gin.H{"loyalty_excluded": !party.LoyaltyExcluded},
+		gin.H{"loyalty_excluded": party.LoyaltyExcluded, "reason": strings.TrimSpace(input.Reason)},
+		gin.H{"loyalty_excluded": gin.H{"old": !party.LoyaltyExcluded, "new": party.LoyaltyExcluded}})
+
+	c.JSON(http.StatusOK, party)
 }

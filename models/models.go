@@ -1304,31 +1304,34 @@ type DebitNoteItem struct {
 }
 
 type Party struct {
-	ID             uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID         uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;index"`
-	Name           string         `json:"name" gorm:"not null"`
-	Phone          string         `json:"phone"`
-	Email          string         `json:"email"`
-	GSTIN          string         `json:"gstin"`
-	Address        string         `json:"address"`
-	City           string         `json:"city"`
-	State          string         `json:"state"`
-	Pincode        string         `json:"pincode"`
-	StateCode      string         `json:"state_code"`
-	Category       string         `json:"category"`
-	PartyType      string         `json:"party_type" gorm:"not null"` // customer, vendor
-	OpeningBalance float64        `json:"opening_balance" gorm:"default:0"`
-	Balance        float64        `json:"balance" gorm:"default:0"`
-	CreditLimit    float64        `json:"credit_limit" gorm:"default:0"`
-	TAN            string         `json:"tan"`
-	PAN            string         `json:"pan"`
-	Notes          string         `json:"notes"`
-	LoyaltyPoints  int64          `json:"loyalty_points" gorm:"default:0"`
-	LoyaltyCash    float64        `json:"loyalty_cash" gorm:"default:0"` // ₹ cashback wallet (cash-mode loyalty)
-	IsActive       bool           `json:"is_active" gorm:"default:true"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
-	DeletedAt      gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+	ID             uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID         uuid.UUID `json:"user_id" gorm:"type:uuid;not null;index"`
+	Name           string    `json:"name" gorm:"not null"`
+	Phone          string    `json:"phone"`
+	Email          string    `json:"email"`
+	GSTIN          string    `json:"gstin"`
+	Address        string    `json:"address"`
+	City           string    `json:"city"`
+	State          string    `json:"state"`
+	Pincode        string    `json:"pincode"`
+	StateCode      string    `json:"state_code"`
+	Category       string    `json:"category"`
+	PartyType      string    `json:"party_type" gorm:"not null"` // customer, vendor
+	OpeningBalance float64   `json:"opening_balance" gorm:"default:0"`
+	Balance        float64   `json:"balance" gorm:"default:0"`
+	CreditLimit    float64   `json:"credit_limit" gorm:"default:0"`
+	TAN            string    `json:"tan"`
+	PAN            string    `json:"pan"`
+	Notes          string    `json:"notes"`
+	LoyaltyPoints  int64     `json:"loyalty_points" gorm:"default:0"`
+	LoyaltyCash    float64   `json:"loyalty_cash" gorm:"default:0"` // ₹ cashback wallet (cash-mode loyalty)
+	// LoyaltyExcluded keeps the customer out of the loyalty program: no
+	// earning and no redemption. Existing balances are kept, untouched.
+	LoyaltyExcluded bool           `json:"loyalty_excluded" gorm:"default:false"`
+	IsActive        bool           `json:"is_active" gorm:"default:true"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+	DeletedAt       gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type LoyaltySettings struct {
