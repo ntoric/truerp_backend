@@ -254,6 +254,56 @@ func runRawMigrations(db *gorm.DB) {
 	BackfillProductPLUs(db)
 	backfillInvoiceSourceLinks(db)
 	backfillPartyOpeningBalances(db)
+	resetInvoicePartyBalanceToggle(db)
+}
+
+// resetInvoicePartyBalanceToggle turns off theme_settings.show_party_balance
+// in every saved invoice customization, once. The toggle used to default to
+// true but was never rendered, so most saved settings carry a "true" nobody
+// chose. Now that invoices actually print the party balance, the option is
+// opt-in per store; clearing the stale value keeps existing invoices looking
+// exactly as before until a store enables it. Tracked in data_repairs.
+func resetInvoicePartyBalanceToggle(db *gorm.DB) {
+	if !db.Migrator().HasTable(&models.InvoiceSettings{}) {
+		return
+	}
+	if err := db.Exec(`CREATE TABLE IF NOT EXISTS data_repairs (
+		name VARCHAR(200) PRIMARY KEY,
+		applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)`).Error; err != nil {
+		log.Printf("resetInvoicePartyBalanceToggle: create marker table failed: %v", err)
+		return
+	}
+	const marker = "invoice_party_balance_opt_in_v1"
+	var applied int64
+	if err := db.Raw(`SELECT COUNT(*) FROM data_repairs WHERE name = ?`, marker).Scan(&applied).Error; err != nil {
+		log.Printf("resetInvoicePartyBalanceToggle: marker check failed: %v", err)
+		return
+	}
+	if applied > 0 {
+		return
+	}
+	var rows []models.InvoiceSettings
+	if err := db.Select("id", "customization").Where("customization IS NOT NULL AND customization <> ''").Find(&rows).Error; err != nil {
+		log.Printf("resetInvoicePartyBalanceToggle: load failed: %v", err)
+		return
+	}
+	for _, row := range rows {
+		custom := ParseInvoiceTemplateCustomization(row.Customization)
+		if !custom.ThemeSettings.ShowPartyBalance {
+			continue
+		}
+		custom.ThemeSettings.ShowPartyBalance = false
+		encoded := EncodeInvoiceTemplateCustomization(custom)
+		if encoded == "" {
+			continue
+		}
+		if err := db.Model(&models.InvoiceSettings{}).Where("id = ?", row.ID).
+			Update("customization", encoded).Error; err != nil {
+			log.Printf("resetInvoicePartyBalanceToggle: update %s failed: %v", row.ID, err)
+			return
+		}
+	}
+	db.Exec(`INSERT INTO data_repairs (name) VALUES (?)`, marker)
 }
 
 // backfillPartyOpeningBalances repairs parties whose opening_balance was

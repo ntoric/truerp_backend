@@ -33,6 +33,9 @@ type InvoiceDetailVisibility struct {
 	ShowAmountInWords      bool `json:"show_amount_in_words"`
 	ShowReceivedAmount     bool `json:"show_received_amount"`
 	ShowBalanceDue         bool `json:"show_balance_due"`
+	// ShowCompositionDeclaration prints the composition-dealer declaration
+	// under the BILL OF SUPPLY heading.
+	ShowCompositionDeclaration bool `json:"show_composition_declaration"`
 }
 
 type PartyDetailVisibility struct {

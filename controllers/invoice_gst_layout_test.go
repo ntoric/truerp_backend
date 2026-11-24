@@ -219,3 +219,28 @@ func TestBuildInvoiceDocumentPDFBillOfSupply(t *testing.T) {
 		t.Fatalf("inter-state buildInvoiceDocumentPDF: %v", err)
 	}
 }
+
+func TestInvoicePDFHTMLCompositionDeclarationToggle(t *testing.T) {
+	custom := utils.DefaultInvoiceTemplateCustomization()
+	custom.InvoiceDetails.ShowCompositionDeclaration = false
+	out := InvoicePDFHTMLWithOptions(gstTestInvoice(), invoicePDFOptions{
+		Business: gstTestBusiness(),
+		Settings: models.InvoiceSettings{Customization: utils.EncodeInvoiceTemplateCustomization(custom)},
+	})
+	if strings.Contains(out, compositionDeclaration) {
+		t.Fatalf("composition declaration rendered while disabled")
+	}
+	if !strings.Contains(out, "BILL OF SUPPLY") {
+		t.Fatalf("bill of supply heading should remain when declaration is off")
+	}
+
+	// Settings saved before the option existed have no key: keep printing it.
+	legacy := `{"invoice_details":{"show_invoice_number":true}}`
+	out = InvoicePDFHTMLWithOptions(gstTestInvoice(), invoicePDFOptions{
+		Business: gstTestBusiness(),
+		Settings: models.InvoiceSettings{Customization: legacy},
+	})
+	if !strings.Contains(out, compositionDeclaration) {
+		t.Fatalf("composition declaration missing for settings saved without the key")
+	}
+}

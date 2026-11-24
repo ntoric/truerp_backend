@@ -77,8 +77,9 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 	}
 	pdf.Ln(4)
 
-	// Composition dealers must declare this prominently on a bill of supply.
-	if docTitle == "BILL OF SUPPLY" {
+	// Composition dealers must declare this prominently on a bill of supply;
+	// stores that are not composition dealers can turn it off.
+	if docTitle == "BILL OF SUPPLY" && custom.InvoiceDetails.ShowCompositionDeclaration {
 		pdf.SetFont("Arial", "B", fontSize)
 		pdf.SetTextColor(20, 20, 20)
 		pdf.MultiCell(0, 6, compositionDeclaration, "", "C", false)
@@ -521,6 +522,12 @@ func buildInvoiceDocumentPDF(invoice models.Invoice, business *models.Business, 
 	}
 	if custom.InvoiceDetails.ShowBalanceDue {
 		totRow("Balance", invoice.TotalAmount-invoice.AmountPaid, false)
+	}
+	if custom.ThemeSettings.ShowPartyBalance {
+		if pb, ok := loadInvoicePartyBalance(invoice); ok {
+			totRow("Previous Balance", pb.Previous, false)
+			totRow("Current Balance", pb.Current, false)
+		}
 	}
 	if custom.InvoiceDetails.ShowAmountInWords {
 		pdf.Ln(2)

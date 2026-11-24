@@ -715,3 +715,78 @@ func AssignLoyaltyCard(c *gin.Context) {
 	utils.DB.Preload("Party").First(&card, "id = ?", card.ID)
 	c.JSON(http.StatusOK, gin.H{"card": card, "party": card.Party})
 }
+
+// unassignedLoyaltyCardQuery scopes to active, not-yet-linked cards of the
+// current store, lowest serial first — the order cards come off the printed
+// stack at the counter.
+func unassignedLoyaltyCardQuery(c *gin.Context, db *gorm.DB) *gorm.DB {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	query := db.Where("user_id = ? AND party_id IS NULL AND status = ?", userID, "active")
+	if id, ok := currentStoreID(c); ok {
+		query = query.Where("store_id = ?", id)
+	} else {
+		query = query.Where("store_id IS NULL")
+	}
+	return query.Order("serial ASC")
+}
+
+// NextAvailableLoyaltyCard previews the card AssignNextLoyaltyCard would hand
+// out, so the add-customer form can show it before saving. It does not reserve
+// the card — the actual assignment happens atomically on save.
+func NextAvailableLoyaltyCard(c *gin.Context) {
+	var card models.LoyaltyCard
+	err := unassignedLoyaltyCardQuery(c, utils.DB).First(&card).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		c.JSON(http.StatusOK, gin.H{"card": nil, "remaining": 0})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch next card"})
+		return
+	}
+	var remaining int64
+	unassignedLoyaltyCardQuery(c, utils.DB.Model(&models.LoyaltyCard{})).Count(&remaining)
+	c.JSON(http.StatusOK, gin.H{"card": card, "remaining": remaining})
+}
+
+// AssignNextLoyaltyCard links the lowest-serial unassigned card to a customer.
+// The row is locked with SKIP LOCKED so two counters adding customers at the
+// same time never receive the same card.
+func AssignNextLoyaltyCard(c *gin.Context) {
+	var input struct {
+		PartyID uuid.UUID `json:"party_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	userID := c.MustGet("user_id").(uuid.UUID)
+	var party models.Party
+	if err := utils.DB.Where("user_id = ? AND id = ?", userID, input.PartyID).First(&party).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Customer not found"})
+		return
+	}
+
+	var card models.LoyaltyCard
+	err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		q := unassignedLoyaltyCardQuery(c, tx).
+			Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"})
+		if err := q.First(&card).Error; err != nil {
+			return err
+		}
+		card.PartyID = &input.PartyID
+		return tx.Model(&card).Update("party_id", input.PartyID).Error
+	})
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		c.JSON(http.StatusConflict, gin.H{"error": "No unassigned loyalty cards left — generate a new batch"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to assign card"})
+		return
+	}
+
+	card.Party = &party
+	c.JSON(http.StatusOK, gin.H{"card": card, "party": party})
+}

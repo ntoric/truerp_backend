@@ -119,7 +119,7 @@ func InvoicePDFHTMLWithOptions(invoice models.Invoice, opts invoicePDFOptions) s
 	</div>`, docTitle, headRight)
 
 	compositionHTML := ""
-	if docTitle == "BILL OF SUPPLY" {
+	if docTitle == "BILL OF SUPPLY" && custom.InvoiceDetails.ShowCompositionDeclaration {
 		compositionHTML = fmt.Sprintf(`<div class="comp-note">%s</div>`, compositionDeclaration)
 	}
 
@@ -635,6 +635,12 @@ func renderInvoiceBottom(invoice models.Invoice, custom models.InvoiceTemplateCu
 	}
 	if custom.InvoiceDetails.ShowBalanceDue {
 		right.WriteString(totRow("Balance", "₹ "+formatINR(invoice.TotalAmount-invoice.AmountPaid), false))
+	}
+	if custom.ThemeSettings.ShowPartyBalance {
+		if pb, ok := loadInvoicePartyBalance(invoice); ok {
+			right.WriteString(totRow("Previous Balance", "₹ "+formatINR(pb.Previous), false))
+			right.WriteString(totRow("Current Balance", "₹ "+formatINR(pb.Current), false))
+		}
 	}
 	if custom.InvoiceDetails.ShowAmountInWords {
 		right.WriteString(`<div class="words-label">Total Amount (in words)</div>`)

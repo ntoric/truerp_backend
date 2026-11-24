@@ -571,6 +571,8 @@ func SetupRoutes(r *gin.Engine) {
 		loyalty.PUT("/card-design", controllers.UpdateLoyaltyCardDesign)
 		loyalty.GET("/cards", controllers.ListLoyaltyCards)
 		loyalty.GET("/cards/lookup", controllers.LookupLoyaltyCard)
+		loyalty.GET("/cards/next-available", controllers.NextAvailableLoyaltyCard)
+		loyalty.POST("/cards/assign-next", controllers.AssignNextLoyaltyCard)
 		loyalty.POST("/cards/generate", controllers.GenerateLoyaltyCards)
 		loyalty.POST("/cards/:id/assign", controllers.AssignLoyaltyCard)
 		loyalty.DELETE("/cards/:id", controllers.DeleteLoyaltyCard)
