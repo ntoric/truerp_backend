@@ -124,20 +124,6 @@ func validateLoyaltyCategories(userID uuid.UUID, cats []models.LoyaltyCategory, 
 	return out, nil
 }
 
-// replaceLoyaltyCategories swaps the user's category list for cats.
-func replaceLoyaltyCategories(tx *gorm.DB, userID uuid.UUID, cats []models.LoyaltyCategory) error {
-	if err := tx.Unscoped().Where("user_id = ?", userID).Delete(&models.LoyaltyCategory{}).Error; err != nil {
-		return err
-	}
-	for i := range cats {
-		// Select("*") so IsActive=false and other zero values are written.
-		if err := tx.Select("*").Create(&cats[i]).Error; err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // loyaltySaleFigures is what a category's conditions are tested against.
 // CostKnown is false when no purchase cost is known, in which case every
 // margin/profit condition fails (only condition-less categories match).

@@ -287,6 +287,12 @@ func CreateAuditLog(userID uuid.UUID, userName, action, entityType string, entit
 // LogDataChange queues a data-change audit entry with full previous/new
 // snapshots, pulling actor, IP and request metadata from the gin context.
 func LogDataChange(c *gin.Context, action, entityType string, entityID *uuid.UUID, entityName, description string, previous, newData interface{}) {
+	LogDataChangeWithDiff(c, action, entityType, entityID, entityName, description, previous, newData, nil)
+}
+
+// LogDataChangeWithDiff is LogDataChange plus a field-level diff stored in
+// the entry's Changes column (typically {field: {"old": …, "new": …}}).
+func LogDataChangeWithDiff(c *gin.Context, action, entityType string, entityID *uuid.UUID, entityName, description string, previous, newData, changes interface{}) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 	userName, _ := c.Get("user_name")
 	name, _ := userName.(string)
@@ -321,6 +327,11 @@ func LogDataChange(c *gin.Context, action, entityType string, entityID *uuid.UUI
 		NewData:         newJSON,
 		Status:          "success",
 		CreatedAt:       time.Now(),
+	}
+	if changes != nil {
+		if b, err := json.Marshal(changes); err == nil {
+			entry.Changes = string(b)
+		}
 	}
 	if rid, ok := c.Get("request_id"); ok {
 		if s, ok := rid.(string); ok {

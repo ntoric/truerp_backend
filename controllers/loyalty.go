@@ -30,6 +30,8 @@ func UpdateLoyaltySettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load loyalty settings"})
 		return
 	}
+	before := *settings
+	existingCats := loadLoyaltyCategories(utils.DB, userID)
 
 	// MinMarginPercent is a pointer (shadowing the embedded field) so an
 	// omitted key keeps the stored value while an explicit 0 clears it.
@@ -108,12 +110,13 @@ func UpdateLoyaltySettings(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		reconcileLoyaltyCategoryIDs(existingCats, categories)
 	}
 	if IsCategoryLoyalty(settings) {
 		active := 0
 		list := categories
 		if input.Categories == nil {
-			list = loadLoyaltyCategories(utils.DB, userID)
+			list = existingCats
 		}
 		for _, cat := range list {
 			if cat.IsActive {
@@ -132,13 +135,23 @@ func UpdateLoyaltySettings(c *gin.Context) {
 			return err
 		}
 		if input.Categories != nil {
-			return replaceLoyaltyCategories(tx, userID, categories)
+			return syncLoyaltyCategories(tx, userID, existingCats, categories)
 		}
 		return nil
 	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update loyalty settings"})
 		return
 	}
+
+	var entries []loyaltyAuditEntry
+	if e := diffLoyaltySettings(&before, settings); e != nil {
+		entries = append(entries, *e)
+	}
+	if input.Categories != nil {
+		entries = append(entries, diffLoyaltyCategories(existingCats, categories, IsCashLoyalty(&before), IsCashLoyalty(settings))...)
+	}
+	writeLoyaltyAudit(c, entries)
+
 	settings.Categories = loadLoyaltyCategories(utils.DB, userID)
 	c.JSON(http.StatusOK, settings)
 }
