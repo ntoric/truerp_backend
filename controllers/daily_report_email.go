@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"strings"
@@ -89,6 +90,7 @@ func UpdateDailyReportEmailSettingsHandler(c *gin.Context) {
 		Period          string `json:"period"`
 		SendTime        string `json:"send_time"`
 		Subject         string `json:"subject"`
+		SendTelegram    bool   `json:"send_telegram"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -114,8 +116,8 @@ func UpdateDailyReportEmailSettingsHandler(c *gin.Context) {
 	}
 
 	recipients := parseRecipientEmails(input.RecipientEmails)
-	if input.IsEnabled && len(recipients) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one recipient email is required when enabled"})
+	if input.IsEnabled && len(recipients) == 0 && !input.SendTelegram {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Add a recipient email or turn on Telegram delivery when enabled"})
 		return
 	}
 
@@ -130,6 +132,7 @@ func UpdateDailyReportEmailSettingsHandler(c *gin.Context) {
 	settings.Period = period
 	settings.SendTime = sendTime
 	settings.Subject = strings.TrimSpace(input.Subject)
+	settings.SendTelegram = input.SendTelegram
 
 	if err := utils.DB.Save(&settings).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save report email settings"})
@@ -237,11 +240,18 @@ func labelForPeriod(period string, start, end time.Time) string {
 // can track its own sends independently of manual "Send now" tests.
 func sendReportEmailNow(settings models.DailyReportEmailSettings, anchor time.Time, isScheduled bool) (int, error) {
 	recipients := parseRecipientEmails(settings.RecipientEmails)
-	if len(recipients) == 0 {
+	if len(recipients) == 0 && !settings.SendTelegram {
 		return 0, fmt.Errorf("no recipient emails configured")
 	}
-	if !utils.EmailConfiguredForUser(settings.UserID) {
-		return 0, fmt.Errorf("SMTP is not configured. Set up email in Developer Settings first.")
+	// Email is skipped (with an error recorded) when SMTP isn't set up but
+	// Telegram delivery can still go out.
+	var smtpErr error
+	if len(recipients) > 0 && !utils.EmailConfiguredForUser(settings.UserID) {
+		smtpErr = fmt.Errorf("SMTP is not configured. Set up email in Developer Settings first.")
+		if !settings.SendTelegram {
+			return 0, smtpErr
+		}
+		recipients = nil
 	}
 
 	filename, label, pdfBytes, err := buildReportEmailPDF(settings, anchor)
@@ -260,7 +270,7 @@ func sendReportEmailNow(settings models.DailyReportEmailSettings, anchor time.Ti
 	attachment := utils.PDFAttachment{Filename: filename, Content: pdfBytes}
 
 	sentCount := 0
-	var firstErr error
+	firstErr := smtpErr
 	for _, to := range recipients {
 		if err := utils.SendEmailWithPDFAttachmentForUser(settings.UserID, to, subject, body, []utils.PDFAttachment{attachment}); err != nil {
 			if firstErr == nil {
@@ -270,6 +280,21 @@ func sendReportEmailNow(settings models.DailyReportEmailSettings, anchor time.Ti
 			continue
 		}
 		sentCount++
+	}
+	if settings.SendTelegram {
+		trigger := "manual"
+		if isScheduled {
+			trigger = "scheduled"
+		}
+		caption := fmt.Sprintf("📊 <b>%s</b>\nBusiness report (%s): %s", html.EscapeString(subject), html.EscapeString(settings.Period), html.EscapeString(label))
+		n, tgErr := sendTelegramOwnerDocument(settings.UserID, telegramKindDailyReport, subject, trigger, filename, pdfBytes, caption)
+		sentCount += n
+		if tgErr != nil {
+			log.Printf("daily report email: telegram delivery for %s: %v", settings.UserID, tgErr)
+			if firstErr == nil {
+				firstErr = tgErr
+			}
+		}
 	}
 
 	now := time.Now()
@@ -305,8 +330,8 @@ func SendDailyReportEmailNowHandler(c *gin.Context) {
 	}
 
 	recipients := parseRecipientEmails(settings.RecipientEmails)
-	if len(recipients) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No recipient emails configured. Add recipients in the settings first."})
+	if len(recipients) == 0 && !settings.SendTelegram {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No recipient emails configured. Add recipients or turn on Telegram delivery in the settings first."})
 		return
 	}
 
@@ -333,7 +358,7 @@ func SendDailyReportEmailNowHandler(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"sent_count":  sentCount,
-		"total":       len(recipients),
+		"total":       len(recipients) + reportTelegramChatCount(userID, settings.SendTelegram),
 		"settings":    settings,
 		"warning":     sendErr != nil,
 		"warning_msg": sendErr,
@@ -482,7 +507,7 @@ func processDueReportEmails() {
 			continue
 		}
 
-		if !utils.EmailConfiguredForUser(settings.UserID) {
+		if !settings.SendTelegram && !utils.EmailConfiguredForUser(settings.UserID) {
 			log.Printf("daily report email scheduler: skipping user %s — SMTP not configured", settings.UserID)
 			continue
 		}

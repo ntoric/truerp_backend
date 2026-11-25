@@ -57,6 +57,9 @@ func main() {
 	// report PDF to configured recipients at the configured time each day.
 	controllers.StartDailyReportEmailScheduler()
 	controllers.StartPartyBalanceReportEmailScheduler()
+	controllers.StartTelegramLinkPoller()
+	// Scheduled party balance statements (WhatsApp)
+	controllers.StartPartyStatementScheduler()
 
 	// Start the background scheduler that runs the nightly database
 	// maintenance (dead-tuple / bloat cleanup) at the configured IST time
@@ -89,7 +92,7 @@ func main() {
 	// Desktop Tauri WebView (local UI) and any web clients call this cloud API cross-origin.
 	config.AllowOrigins = []string{"*"}
 	config.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Store-ID", "Idempotency-Key"}
-	config.ExposeHeaders = []string{"X-Active-Store-ID"}
+	config.ExposeHeaders = []string{"X-Active-Store-ID", "Content-Disposition"}
 	r.Use(cors.New(config))
 
 	storageConfig := services.GetStorageConfig()

@@ -3,7 +3,6 @@ package controllers
 import (
 	"archive/zip"
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -2204,7 +2203,7 @@ func generateThermalPurchaseLabel(item models.PurchaseBillItem, size BarcodeLabe
 		name, mrpCell, item.SalePrice)
 }
 
-// ParseBillWithAI uses Gemini to parse purchase bill/invoice from image
+// ParseBillWithAI uses the store's AI provider to parse a purchase bill/invoice image or PDF
 func ParseBillWithAI(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 	fmt.Println("[ParseBillWithAI] Received request from user:", userID)
@@ -2224,13 +2223,11 @@ func ParseBillWithAI(c *gin.Context) {
 		return
 	}
 
-	if business.GeminiAPIKey == "" {
-		fmt.Println("[ParseBillWithAI] ERROR: Gemini API key not configured")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Gemini API key not configured. Please add it in business settings."})
+	cfg, err := activeAIConfig(business)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	apiKey := business.GeminiAPIKey
 
 	// Get uploaded file
 	file, err := c.FormFile("image")
@@ -2259,9 +2256,6 @@ func ParseBillWithAI(c *gin.Context) {
 	}
 	fmt.Println("[ParseBillWithAI] File read successfully. Bytes:", len(imageBytes))
 
-	// Convert to base64
-	base64Image := base64.StdEncoding.EncodeToString(imageBytes)
-
 	// Determine MIME type
 	mimeType := "image/jpeg"
 	if strings.HasSuffix(strings.ToLower(file.Filename), ".png") {
@@ -2272,7 +2266,7 @@ func ParseBillWithAI(c *gin.Context) {
 		mimeType = "application/pdf"
 	}
 
-	// Call Gemini API with the image
+	// Ask the AI provider to read the bill
 	prompt := `You are an expert at extracting data from purchase bills and invoices. Analyze this document and extract all the information.
 
 IMPORTANT: Return ONLY a valid JSON object. No markdown, no explanations, no extra text.
@@ -2329,90 +2323,24 @@ If you cannot extract the data or there's an error, return:
 
 Return ONLY the JSON, nothing else.`
 
-	requestBody := map[string]interface{}{
-		"contents": []map[string]interface{}{
-			{
-				"parts": []map[string]interface{}{
-					{
-						"text": prompt,
-					},
-					{
-						"inline_data": map[string]interface{}{
-							"mime_type": mimeType,
-							"data":      base64Image,
-						},
-					},
-				},
-			},
-		},
-	}
-
-	jsonBody, err := json.Marshal(requestBody)
+	fmt.Println("[ParseBillWithAI] Calling", cfg.label(), "model", cfg.model())
+	text, err := aiGenerate(c.Request.Context(), cfg, prompt, &aiAttachment{
+		MimeType: mimeType,
+		Filename: file.Filename,
+		Data:     imageBytes,
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
+		fmt.Println("[ParseBillWithAI] ERROR: AI call failed:", err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
-
-	req, err := http.NewRequest("POST", "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key="+apiKey, bytes.NewBuffer(jsonBody))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
-		return
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	fmt.Println("[ParseBillWithAI] Calling Gemini API...")
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Println("[ParseBillWithAI] ERROR: Failed to call Gemini API:", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to call Gemini API"})
-		return
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	fmt.Println("[ParseBillWithAI] Gemini API status:", resp.StatusCode, "response:", string(bodyBytes))
-
-	if resp.StatusCode != http.StatusOK {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Gemini API error: %s", string(bodyBytes))})
-		return
-	}
-
-	// Re-create reader for decoder since we already consumed the body
-	resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-
-	var geminiResponse struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&geminiResponse); err != nil {
-		fmt.Println("[ParseBillWithAI] ERROR: Failed to decode Gemini response:", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse Gemini response"})
-		return
-	}
-	fmt.Println("[ParseBillWithAI] Gemini candidates:", len(geminiResponse.Candidates))
-
-	if len(geminiResponse.Candidates) == 0 || len(geminiResponse.Candidates[0].Content.Parts) == 0 {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "No response from Gemini"})
-		return
-	}
-
-	// Extract text from response
-	text := strings.TrimSpace(geminiResponse.Candidates[0].Content.Parts[0].Text)
-	fmt.Println("[ParseBillWithAI] Raw Gemini text length:", len(text))
+	fmt.Println("[ParseBillWithAI] Raw AI text length:", len(text))
 
 	// Try to extract JSON from the text (in case AI added markdown)
 	text = extractJSON(text)
 	fmt.Println("[ParseBillWithAI] Extracted JSON length:", len(text))
 
-	// Parse the JSON response from Gemini
+	// Parse the JSON response from the AI provider
 	var aiResponse struct {
 		Status string `json:"status"`
 		Data   struct {
@@ -2439,7 +2367,7 @@ Return ONLY the JSON, nothing else.`
 
 	if err := json.Unmarshal([]byte(text), &aiResponse); err != nil {
 		fmt.Println("[ParseBillWithAI] ERROR: JSON unmarshal failed:", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse Gemini result as JSON", "raw_response": text})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse " + cfg.label() + " result as JSON", "raw_response": text})
 		return
 	}
 	fmt.Println("[ParseBillWithAI] AI response status:", aiResponse.Status)

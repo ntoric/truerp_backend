@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"truerp/models"
 	"truerp/utils"
@@ -19,11 +20,9 @@ func defaultSaleDiscountSettings() models.SaleDiscountSettings {
 	}
 }
 
-// GetSaleDiscountSettings returns the discount mode + auto-discount rule for
-// the active store. Falls back to the global (NULL store) row, then to the
-// manual defaults. Any authenticated user may read so the billing UI and POS
-// can decide which discount widget to show.
-func GetSaleDiscountSettings(c *gin.Context) {
+// loadSaleDiscountSettings resolves the discount settings for the active
+// store: the store's own row, then the global (NULL store) row, then defaults.
+func loadSaleDiscountSettings(c *gin.Context) models.SaleDiscountSettings {
 	var settings models.SaleDiscountSettings
 	found := false
 	if storeID, ok := currentStoreID(c); ok {
@@ -40,7 +39,33 @@ func GetSaleDiscountSettings(c *gin.Context) {
 	if settings.Mode != "auto" {
 		settings.Mode = "manual"
 	}
-	c.JSON(http.StatusOK, settings)
+	return settings
+}
+
+// checkMaxInvoiceDiscount returns an error message when invoiceDiscount
+// exceeds the store's configured maximum discount amount. previous is the
+// discount already saved on the document (0 for new ones) so editing an
+// invoice created before the cap existed is not blocked unless the discount
+// is raised.
+func checkMaxInvoiceDiscount(c *gin.Context, invoiceDiscount, previous float64) string {
+	settings := loadSaleDiscountSettings(c)
+	limit := settings.MaxDiscountAmount
+	if !settings.IsEnabled || limit <= 0 {
+		return ""
+	}
+	const epsilon = 0.005
+	if invoiceDiscount > limit+epsilon && invoiceDiscount > previous+epsilon {
+		return fmt.Sprintf("Discount cannot exceed the maximum allowed amount of %.2f", limit)
+	}
+	return ""
+}
+
+// GetSaleDiscountSettings returns the discount mode + auto-discount rule for
+// the active store. Falls back to the global (NULL store) row, then to the
+// manual defaults. Any authenticated user may read so the billing UI and POS
+// can decide which discount widget to show.
+func GetSaleDiscountSettings(c *gin.Context) {
+	c.JSON(http.StatusOK, loadSaleDiscountSettings(c))
 }
 
 // UpdateSaleDiscountSettings updates the discount mode + auto-discount rule
@@ -53,6 +78,8 @@ func UpdateSaleDiscountSettings(c *gin.Context) {
 		DiscountType  string  `json:"discount_type"`
 		DiscountValue float64 `json:"discount_value"`
 		MinSaleAmount float64 `json:"min_sale_amount"`
+		// Pointer so older clients that omit the field don't wipe the cap.
+		MaxDiscountAmount *float64 `json:"max_discount_amount"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -66,6 +93,10 @@ func UpdateSaleDiscountSettings(c *gin.Context) {
 	}
 	input.DiscountValue = max(0, input.DiscountValue)
 	input.MinSaleAmount = max(0, input.MinSaleAmount)
+	if input.MaxDiscountAmount != nil {
+		v := max(0, *input.MaxDiscountAmount)
+		input.MaxDiscountAmount = &v
+	}
 
 	var storeID *uuid.UUID
 	query := utils.DB.Order("created_at asc")
@@ -87,6 +118,9 @@ func UpdateSaleDiscountSettings(c *gin.Context) {
 			DiscountType:  input.DiscountType,
 			DiscountValue: input.DiscountValue,
 			MinSaleAmount: input.MinSaleAmount,
+		}
+		if input.MaxDiscountAmount != nil {
+			settings.MaxDiscountAmount = *input.MaxDiscountAmount
 		}
 		if err := utils.DB.Create(&settings).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save sale discount settings"})
@@ -112,6 +146,9 @@ func UpdateSaleDiscountSettings(c *gin.Context) {
 		}
 		if input.IsEnabled != nil {
 			updates["is_enabled"] = *input.IsEnabled
+		}
+		if input.MaxDiscountAmount != nil {
+			updates["max_discount_amount"] = *input.MaxDiscountAmount
 		}
 		if err := utils.DB.Model(&settings).Updates(updates).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update sale discount settings"})

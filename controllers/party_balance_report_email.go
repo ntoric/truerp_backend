@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"strings"
@@ -60,6 +61,7 @@ func UpdatePartyBalanceReportEmailSettingsHandler(c *gin.Context) {
 		PartyType       string `json:"party_type"`
 		SendTime        string `json:"send_time"`
 		Subject         string `json:"subject"`
+		SendTelegram    bool   `json:"send_telegram"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -90,8 +92,8 @@ func UpdatePartyBalanceReportEmailSettingsHandler(c *gin.Context) {
 	}
 
 	recipients := parseRecipientEmails(input.RecipientEmails)
-	if input.IsEnabled && len(recipients) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one recipient email is required when enabled"})
+	if input.IsEnabled && len(recipients) == 0 && !input.SendTelegram {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Add a recipient email or turn on Telegram delivery when enabled"})
 		return
 	}
 
@@ -106,6 +108,7 @@ func UpdatePartyBalanceReportEmailSettingsHandler(c *gin.Context) {
 	settings.PartyType = partyType
 	settings.SendTime = sendTime
 	settings.Subject = strings.TrimSpace(input.Subject)
+	settings.SendTelegram = input.SendTelegram
 
 	if err := utils.DB.Save(&settings).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save report email settings"})
@@ -126,11 +129,18 @@ func partyBalanceEmailDate(settings models.PartyBalanceReportEmailSettings, now 
 // configured recipient, recording the outcome on the settings row.
 func sendPartyBalanceReportEmail(settings models.PartyBalanceReportEmailSettings, date string, isScheduled bool) (int, error) {
 	recipients := parseRecipientEmails(settings.RecipientEmails)
-	if len(recipients) == 0 {
+	if len(recipients) == 0 && !settings.SendTelegram {
 		return 0, fmt.Errorf("no recipient emails configured")
 	}
-	if !utils.EmailConfiguredForUser(settings.UserID) {
-		return 0, fmt.Errorf("SMTP is not configured. Set up email in Developer Settings first.")
+	// Email is skipped (with an error recorded) when SMTP isn't set up but
+	// Telegram delivery can still go out.
+	var smtpErr error
+	if len(recipients) > 0 && !utils.EmailConfiguredForUser(settings.UserID) {
+		smtpErr = fmt.Errorf("SMTP is not configured. Set up email in Developer Settings first.")
+		if !settings.SendTelegram {
+			return 0, smtpErr
+		}
+		recipients = nil
 	}
 
 	report, err := loadPartyBalanceReport(settings.UserID, date, settings.PartyType, "")
@@ -168,7 +178,7 @@ Closing — receivable: %s, payable: %s</p>
 	attachment := utils.PDFAttachment{Filename: fmt.Sprintf("party_balance_report_%s.pdf", date), Content: pdfBytes}
 
 	sentCount := 0
-	var firstErr error
+	firstErr := smtpErr
 	for _, to := range recipients {
 		if err := utils.SendEmailWithPDFAttachmentForUser(settings.UserID, to, subject, body, []utils.PDFAttachment{attachment}); err != nil {
 			if firstErr == nil {
@@ -178,6 +188,23 @@ Closing — receivable: %s, payable: %s</p>
 			continue
 		}
 		sentCount++
+	}
+	if settings.SendTelegram {
+		trigger := "manual"
+		if isScheduled {
+			trigger = "scheduled"
+		}
+		caption := fmt.Sprintf("📒 <b>%s</b>\n%d parties with an outstanding balance\nClosing — receivable: %s, payable: %s",
+			html.EscapeString(subject), len(report.Lines),
+			html.EscapeString(fmtINR(report.ClosingReceivable)), html.EscapeString(fmtINR(report.ClosingPayable)))
+		n, tgErr := sendTelegramOwnerDocument(settings.UserID, telegramKindPartyBalance, subject, trigger, attachment.Filename, pdfBytes, caption)
+		sentCount += n
+		if tgErr != nil {
+			log.Printf("party balance report email: telegram delivery for %s: %v", settings.UserID, tgErr)
+			if firstErr == nil {
+				firstErr = tgErr
+			}
+		}
 	}
 
 	now := time.Now()
@@ -211,8 +238,8 @@ func SendPartyBalanceReportEmailNowHandler(c *gin.Context) {
 		return
 	}
 	recipients := parseRecipientEmails(settings.RecipientEmails)
-	if len(recipients) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No recipient emails configured. Add recipients in the settings first."})
+	if len(recipients) == 0 && !settings.SendTelegram {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No recipient emails configured. Add recipients or turn on Telegram delivery in the settings first."})
 		return
 	}
 
@@ -237,7 +264,7 @@ func SendPartyBalanceReportEmailNowHandler(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"sent_count":  sentCount,
-		"total":       len(recipients),
+		"total":       len(recipients) + reportTelegramChatCount(userID, settings.SendTelegram),
 		"settings":    settings,
 		"warning":     sendErr != nil,
 		"warning_msg": warningMsg,
@@ -294,7 +321,7 @@ func processDuePartyBalanceReportEmails() {
 		if settings.LastScheduledAt != nil && settings.LastScheduledAt.In(loc).Format("2006-01-02") == now.Format("2006-01-02") {
 			continue
 		}
-		if !utils.EmailConfiguredForUser(settings.UserID) {
+		if !settings.SendTelegram && !utils.EmailConfiguredForUser(settings.UserID) {
 			log.Printf("party balance report email scheduler: skipping user %s — SMTP not configured", settings.UserID)
 			continue
 		}

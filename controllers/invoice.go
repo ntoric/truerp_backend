@@ -217,6 +217,11 @@ func CreateInvoice(c *gin.Context) {
 		}
 	}
 
+	if msg := checkMaxInvoiceDiscount(c, input.InvoiceDiscount, 0); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+		return
+	}
+
 	if input.PartyID == uuid.Nil {
 		input.PartyID = input.CustomerID
 	}
@@ -526,6 +531,8 @@ func CreateInvoice(c *gin.Context) {
 
 	// Store-configured WhatsApp purchase summary + invoice PDF (async).
 	queueInvoiceWhatsApp(userID, &invoice)
+	// Store-configured Telegram invoice to customer + owner alert (async).
+	queueInvoiceTelegram(userID, &invoice)
 
 	c.JSON(http.StatusCreated, invoice)
 }
@@ -595,6 +602,11 @@ func UpdateInvoice(c *gin.Context) {
 	if err := c.ShouldBindJSON(&input); err != nil {
 		fmt.Printf("[DEBUG] UpdateInvoice - JSON bind error: %v\n", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if msg := checkMaxInvoiceDiscount(c, input.InvoiceDiscount, invoice.InvoiceDiscount); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
 		return
 	}
 
@@ -797,6 +809,11 @@ func UpdateInvoice(c *gin.Context) {
 			return
 		}
 		invoice.AmountPaid = 0
+		if err := syncInvoiceLoyaltyOnStatusChange(utils.DB, userID, &invoice, previousStatus); err != nil {
+			fmt.Printf("[DEBUG] UpdateInvoice - loyalty reversal error: %v\n", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Invoice cancelled but failed to reverse loyalty"})
+			return
+		}
 	} else if err := resyncLinkedInvoicePayments(utils.DB, userID, &previousInvoice, &invoice); err != nil {
 		fmt.Printf("[DEBUG] UpdateInvoice - payment resync error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invoice updated but failed to update cash/bank"})
@@ -919,7 +936,8 @@ func DeleteInvoice(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse accounting entries"})
 		return
 	}
-	if err := reverseLoyaltyForInvoice(tx, userID, &party, &invoice); err != nil {
+	// No-op when cancellation already reversed it (ledger net is 0).
+	if err := reverseLoyaltyForInvoice(tx, userID, &party, &invoice, "deletion"); err != nil {
 		tx.Rollback()
 		fmt.Printf("[DEBUG] DeleteInvoice - loyalty reversal error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse loyalty points"})
@@ -1060,7 +1078,7 @@ func GenerateInvoicePDF(c *gin.Context) {
 	}
 
 	c.Header("Content-Type", "application/pdf")
-	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=\"Invoice_%s.pdf\"", invoice.InvoiceNumber))
+	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=%q", invoiceDownloadFilename(invoice.InvoiceNumber, invoice.Party.Name, invoice.ID.String())))
 	c.Data(http.StatusOK, "application/pdf", pdfBytes)
 }
 
@@ -1140,11 +1158,7 @@ func DownloadInvoicesPDFZip(c *gin.Context) {
 			skipped++
 			continue
 		}
-		name := sanitizeFilename(inv.InvoiceNumber)
-		if name == "" {
-			name = inv.ID.String()
-		}
-		w, err := zw.Create(fmt.Sprintf("Invoice_%s.pdf", name))
+		w, err := zw.Create(invoiceDownloadFilename(inv.InvoiceNumber, inv.Party.Name, inv.ID.String()))
 		if err != nil {
 			fmt.Fprintf(manifest, "%s,%s\n", sanitizeCSVField(inv.InvoiceNumber), "zip write failed")
 			skipped++

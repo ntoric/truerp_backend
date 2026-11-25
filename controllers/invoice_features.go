@@ -506,6 +506,13 @@ func UpdateInvoiceStatus(c *gin.Context) {
 		applyInvoiceSaleStock(userID, &invoice)
 	}
 
+	// Cancelling takes back the loyalty the invoice earned and gives back what
+	// was redeemed on it; reinstating re-applies both.
+	if err := syncInvoiceLoyaltyOnStatusChange(utils.DB, userID, &invoice, prevStatus); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Status updated but failed to update loyalty balance"})
+		return
+	}
+
 	// Cancelling already reversed the linked payments; resyncing on top of
 	// that would rewrite the rows that were just cancelled.
 	if invoice.Status != "cancelled" {

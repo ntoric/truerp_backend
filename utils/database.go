@@ -156,6 +156,7 @@ func allApplicationModels() []interface{} {
 		&models.POSDraft{},
 		&models.MediaFile{},
 		&models.DeveloperSettings{},
+		&models.AIProviderConfig{},
 		&models.PageFeatureSettings{},
 		&models.SaleDiscountSettings{},
 		&models.AuditLog{},
@@ -202,6 +203,12 @@ func allApplicationModels() []interface{} {
 		&models.WhatsAppRecipient{},
 		&models.WhatsAppInvoiceSettings{},
 		&models.WhatsAppInvoiceLog{},
+		&models.TelegramSettings{},
+		&models.TelegramMessageLog{},
+		&models.PartyStatementSettings{},
+		&models.PartyStatementLog{},
+		&models.PartyStatementSchedule{},
+		&models.PartyStatementExclusion{},
 		&models.IPRestriction{},
 		&models.DataBackup{},
 		&models.GDPRRequest{},
@@ -255,6 +262,7 @@ func runRawMigrations(db *gorm.DB) {
 	backfillInvoiceSourceLinks(db)
 	backfillPartyOpeningBalances(db)
 	resetInvoicePartyBalanceToggle(db)
+	backfillWhatsAppGatewayFromDeveloperSettings(db)
 }
 
 // resetInvoicePartyBalanceToggle turns off theme_settings.show_party_balance

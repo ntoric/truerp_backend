@@ -1,11 +1,9 @@
 package controllers
 
 import (
-	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -570,7 +568,7 @@ func SearchHSNCodes(c *gin.Context) {
 
 	fmt.Printf("[DEBUG] SearchHSNCodes - search: %s, useAI: %v\n", search, useAI)
 
-	// If AI search is requested, use Gemini
+	// If AI search is requested, ask the store's AI provider
 	if useAI {
 		searchHSNWithAI(c, search)
 		return
@@ -665,23 +663,21 @@ func searchHSNWithAI(c *gin.Context, search string) {
 		return
 	}
 
-	fmt.Printf("[DEBUG] searchHSNWithAI - EnableAIHSNSearch: %v, GeminiAPIKey configured: %v\n", business.EnableAIHSNSearch, business.GeminiAPIKey != "")
+	fmt.Printf("[DEBUG] searchHSNWithAI - EnableAIHSNSearch: %v, AI provider: %s\n", business.EnableAIHSNSearch, normalizeAIProvider(business.AIProvider))
 
 	if !business.EnableAIHSNSearch {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "AI HSN search is not enabled"})
 		return
 	}
 
-	if business.GeminiAPIKey == "" {
-		fmt.Printf("[DEBUG] searchHSNWithAI - Gemini API key not configured\n")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Gemini API key not configured"})
+	cfg, err := activeAIConfig(business)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	fmt.Printf("[DEBUG] searchHSNWithAI - Calling %s (%s) for search: %s\n", cfg.label(), cfg.model(), search)
 
-	apiKey := business.GeminiAPIKey
-	fmt.Printf("[DEBUG] searchHSNWithAI - Calling Gemini API for search: %s\n", search)
-
-	// Call Gemini API with strict JSON response requirement
+	// Ask the AI provider with a strict JSON response requirement
 	prompt := fmt.Sprintf(`You are a HSN code expert. Find the most appropriate HSN code for: "%s".
 
 IMPORTANT: Return ONLY a valid JSON object. No markdown, no explanations, no extra text.
@@ -704,82 +700,19 @@ If you cannot find a matching HSN code or there's an error, return this exact fo
 
 Return ONLY the JSON, nothing else.`, search)
 
-	requestBody := map[string]interface{}{
-		"contents": []map[string]interface{}{
-			{
-				"parts": []map[string]interface{}{
-					{
-						"text": prompt,
-					},
-				},
-			},
-		},
-	}
-
-	jsonBody, err := json.Marshal(requestBody)
+	text, err := aiGenerate(c.Request.Context(), cfg, prompt, nil)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
+		fmt.Printf("[DEBUG] searchHSNWithAI - AI call failed: %v\n", err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
-
-	req, err := http.NewRequest("POST", "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key="+apiKey, bytes.NewBuffer(jsonBody))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
-		return
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Printf("[DEBUG] searchHSNWithAI - Failed to call Gemini API: %v\n", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to call Gemini API"})
-		return
-	}
-	defer resp.Body.Close()
-
-	fmt.Printf("[DEBUG] searchHSNWithAI - Gemini API response status: %d\n", resp.StatusCode)
-
-	if resp.StatusCode != http.StatusOK {
-		// Read error body for more details
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		fmt.Printf("[DEBUG] searchHSNWithAI - Gemini API error response: %s\n", string(bodyBytes))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Gemini API error: %s", string(bodyBytes))})
-		return
-	}
-
-	var geminiResponse struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&geminiResponse); err != nil {
-		fmt.Printf("[DEBUG] searchHSNWithAI - Failed to parse Gemini response: %v\n", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse Gemini response"})
-		return
-	}
-
-	if len(geminiResponse.Candidates) == 0 || len(geminiResponse.Candidates[0].Content.Parts) == 0 {
-		fmt.Printf("[DEBUG] searchHSNWithAI - No response from Gemini (candidates: %d)\n", len(geminiResponse.Candidates))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "No response from Gemini"})
-		return
-	}
-
-	// Extract text from response
-	text := strings.TrimSpace(geminiResponse.Candidates[0].Content.Parts[0].Text)
-	fmt.Printf("[DEBUG] searchHSNWithAI - Raw Gemini response text: %s\n", text)
+	fmt.Printf("[DEBUG] searchHSNWithAI - Raw AI response text: %s\n", text)
 
 	// Try to extract JSON from the text (in case AI added markdown)
 	text = extractJSON(text)
 	fmt.Printf("[DEBUG] searchHSNWithAI - Extracted JSON: %s\n", text)
 
-	// Parse the JSON response from Gemini
+	// Parse the JSON response from the AI provider
 	var aiResponse struct {
 		Status      string  `json:"status"`
 		Code        string  `json:"code,omitempty"`
@@ -791,8 +724,8 @@ Return ONLY the JSON, nothing else.`, search)
 	}
 
 	if err := json.Unmarshal([]byte(text), &aiResponse); err != nil {
-		fmt.Printf("[DEBUG] searchHSNWithAI - Failed to parse Gemini result as JSON: %v\n", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse Gemini result as JSON"})
+		fmt.Printf("[DEBUG] searchHSNWithAI - Failed to parse AI result as JSON: %v\n", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse " + cfg.label() + " result as JSON"})
 		return
 	}
 

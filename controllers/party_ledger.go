@@ -62,6 +62,9 @@ type PartyLedgerEntry struct {
 	DueDate     *time.Time `json:"due_date,omitempty"`
 	DueStatus   string     `json:"due_status,omitempty"`
 	OverdueDays int        `json:"overdue_days,omitempty"`
+	// CreatedAt is when the document was recorded; with Date it orders entries
+	// by date and time.
+	CreatedAt *time.Time `json:"created_at,omitempty"`
 }
 
 type PartyLedger struct {
@@ -346,6 +349,10 @@ func loadPartyLedger(userID, partyID uuid.UUID, fromDate, toDate string) (*Party
 			DueDate:     r.DueDate,
 			DueStatus:   r.DueStatus,
 			OverdueDays: r.OverdueDays,
+		}
+		if !r.CreatedAt.IsZero() {
+			created := r.CreatedAt
+			entry.CreatedAt = &created
 		}
 		ledger.Entries = append(ledger.Entries, entry)
 

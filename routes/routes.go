@@ -59,6 +59,7 @@ func SetupRoutes(r *gin.Engine) {
 		invoices.GET("", controllers.GetInvoices)
 		invoices.POST("", controllers.CreateInvoice)
 		invoices.POST("/:id/whatsapp", controllers.SendInvoiceWhatsApp)
+		invoices.POST("/:id/telegram", controllers.SendInvoiceTelegram)
 		invoices.POST("/check-stock", controllers.CheckInvoiceStock)
 		invoices.POST("/download-pdf", controllers.DownloadInvoicesPDFZip)
 		invoices.POST("/import/csv", controllers.ImportInvoicesCSV)
@@ -591,6 +592,23 @@ func SetupRoutes(r *gin.Engine) {
 		parties.GET("/:id/ledger", controllers.GetPartyLedger)
 		parties.GET("/:id/ledger/excel", controllers.ExportPartyLedgerExcel)
 		parties.GET("/:id/ledger/pdf", controllers.GetPartyLedgerPDF)
+		// Telegram link for the party (t.me/<bot>?start=<code>) and unlink
+		parties.GET("/:id/telegram", controllers.GetPartyTelegramLink)
+		parties.DELETE("/:id/telegram", controllers.UnlinkPartyTelegram)
+		// Balance statement sent to the party (WhatsApp or Telegram)
+		parties.GET("/statement/logs", controllers.GetPartyStatementLogs)
+		parties.POST("/statement/send-bulk", controllers.SendPartyStatementsBulk)
+		parties.GET("/statement/schedules", controllers.ListPartyStatementSchedules)
+		parties.POST("/statement/schedules", controllers.CreatePartyStatementSchedule)
+		parties.PUT("/statement/schedules/:sid", controllers.UpdatePartyStatementSchedule)
+		parties.PUT("/statement/schedules/:sid/enabled", controllers.SetPartyStatementScheduleEnabled)
+		parties.POST("/statement/schedules/:sid/run", controllers.RunPartyStatementScheduleNow)
+		parties.DELETE("/statement/schedules/:sid", controllers.DeletePartyStatementSchedule)
+		parties.GET("/statement/exclusions", controllers.ListPartyStatementExclusions)
+		parties.POST("/statement/exclusions", controllers.AddPartyStatementExclusions)
+		parties.DELETE("/statement/exclusions/:pid", controllers.RemovePartyStatementExclusion)
+		parties.GET("/:id/statement/pdf", controllers.GetPartyStatementPDF)
+		parties.POST("/:id/statement/send", controllers.SendPartyStatement)
 		parties.GET("/:id", controllers.GetParty)
 		parties.PUT("/:id", controllers.UpdateParty)
 		parties.DELETE("/:id", controllers.DeleteParty)
@@ -817,6 +835,17 @@ func SetupRoutes(r *gin.Engine) {
 		settings.POST("/whatsapp-invoice/test", controllers.TestWhatsAppInvoice)
 		settings.GET("/whatsapp-invoice/logs", controllers.GetWhatsAppInvoiceLogs)
 
+		// Telegram bot (invoices, statements, owner alerts, reports), per store
+		settings.GET("/telegram", controllers.GetTelegramSettings)
+		settings.PUT("/telegram", controllers.UpdateTelegramSettings)
+		settings.POST("/telegram/test", controllers.TestTelegram)
+		settings.GET("/telegram/logs", controllers.GetTelegramLogs)
+
+		// Party balance statement messages (template + default period), per store
+		settings.GET("/party-statement", controllers.GetPartyStatementSettings)
+		settings.PUT("/party-statement", controllers.UpdatePartyStatementSettings)
+		settings.POST("/party-statement/test", controllers.TestPartyStatement)
+
 		// Reminders
 		settings.GET("/reminders", controllers.GetReminders)
 		settings.POST("/reminders", controllers.CreateReminder)
@@ -970,6 +999,16 @@ func SetupRoutes(r *gin.Engine) {
 		developerSettings.POST("/test-email", controllers.TestEmailConnection)
 		developerSettings.POST("/test-whatsapp", controllers.TestWhatsAppConnection)
 		developerSettings.POST("/test-sms", controllers.TestSMSConnection)
+
+		// Integrations (per active store): status overview plus the
+		// credentials that used to be editable outside Developer Settings.
+		developerSettings.GET("/integrations", controllers.GetIntegrationsOverview)
+		developerSettings.GET("/integrations/ai", controllers.GetAIIntegration)
+		developerSettings.PUT("/integrations/ai", controllers.UpdateAIIntegration)
+		developerSettings.POST("/integrations/ai/test", controllers.TestAIIntegration)
+		developerSettings.POST("/integrations/ai/models", controllers.ListAIModels)
+		developerSettings.GET("/integrations/whatsapp-gateway", controllers.GetWhatsAppGatewayIntegration)
+		developerSettings.PUT("/integrations/whatsapp-gateway", controllers.UpdateWhatsAppGatewayIntegration)
 
 		// Nightly database maintenance (dead-tuple / bloat cleanup, IST schedule)
 		developerSettings.GET("/db-maintenance", controllers.GetDBMaintenanceSettingsHandler)
@@ -1152,6 +1191,8 @@ func SetupRoutes(r *gin.Engine) {
 
 	// Signed, expiring public invoice PDF link (WhatsApp document attachment)
 	r.GET("/api/v1/public/invoice-pdf/:token", controllers.PublicInvoicePDF)
+	// Signed, expiring public party statement PDF link (WhatsApp document attachment)
+	r.GET("/api/v1/public/party-statement-pdf/:token", middleware.RateLimitByIP(60, time.Minute), controllers.PublicPartyStatementPDF)
 
 	// Customer portal — public & customer session
 	portalPublic := r.Group("/api/v1/portal")

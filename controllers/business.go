@@ -174,13 +174,13 @@ func UpdateBusiness(c *gin.Context) {
 	fmt.Println("DEBUG: Business found:", business.ID)
 
 	updates := map[string]interface{}{
-		"logo_url":               input.LogoURL,
-		"logo_aspect_ratio":      normalizeLogoAspectRatio(input.LogoAspectRatio),
-		"signature_url":          input.SignatureURL,
-		"enable_aihsn_search":    input.EnableAIHSNSearch,
-		"enable_ai_bill_parsing": input.EnableAIBillParsing,
-		"allow_negative_stock":   input.AllowNegativeStock,
+		"logo_url":             input.LogoURL,
+		"logo_aspect_ratio":    normalizeLogoAspectRatio(input.LogoAspectRatio),
+		"signature_url":        input.SignatureURL,
+		"allow_negative_stock": input.AllowNegativeStock,
 	}
+	// AI toggles and the Gemini key are managed only through the super-admin
+	// Developer Settings → Integrations endpoints (UpdateAIIntegration).
 
 	// Seller identity fields are store-scoped: when a store is active they are
 	// written to the store so each store keeps its own address/GSTIN/PAN/
@@ -224,14 +224,6 @@ func UpdateBusiness(c *gin.Context) {
 	}
 	fmt.Println("DEBUG: Updates map created")
 
-	// Update Gemini API key only if provided and not masked
-	// Skip if it's the masked value from frontend (means user didn't change it)
-	if input.GeminiAPIKey != "" && input.GeminiAPIKey != "********" {
-		fmt.Println("DEBUG: Updating API key, length:", len(input.GeminiAPIKey))
-		updates["gemini_api_key"] = input.GeminiAPIKey
-		fmt.Println("DEBUG: API key updated successfully")
-	}
-
 	fmt.Println("DEBUG: About to update business with updates:", updates)
 	if err := utils.DB.Model(&business).Updates(updates).Error; err != nil {
 		fmt.Println("ERROR: Failed to update business:", err)
@@ -240,6 +232,9 @@ func UpdateBusiness(c *gin.Context) {
 	}
 	fmt.Println("DEBUG: Business updated successfully")
 
+	if business.GeminiAPIKey != "" {
+		business.GeminiAPIKey = "********"
+	}
 	c.JSON(http.StatusOK, business)
 }
 

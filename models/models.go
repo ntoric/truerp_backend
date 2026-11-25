@@ -215,9 +215,14 @@ type Business struct {
 	LabelGapHMM       float64 `json:"label_gap_h_mm" gorm:"column:label_gap_h_mm;default:2"`
 	LabelGapVMM       float64 `json:"label_gap_v_mm" gorm:"column:label_gap_v_mm;default:0"`
 	// AI HSN search settings
-	EnableAIHSNSearch   bool   `json:"enable_ai_hsn_search" gorm:"column:enable_aihsn_search;default:false"`
-	EnableAIBillParsing bool   `json:"enable_ai_bill_parsing" gorm:"default:false"`
-	GeminiAPIKey        string `json:"gemini_api_key"`
+	EnableAIHSNSearch   bool `json:"enable_ai_hsn_search" gorm:"column:enable_aihsn_search;default:false"`
+	EnableAIBillParsing bool `json:"enable_ai_bill_parsing" gorm:"default:false"`
+	// Legacy Gemini key (plaintext). Superseded by AIProviderConfig; read as
+	// a fallback for the gemini provider and cleared once a key is saved there.
+	GeminiAPIKey string `json:"gemini_api_key"`
+	// AIProvider is the store's active AI provider: gemini, openai,
+	// anthropic, openrouter or ollama. Configured in Developer Settings.
+	AIProvider string `json:"ai_provider" gorm:"column:ai_provider;default:'gemini'"`
 	// POS/billing: allow selling items even when stock reaches zero or below
 	AllowNegativeStock bool           `json:"allow_negative_stock" gorm:"default:false"`
 	CreatedAt          time.Time      `json:"created_at"`
@@ -267,12 +272,16 @@ type Invoice struct {
 	LoyaltyDiscount       float64            `json:"loyalty_discount" gorm:"default:0"`
 	// Cash-mode loyalty: ₹ cashback credited to / redeemed from the customer's
 	// loyalty cash wallet on this invoice (see LoyaltySettings.RewardType).
-	LoyaltyCashEarned   float64        `json:"loyalty_cash_earned" gorm:"default:0"`
-	LoyaltyCashRedeemed float64        `json:"loyalty_cash_redeemed" gorm:"default:0"`
-	PaymentMode         string         `json:"payment_mode"`
-	BankAccountID       *uuid.UUID     `json:"bank_account_id,omitempty" gorm:"type:uuid;index"`
-	PaymentSplits       []PaymentSplit `json:"payment_splits,omitempty" gorm:"-"`
-	Notes               string         `json:"notes"`
+	LoyaltyCashEarned   float64 `json:"loyalty_cash_earned" gorm:"default:0"`
+	LoyaltyCashRedeemed float64 `json:"loyalty_cash_redeemed" gorm:"default:0"`
+	// LoyaltyReversed is true while this invoice's earned/redeemed loyalty
+	// has been reversed (it was cancelled); reinstating clears it. Guards
+	// against reversing or re-applying twice.
+	LoyaltyReversed bool           `json:"loyalty_reversed" gorm:"default:false"`
+	PaymentMode     string         `json:"payment_mode"`
+	BankAccountID   *uuid.UUID     `json:"bank_account_id,omitempty" gorm:"type:uuid;index"`
+	PaymentSplits   []PaymentSplit `json:"payment_splits,omitempty" gorm:"-"`
+	Notes           string         `json:"notes"`
 	// SourceURL is the original external invoice link (e.g. myBillBook
 	// https://mybillbook.in/csi/<id>). Populated during migration import so
 	// the source document can be re-opened later. Kept out of Notes so it is
@@ -1327,11 +1336,15 @@ type Party struct {
 	LoyaltyCash    float64   `json:"loyalty_cash" gorm:"default:0"` // ₹ cashback wallet (cash-mode loyalty)
 	// LoyaltyExcluded keeps the customer out of the loyalty program: no
 	// earning and no redemption. Existing balances are kept, untouched.
-	LoyaltyExcluded bool           `json:"loyalty_excluded" gorm:"default:false"`
-	IsActive        bool           `json:"is_active" gorm:"default:true"`
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at"`
-	DeletedAt       gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+	LoyaltyExcluded bool `json:"loyalty_excluded" gorm:"default:false"`
+	// TelegramChatID is set when the customer opens the store's Telegram bot
+	// through the party's link and presses Start (see TelegramSettings).
+	TelegramChatID   string         `json:"telegram_chat_id"`
+	TelegramLinkedAt *time.Time     `json:"telegram_linked_at,omitempty"`
+	IsActive         bool           `json:"is_active" gorm:"default:true"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+	DeletedAt        gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 type LoyaltySettings struct {
@@ -3073,14 +3086,18 @@ type SaleDiscountSettings struct {
 	// When false, every discount input (line discounts, invoice-level
 	// discounts, payment in/out discounts, product default discounts) is
 	// hidden from the UI — only the dedicated Discount page stays reachable.
-	IsEnabled     bool           `json:"is_enabled" gorm:"default:true"`
-	Mode          string         `json:"mode" gorm:"default:'manual'"`           // manual, auto
-	DiscountType  string         `json:"discount_type" gorm:"default:'percent'"` // percent, amount
-	DiscountValue float64        `json:"discount_value" gorm:"default:0"`
-	MinSaleAmount float64        `json:"min_sale_amount" gorm:"default:0"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
-	DeletedAt     gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+	IsEnabled     bool    `json:"is_enabled" gorm:"default:true"`
+	Mode          string  `json:"mode" gorm:"default:'manual'"`           // manual, auto
+	DiscountType  string  `json:"discount_type" gorm:"default:'percent'"` // percent, amount
+	DiscountValue float64 `json:"discount_value" gorm:"default:0"`
+	MinSaleAmount float64 `json:"min_sale_amount" gorm:"default:0"`
+	// MaxDiscountAmount caps the invoice-level discount a single sale may
+	// carry (manual entry and auto rule alike). 0 means no cap. Only super
+	// admins can change it.
+	MaxDiscountAmount float64        `json:"max_discount_amount" gorm:"default:0"`
+	CreatedAt         time.Time      `json:"created_at"`
+	UpdatedAt         time.Time      `json:"updated_at"`
+	DeletedAt         gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }
 
 // DailyReportEmailSettings stores per-user configuration for automatically
@@ -3088,15 +3105,18 @@ type SaleDiscountSettings struct {
 // One row per user (UserID is unique). The scheduler reads these rows and
 // sends the configured report PDF at the configured time each day.
 type DailyReportEmailSettings struct {
-	ID              uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
-	IsEnabled       bool           `json:"is_enabled" gorm:"default:false"`
-	RecipientEmails string         `json:"recipient_emails" gorm:"type:text"` // comma/newline separated
-	Period          string         `json:"period" gorm:"default:'daily'"`     // today, daily, weekly, monthly
-	SendTime        string         `json:"send_time" gorm:"default:'09:00'"`  // HH:MM (24h, server local)
-	Subject         string         `json:"subject"`                           // optional custom subject
-	LastSentAt      *time.Time     `json:"last_sent_at,omitempty"`            // any send (manual or scheduled)
-	LastSentStatus  string         `json:"last_sent_status"`                  // success, partial, failed
+	ID              uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID          uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
+	IsEnabled       bool      `json:"is_enabled" gorm:"default:false"`
+	RecipientEmails string    `json:"recipient_emails" gorm:"type:text"` // comma/newline separated
+	// SendTelegram also delivers the report PDF to the store's Telegram
+	// owner chats (TelegramSettings.OwnerChatIDs).
+	SendTelegram    bool           `json:"send_telegram" gorm:"default:false"`
+	Period          string         `json:"period" gorm:"default:'daily'"`    // today, daily, weekly, monthly
+	SendTime        string         `json:"send_time" gorm:"default:'09:00'"` // HH:MM (24h, server local)
+	Subject         string         `json:"subject"`                          // optional custom subject
+	LastSentAt      *time.Time     `json:"last_sent_at,omitempty"`           // any send (manual or scheduled)
+	LastSentStatus  string         `json:"last_sent_status"`                 // success, partial, failed
 	LastSentError   string         `json:"last_sent_error,omitempty"`
 	LastScheduledAt *time.Time     `json:"last_scheduled_at,omitempty" gorm:"index"` // scheduler sends only
 	CreatedAt       time.Time      `json:"created_at"`
@@ -3108,10 +3128,13 @@ type DailyReportEmailSettings struct {
 // automatically emailing the Party Balance Report PDF (opening/closing balance
 // of every party with a non-zero balance) at a scheduled time each day.
 type PartyBalanceReportEmailSettings struct {
-	ID              uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
-	UserID          uuid.UUID      `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
-	IsEnabled       bool           `json:"is_enabled" gorm:"default:false"`
-	RecipientEmails string         `json:"recipient_emails" gorm:"type:text"` // comma/newline separated
+	ID              uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID          uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
+	IsEnabled       bool      `json:"is_enabled" gorm:"default:false"`
+	RecipientEmails string    `json:"recipient_emails" gorm:"type:text"` // comma/newline separated
+	// SendTelegram also delivers the report PDF to the store's Telegram
+	// owner chats (TelegramSettings.OwnerChatIDs).
+	SendTelegram    bool           `json:"send_telegram" gorm:"default:false"`
 	ReportDay       string         `json:"report_day" gorm:"default:'today'"` // today, previous_day
 	PartyType       string         `json:"party_type" gorm:"default:'all'"`   // all, customer, vendor
 	SendTime        string         `json:"send_time" gorm:"default:'21:00'"`  // HH:MM (24h, configured timezone)
@@ -3361,4 +3384,162 @@ type WhatsAppInvoiceLog struct {
 	Error         string    `json:"error" gorm:"type:text"`
 	Response      string    `json:"response" gorm:"type:text"`
 	CreatedAt     time.Time `json:"created_at" gorm:"index"`
+}
+
+// TelegramSettings is a store's own Telegram bot (created with @BotFather)
+// used to send invoices and balance statements to customers, and invoice
+// alerts and scheduled reports to the store owner. One row per store-owner
+// scope (user_id). A Telegram bot cannot message anyone by phone number: a
+// customer is linked once by opening t.me/<bot>?start=<party code> and
+// pressing Start, which stores their chat ID on the party; owners link their
+// own chat the same way with the owner link. Updates are read by polling
+// getUpdates, so no public URL or webhook is needed.
+type TelegramSettings struct {
+	ID      uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID  uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
+	Enabled bool      `json:"enabled" gorm:"default:false"` // master switch for every Telegram send
+	// EncryptedBotToken is the BotFather token, AES-encrypted; never returned.
+	EncryptedBotToken string `json:"-" gorm:"column:bot_token;type:text"`
+	BotUsername       string `json:"bot_username"` // resolved via getMe, without the @
+	BotName           string `json:"bot_name"`
+	// Invoice to customer, sent automatically after a sale.
+	SendInvoiceToCustomer bool `json:"send_invoice_to_customer" gorm:"default:true"`
+	SendForPOS            bool `json:"send_for_pos" gorm:"default:true"`
+	SendForNonPOS         bool `json:"send_for_non_pos" gorm:"default:true"`
+	// Store owner alerts: one message (with PDF) per new invoice to OwnerChatIDs.
+	NotifyOwnerOnInvoice bool `json:"notify_owner_on_invoice" gorm:"default:false"`
+	// OwnerChatIDs receive owner alerts and scheduled reports (comma separated).
+	OwnerChatIDs string `json:"owner_chat_ids" gorm:"type:text"`
+	// LastUpdateID is the getUpdates offset bookkeeping for the link poller.
+	LastUpdateID int64  `json:"-" gorm:"default:0"`
+	PollError    string `json:"poll_error" gorm:"type:text"` // last getUpdates error, shown in settings
+
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// TelegramMessageLog records each Telegram send attempt (party statements are
+// logged in PartyStatementLog with channel "telegram" instead).
+type TelegramMessageLog struct {
+	ID        uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID    uuid.UUID  `json:"user_id" gorm:"type:uuid;not null;index"`
+	Kind      string     `json:"kind"` // invoice_customer, invoice_owner, daily_report, party_balance_report, test
+	RefID     *uuid.UUID `json:"ref_id,omitempty" gorm:"type:uuid;index"`
+	Reference string     `json:"reference"` // invoice number / report name
+	PartyName string     `json:"party_name"`
+	ChatID    string     `json:"chat_id"`
+	Trigger   string     `json:"trigger"` // auto, manual, scheduled, test
+	Status    string     `json:"status"`  // sent, failed, skipped
+	Error     string     `json:"error" gorm:"type:text"`
+	CreatedAt time.Time  `json:"created_at" gorm:"index"`
+}
+
+// PartyStatementSettings configures sending a party's balance summary with
+// the detailed periodic statement PDF (balance reminder). Channel-agnostic:
+// the WhatsApp section reuses the store's WhatsApp gateway credentials from
+// WhatsAppInvoiceSettings and only adds the statement's own template; Telegram
+// and email get their own sections here later.
+type PartyStatementSettings struct {
+	ID     uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex"`
+	// DefaultPeriod preselects the statement period in the send dialogs:
+	// this_week, previous_week, this_month, previous_month, last_n_days,
+	// this_quarter, this_fy, …
+	DefaultPeriod string `json:"default_period" gorm:"default:'previous_month'"`
+	// DefaultPeriodDays is N for the last_n_days period.
+	DefaultPeriodDays int `json:"default_period_days" gorm:"default:30"`
+
+	// WhatsAppMessageID is the approved statement template's name, or the
+	// Twilio Content SID (HX...).
+	WhatsAppMessageID string `json:"whatsapp_message_id"`
+	// WhatsAppLanguageCode overrides the invoice template's language; empty =
+	// use the invoice template's language.
+	WhatsAppLanguageCode string `json:"whatsapp_language_code"`
+	// WhatsAppVariableMapping: comma-separated statement field keys; position
+	// N fills template variable {{N}}. See partyStatementFields.
+	WhatsAppVariableMapping string `json:"whatsapp_variable_mapping"`
+	// WhatsAppTemplateBody is a preview-only copy of the approved body.
+	WhatsAppTemplateBody string `json:"whatsapp_template_body" gorm:"type:text"`
+	// WhatsAppAttachPDF sends the statement PDF as the document header (for
+	// Twilio, via the media URL variable mapped to statement_pdf_file).
+	WhatsAppAttachPDF bool `json:"whatsapp_attach_pdf" gorm:"default:true"`
+
+	// TelegramMessage is the text sent with the statement PDF on Telegram,
+	// with {field} placeholders (see partyStatementFields). Empty = default.
+	TelegramMessage string `json:"telegram_message" gorm:"type:text"`
+
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+}
+
+// PartyStatementLog records each party statement send attempt on any channel.
+type PartyStatementLog struct {
+	ID             uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID         uuid.UUID `json:"user_id" gorm:"type:uuid;not null;index"`
+	PartyID        uuid.UUID `json:"party_id" gorm:"type:uuid;index"`
+	PartyName      string    `json:"party_name"`
+	Channel        string    `json:"channel"`   // whatsapp, telegram
+	Recipient      string    `json:"recipient"` // phone / chat id / email
+	FromDate       string    `json:"from_date"`
+	ToDate         string    `json:"to_date"`
+	OpeningBalance float64   `json:"opening_balance"`
+	ClosingBalance float64   `json:"closing_balance"`
+	Trigger        string    `json:"trigger"` // manual, bulk, test
+	Status         string    `json:"status"`  // sent, failed, skipped
+	RequestID      string    `json:"request_id"`
+	Error          string    `json:"error" gorm:"type:text"`
+	Response       string    `json:"response" gorm:"type:text"`
+	CreatedAt      time.Time `json:"created_at" gorm:"index"`
+}
+
+// PartyStatementExclusion marks a party that bulk sends and schedules must
+// not send statements to (e.g. a disputed or settled account). A statement
+// sent to that one party by hand still goes.
+type PartyStatementExclusion struct {
+	ID        uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID    uuid.UUID `json:"user_id" gorm:"type:uuid;not null;uniqueIndex:idx_party_statement_exclusion"`
+	PartyID   uuid.UUID `json:"party_id" gorm:"type:uuid;not null;uniqueIndex:idx_party_statement_exclusion"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// PartyStatementSchedule sends party balance statements automatically: once
+// at a date, or daily / weekly / monthly at SendTime in the store's timezone.
+// The statement period is a preset resolved relative to each run (e.g.
+// previous_month on the 1st). Recipients are fixed PartyIDs or, when empty,
+// every party matching the filters at run time.
+type PartyStatementSchedule struct {
+	ID        uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:(uuid_generate_v4())"`
+	UserID    uuid.UUID `json:"user_id" gorm:"type:uuid;not null;index"`
+	Name      string    `json:"name"`
+	IsEnabled bool      `json:"is_enabled" gorm:"default:true"`
+	Channel   string    `json:"channel" gorm:"default:'whatsapp'"`
+
+	Frequency  string `json:"frequency"`                        // once, daily, weekly, monthly
+	RunDate    string `json:"run_date"`                         // once: YYYY-MM-DD
+	Weekday    int    `json:"weekday"`                          // weekly: 0=Sunday … 6=Saturday
+	DayOfMonth int    `json:"day_of_month"`                     // monthly: 1–28, 0 = last day
+	SendTime   string `json:"send_time" gorm:"default:'10:00'"` // HH:MM (24h, store timezone)
+
+	Period     string `json:"period"`      // statement period preset, or custom (once only)
+	PeriodDays int    `json:"period_days"` // N for last_n_days
+	FromDate   string `json:"from_date"`   // custom period start
+	ToDate     string `json:"to_date"`     // custom period end
+
+	PartyIDs           string `json:"party_ids" gorm:"type:text"` // comma-separated; empty = use filters
+	PartyType          string `json:"party_type"`                 // customer, vendor, "" = all
+	Category           string `json:"category"`
+	Balance            string `json:"balance"` // to_collect, to_pay, "" = all
+	Search             string `json:"search"`
+	IncludeZeroBalance bool   `json:"include_zero_balance"`
+
+	NextRunAt      *time.Time `json:"next_run_at,omitempty" gorm:"index"`
+	LastRunAt      *time.Time `json:"last_run_at,omitempty"`
+	LastRunStatus  string     `json:"last_run_status"` // success, partial, failed
+	LastRunSummary string     `json:"last_run_summary"`
+
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
 }

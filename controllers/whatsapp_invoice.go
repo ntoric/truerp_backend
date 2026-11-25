@@ -296,7 +296,12 @@ func buildWhatsAppInvoiceSettingsResponse(c *gin.Context, s models.WhatsAppInvoi
 	}
 	superAdmin := isSuperAdminRequest(c)
 	if !superAdmin {
+		// Gateway credentials are super-admin only (Developer Settings →
+		// Integrations); other roles just see whether they are set.
 		s.PhoneNumberID = ""
+		s.AccountSID = ""
+		hint = ""
+		phoneHint = ""
 	}
 	return whatsAppInvoiceSettingsResponse{
 		WhatsAppInvoiceSettings: s,
@@ -329,13 +334,11 @@ func UpdateWhatsAppInvoiceSettings(c *gin.Context) {
 	userID := c.MustGet("user_id").(uuid.UUID)
 
 	var input struct {
+		// Gateway credentials (provider, API key, sender, Account SID) are
+		// managed only in Developer Settings → Integrations (super admin);
+		// any such fields sent here are ignored.
 		Enabled          bool    `json:"enabled"`
-		Provider         string  `json:"provider"`
-		APIKey           *string `json:"api_key"` // nil/"" = keep existing
-		ClearAPIKey      bool    `json:"clear_api_key"`
 		MessageID        string  `json:"message_id"`
-		PhoneNumberID    *string `json:"phone_number_id"` // nil/"" = keep existing
-		AccountSID       *string `json:"account_sid"`     // nil = keep existing
 		LanguageCode     string  `json:"language_code"`
 		VariableMapping  string  `json:"variable_mapping"`
 		StoreDisplayName string  `json:"store_display_name"`
@@ -381,26 +384,9 @@ func UpdateWhatsAppInvoiceSettings(c *gin.Context) {
 		languageCode = "en"
 	}
 
-	provider := strings.ToLower(strings.TrimSpace(input.Provider))
-	if provider == "" {
-		provider = whatsAppProviderCloud
-	}
-	if !isKnownWhatsAppProvider(provider) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Unsupported WhatsApp provider %q", input.Provider)})
-		return
-	}
-
 	s, exists := loadWhatsAppInvoiceSettings(userID)
-	providerChanged := exists && s.Provider != provider
 	s.Enabled = input.Enabled
-	s.Provider = provider
 	s.MessageID = strings.TrimSpace(input.MessageID)
-	if input.PhoneNumberID != nil && strings.TrimSpace(*input.PhoneNumberID) != "" {
-		s.PhoneNumberID = strings.TrimSpace(*input.PhoneNumberID)
-	}
-	if input.AccountSID != nil {
-		s.AccountSID = strings.TrimSpace(*input.AccountSID)
-	}
 	s.LanguageCode = languageCode
 	s.VariableMapping = mapping
 	s.StoreDisplayName = strings.TrimSpace(input.StoreDisplayName)
@@ -454,22 +440,8 @@ func UpdateWhatsAppInvoiceSettings(c *gin.Context) {
 		s.PDFLinkTTLMinutes = ttl
 	}
 
-	// A Meta token is useless for Fast2SMS and vice versa, so switching
-	// provider without supplying a new secret drops the old one.
-	newKey := input.APIKey != nil && strings.TrimSpace(*input.APIKey) != ""
-	if input.ClearAPIKey || (providerChanged && !newKey) {
-		s.EncryptedAPIKey = ""
-	} else if input.APIKey != nil && strings.TrimSpace(*input.APIKey) != "" {
-		enc, err := utils.Encrypt(strings.TrimSpace(*input.APIKey))
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encrypt API key"})
-			return
-		}
-		s.EncryptedAPIKey = enc
-	}
-
 	if s.Enabled {
-		if msg := whatsAppInvoiceEnableError(s, providerChanged); msg != "" {
+		if msg := whatsAppInvoiceEnableError(s, false); msg != "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": msg})
 			return
 		}
@@ -798,36 +770,11 @@ func sendInvoiceWhatsApp(userID, invoiceID uuid.UUID, trigger, overridePhone str
 		return finish("sent", nil)
 	}
 
-	template := map[string]interface{}{
-		"name":     s.MessageID,
-		"language": map[string]interface{}{"code": s.LanguageCode},
-	}
-	var components []map[string]interface{}
+	docLink := ""
 	if s.AttachPDF {
-		components = append(components, map[string]interface{}{
-			"type": "header",
-			"parameters": []map[string]interface{}{
-				{"type": "document", "document": map[string]interface{}{"link": pdfURL, "filename": invoicePDFFilename(invoice.InvoiceNumber)}},
-			},
-		})
+		docLink = pdfURL
 	}
-	if len(vars) > 0 {
-		params := make([]map[string]interface{}, 0, len(vars))
-		for _, v := range vars {
-			params = append(params, map[string]interface{}{"type": "text", "text": v})
-		}
-		components = append(components, map[string]interface{}{"type": "body", "parameters": params})
-	}
-	if len(components) > 0 {
-		template["components"] = components
-	}
-	payload := map[string]interface{}{
-		"messaging_product": "whatsapp",
-		"recipient_type":    "individual",
-		"to":                phone,
-		"type":              "template",
-		"template":          template,
-	}
+	payload := buildWhatsAppTemplatePayload(phone, s.MessageID, s.LanguageCode, docLink, invoicePDFFilename(invoice.InvoiceNumber), vars)
 
 	requestID, body, err := callWhatsAppAPI(s.Provider, s.PhoneNumberID, accessToken, payload)
 	entry.RequestID = requestID
@@ -871,16 +818,57 @@ func whatsAppInvoiceValues(inv *models.Invoice, business *models.Business, s mod
 		"invoice_pdf_url":  "",
 		"invoice_pdf_file": "",
 	}
+	sanitizeWhatsAppValues(values)
+	return values
+}
+
+// sanitizeWhatsAppValues makes every value a valid template parameter:
+// WhatsApp rejects empty parameters and body text containing newlines or tabs.
+func sanitizeWhatsAppValues(values map[string]string) {
+	repl := strings.NewReplacer("\n", " ", "\r", " ", "\t", " ")
 	for k, v := range values {
-		// WhatsApp rejects empty template parameters and body text containing
-		// newlines or tabs.
-		v = strings.NewReplacer("\n", " ", "\r", " ", "\t", " ").Replace(strings.TrimSpace(v))
+		v = repl.Replace(strings.TrimSpace(v))
 		if v == "" {
 			v = "-"
 		}
 		values[k] = v
 	}
-	return values
+}
+
+// buildWhatsAppTemplatePayload builds the Meta-format template message sent to
+// the Cloud API and Fast2SMS. docLink, when set, fills the template's Document
+// header; vars fill the body's {{1}}, {{2}}… in order.
+func buildWhatsAppTemplatePayload(phone, templateName, languageCode, docLink, docFilename string, vars []string) map[string]interface{} {
+	template := map[string]interface{}{
+		"name":     templateName,
+		"language": map[string]interface{}{"code": languageCode},
+	}
+	var components []map[string]interface{}
+	if docLink != "" {
+		components = append(components, map[string]interface{}{
+			"type": "header",
+			"parameters": []map[string]interface{}{
+				{"type": "document", "document": map[string]interface{}{"link": docLink, "filename": docFilename}},
+			},
+		})
+	}
+	if len(vars) > 0 {
+		params := make([]map[string]interface{}, 0, len(vars))
+		for _, v := range vars {
+			params = append(params, map[string]interface{}{"type": "text", "text": v})
+		}
+		components = append(components, map[string]interface{}{"type": "body", "parameters": params})
+	}
+	if len(components) > 0 {
+		template["components"] = components
+	}
+	return map[string]interface{}{
+		"messaging_product": "whatsapp",
+		"recipient_type":    "individual",
+		"to":                phone,
+		"type":              "template",
+		"template":          template,
+	}
 }
 
 // formatINRAmount renders 123456.5 as "1,23,456.50" (Indian grouping).
@@ -948,6 +936,39 @@ func invoicePDFFilename(invoiceNumber string) string {
 		}
 	}, invoiceNumber)
 	return "Invoice_" + name + ".pdf"
+}
+
+// invoiceDownloadFilename names a downloaded invoice PDF after both the
+// invoice number and the party, e.g. "Invoice_INV-0042_Acme_Traders.pdf".
+// Falls back to fallbackID when the invoice number is empty, and omits the
+// party segment when the party has no name.
+func invoiceDownloadFilename(invoiceNumber, partyName, fallbackID string) string {
+	clean := func(v string) string {
+		v = strings.Map(func(r rune) rune {
+			switch {
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+				return r
+			default:
+				return '_'
+			}
+		}, strings.TrimSpace(v))
+		for strings.Contains(v, "__") {
+			v = strings.ReplaceAll(v, "__", "_")
+		}
+		return strings.Trim(v, "_")
+	}
+	number := clean(invoiceNumber)
+	if number == "" {
+		number = clean(fallbackID)
+	}
+	name := "Invoice_" + number
+	if party := clean(partyName); party != "" {
+		if len(party) > 60 {
+			party = strings.Trim(party[:60], "_")
+		}
+		name += "_" + party
+	}
+	return name + ".pdf"
 }
 
 func truncateWALog(s string, n int) string {

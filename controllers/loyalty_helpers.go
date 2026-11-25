@@ -379,74 +379,119 @@ func applyLoyaltyForInvoice(tx *gorm.DB, userID uuid.UUID, party *models.Party, 
 	}).Error
 }
 
-func reverseLoyaltyForInvoice(tx *gorm.DB, userID uuid.UUID, party *models.Party, invoice *models.Invoice) error {
-	if party == nil || invoice == nil {
+// reverseLoyaltyForInvoice undoes what an invoice did to the customer's
+// loyalty balances: earned points/cashback are taken back and redeemed
+// points/cashback are given back. action ("deletion", "cancellation") goes
+// into the ledger notes. Invoices already reversed (cancelled, then deleted)
+// are left alone. The balance may go negative when the customer already
+// spent what this invoice earned; that is the honest position and blocks
+// redemption until new earnings cover it.
+func reverseLoyaltyForInvoice(tx *gorm.DB, userID uuid.UUID, party *models.Party, invoice *models.Invoice, action string) error {
+	if party == nil || invoice == nil || party.ID == uuid.Nil || invoice.LoyaltyReversed {
 		return nil
 	}
-	// Reverse based on what the invoice recorded, not the current reward type,
-	// so switching modes later still reverses old invoices correctly.
-	if err := reverseLoyaltyCashForInvoice(tx, userID, party, invoice); err != nil {
-		return err
-	}
-	if invoice.LoyaltyPointsRedeemed == 0 && invoice.LoyaltyPointsEarned == 0 {
+	if invoice.LoyaltyPointsEarned == 0 && invoice.LoyaltyPointsRedeemed == 0 &&
+		invoice.LoyaltyCashEarned == 0 && invoice.LoyaltyCashRedeemed == 0 {
 		return nil
 	}
-
-	balance := party.LoyaltyPoints
-	if invoice.LoyaltyPointsEarned > 0 {
-		balance -= invoice.LoyaltyPointsEarned
-		if err := recordLoyaltyTransaction(
-			tx, userID, party.ID, "adjust", -invoice.LoyaltyPointsEarned, balance,
-			"invoice", &invoice.ID, invoice.InvoiceNumber, "Reversed earned points on invoice deletion",
-		); err != nil {
-			return err
-		}
-	}
-	if invoice.LoyaltyPointsRedeemed > 0 {
-		balance += invoice.LoyaltyPointsRedeemed
-		if err := recordLoyaltyTransaction(
-			tx, userID, party.ID, "adjust", invoice.LoyaltyPointsRedeemed, balance,
-			"invoice", &invoice.ID, invoice.InvoiceNumber, "Restored redeemed points on invoice deletion",
-		); err != nil {
-			return err
-		}
-	}
-
-	if err := tx.Model(party).Update("loyalty_points", balance).Error; err != nil {
+	if err := postInvoiceLoyalty(tx, userID, party, invoice, -1,
+		"adjust", "Reversed earned points on invoice "+action, "Reversed earned cashback on invoice "+action,
+		"adjust", "Restored redeemed points on invoice "+action, "Restored redeemed cashback on invoice "+action); err != nil {
 		return err
 	}
-	party.LoyaltyPoints = balance
+	invoice.LoyaltyReversed = true
+	return tx.Model(&models.Invoice{}).Where("id = ?", invoice.ID).Update("loyalty_reversed", true).Error
+}
+
+// reinstateLoyaltyForInvoice re-applies a reversed invoice's recorded
+// loyalty when the invoice is reinstated: redeemed points/cashback are taken
+// again and earned points/cashback are credited again.
+func reinstateLoyaltyForInvoice(tx *gorm.DB, userID uuid.UUID, party *models.Party, invoice *models.Invoice) error {
+	if party == nil || invoice == nil || party.ID == uuid.Nil || !invoice.LoyaltyReversed {
+		return nil
+	}
+	const note = " on invoice reinstatement"
+	if err := postInvoiceLoyalty(tx, userID, party, invoice, 1,
+		"earn", "Earned points re-credited"+note, "Earned cashback re-credited"+note,
+		"redeem", "Redeemed points re-applied"+note, "Redeemed cashback re-applied"+note); err != nil {
+		return err
+	}
+	invoice.LoyaltyReversed = false
+	return tx.Model(&models.Invoice{}).Where("id = ?", invoice.ID).Update("loyalty_reversed", false).Error
+}
+
+// postInvoiceLoyalty books an invoice's recorded earn and redeem amounts
+// against the customer's balances: sign +1 applies them as the original sale
+// did (earn credited, redeem debited), -1 reverses them.
+func postInvoiceLoyalty(tx *gorm.DB, userID uuid.UUID, party *models.Party, invoice *models.Invoice, sign int,
+	earnType, earnPointsNote, earnCashNote, redeemType, redeemPointsNote, redeemCashNote string) error {
+	if invoice.LoyaltyPointsEarned != 0 || invoice.LoyaltyPointsRedeemed != 0 {
+		balance := party.LoyaltyPoints
+		if v := invoice.LoyaltyPointsEarned; v > 0 {
+			balance += int64(sign) * v
+			if err := recordLoyaltyTransaction(tx, userID, party.ID, earnType, int64(sign)*v, balance,
+				"invoice", &invoice.ID, invoice.InvoiceNumber, earnPointsNote); err != nil {
+				return err
+			}
+		}
+		if v := invoice.LoyaltyPointsRedeemed; v > 0 {
+			balance -= int64(sign) * v
+			if err := recordLoyaltyTransaction(tx, userID, party.ID, redeemType, -int64(sign)*v, balance,
+				"invoice", &invoice.ID, invoice.InvoiceNumber, redeemPointsNote); err != nil {
+				return err
+			}
+		}
+		if err := tx.Model(party).Update("loyalty_points", balance).Error; err != nil {
+			return err
+		}
+		party.LoyaltyPoints = balance
+	}
+	if invoice.LoyaltyCashEarned != 0 || invoice.LoyaltyCashRedeemed != 0 {
+		balance := party.LoyaltyCash
+		f := float64(sign)
+		if v := invoice.LoyaltyCashEarned; v > 0 {
+			balance = roundMoney(balance + f*v)
+			if err := recordLoyaltyCashTransaction(tx, userID, party.ID, earnType, f*v, balance,
+				"invoice", &invoice.ID, invoice.InvoiceNumber, earnCashNote); err != nil {
+				return err
+			}
+		}
+		if v := invoice.LoyaltyCashRedeemed; v > 0 {
+			balance = roundMoney(balance - f*v)
+			if err := recordLoyaltyCashTransaction(tx, userID, party.ID, redeemType, -f*v, balance,
+				"invoice", &invoice.ID, invoice.InvoiceNumber, redeemCashNote); err != nil {
+				return err
+			}
+		}
+		if err := tx.Model(party).Update("loyalty_cash", balance).Error; err != nil {
+			return err
+		}
+		party.LoyaltyCash = balance
+	}
 	return nil
 }
 
-func reverseLoyaltyCashForInvoice(tx *gorm.DB, userID uuid.UUID, party *models.Party, invoice *models.Invoice) error {
-	if invoice.LoyaltyCashEarned == 0 && invoice.LoyaltyCashRedeemed == 0 {
+// syncInvoiceLoyaltyOnStatusChange reverses an invoice's loyalty when it is
+// cancelled and re-applies it when a cancelled invoice is reinstated.
+func syncInvoiceLoyaltyOnStatusChange(db *gorm.DB, userID uuid.UUID, invoice *models.Invoice, prevStatus string) error {
+	cancelling := prevStatus != "cancelled" && invoice.Status == "cancelled"
+	reinstating := prevStatus == "cancelled" && invoice.Status != "cancelled"
+	if (!cancelling && !reinstating) || invoice.PartyID == uuid.Nil {
 		return nil
 	}
-	balance := party.LoyaltyCash
-	if invoice.LoyaltyCashEarned > 0 {
-		balance = roundMoney(balance - invoice.LoyaltyCashEarned)
-		if err := recordLoyaltyCashTransaction(
-			tx, userID, party.ID, "adjust", -invoice.LoyaltyCashEarned, balance,
-			"invoice", &invoice.ID, invoice.InvoiceNumber, "Reversed earned cashback on invoice deletion",
-		); err != nil {
+	return db.Transaction(func(tx *gorm.DB) error {
+		var party models.Party
+		if err := tx.Where("user_id = ? AND id = ?", userID, invoice.PartyID).First(&party).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
 			return err
 		}
-	}
-	if invoice.LoyaltyCashRedeemed > 0 {
-		balance = roundMoney(balance + invoice.LoyaltyCashRedeemed)
-		if err := recordLoyaltyCashTransaction(
-			tx, userID, party.ID, "adjust", invoice.LoyaltyCashRedeemed, balance,
-			"invoice", &invoice.ID, invoice.InvoiceNumber, "Restored redeemed cashback on invoice deletion",
-		); err != nil {
-			return err
+		if cancelling {
+			return reverseLoyaltyForInvoice(tx, userID, &party, invoice, "cancellation")
 		}
-	}
-	if err := tx.Model(party).Update("loyalty_cash", balance).Error; err != nil {
-		return err
-	}
-	party.LoyaltyCash = balance
-	return nil
+		return reinstateLoyaltyForInvoice(tx, userID, &party, invoice)
+	})
 }
 
 // AdjustPartyLoyaltyCash manually credits (positive) or debits (negative) the
