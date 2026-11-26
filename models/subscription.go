@@ -50,6 +50,13 @@ type StoreSubscription struct {
 	Status    string `json:"status" gorm:"not null;default:'active';index"`
 	AutoRenew bool   `json:"auto_renew"`
 
+	// IsComplimentary gives the plan free of charge: cycles up to
+	// ComplimentaryUntilCycle (0 = every cycle) are created at no cost. Later
+	// cycles bill at Price, the regular price.
+	IsComplimentary         bool   `json:"is_complimentary" gorm:"index"`
+	ComplimentaryUntilCycle int    `json:"complimentary_until_cycle"`
+	ComplimentaryReason     string `json:"complimentary_reason"`
+
 	// AnchorDate is the first day of the first cycle; cycle N runs from
 	// anchor + (N-1) periods, clamped to month end (Jan 31 → Feb 28 → Mar 31).
 	AnchorDate         string `json:"anchor_date" gorm:"not null"`
@@ -83,9 +90,17 @@ type SubscriptionCycle struct {
 	PaymentStatus string     `json:"payment_status" gorm:"not null;default:'unpaid'"`
 	PaidAt        *time.Time `json:"paid_at,omitempty"`
 	// Source: initial, auto_renewal, prepaid or reactivation.
-	Source    string    `json:"source" gorm:"default:'initial'"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Source string `json:"source" gorm:"default:'initial'"`
+	// Complimentary cycles are free; WaivedAmount is the regular price that
+	// was not charged (shown as the value given away).
+	Complimentary bool    `json:"complimentary"`
+	WaivedAmount  float64 `json:"waived_amount"`
+	// Every cycle is invoiced: InvoiceNumber is assigned on create
+	// (PREFIX-YYYY-00001) and InvoiceDate is the billing date (YYYY-MM-DD).
+	InvoiceNumber string    `json:"invoice_number" gorm:"index"`
+	InvoiceDate   string    `json:"invoice_date"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // SubscriptionPayment is a manually recorded payment against a cycle.
@@ -98,10 +113,12 @@ type SubscriptionPayment struct {
 	Amount         float64   `json:"amount" gorm:"not null"`
 	PaymentDate    string    `json:"payment_date" gorm:"not null"` // YYYY-MM-DD
 	// Method: cash, upi, bank_transfer, card, cheque, other.
-	Method      string    `json:"method" gorm:"default:'bank_transfer'"`
-	Reference   string    `json:"reference"`
-	Notes       string    `json:"notes" gorm:"type:text"`
-	CreatedByID uuid.UUID `json:"created_by_id" gorm:"type:uuid"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Method    string `json:"method" gorm:"default:'bank_transfer'"`
+	Reference string `json:"reference"`
+	// ReceiptNumber is assigned on create (PREFIX-YYYY-00001).
+	ReceiptNumber string    `json:"receipt_number" gorm:"index"`
+	Notes         string    `json:"notes" gorm:"type:text"`
+	CreatedByID   uuid.UUID `json:"created_by_id" gorm:"type:uuid"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }

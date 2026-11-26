@@ -207,6 +207,8 @@ func allApplicationModels() []interface{} {
 		&models.StoreSubscription{},
 		&models.SubscriptionCycle{},
 		&models.SubscriptionPayment{},
+		&models.SubscriptionBillingSettings{},
+		&models.SubscriptionDocCounter{},
 		&models.WhatsAppInvoiceSettings{},
 		&models.WhatsAppInvoiceLog{},
 		&models.TelegramSettings{},

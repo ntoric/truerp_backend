@@ -55,6 +55,7 @@ var defaultPageFeatureKeys = []string{
 	"/marketing",
 	"/marketing/whatsapp-templates",
 	"/marketing/channels",
+	"/marketing/calendar",
 	"/sms-marketing",
 	"/email-marketing",
 	"/whatsapp-marketing",

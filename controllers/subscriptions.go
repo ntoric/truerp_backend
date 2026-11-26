@@ -159,8 +159,18 @@ func subPaymentStatus(amount, paid float64) string {
 // Renewal engine
 // ---------------------------------------------------------------------------
 
+// cycleIsComplimentary reports whether cycle number n of sub is free.
+func cycleIsComplimentary(sub *models.StoreSubscription, n int) bool {
+	return sub.IsComplimentary && (sub.ComplimentaryUntilCycle <= 0 || n <= sub.ComplimentaryUntilCycle)
+}
+
 func newSubCycle(sub *models.StoreSubscription, number int, start, end, source string) models.SubscriptionCycle {
 	amount := roundMoney(sub.Price)
+	comp := cycleIsComplimentary(sub, number)
+	waived := 0.0
+	if comp {
+		waived, amount = amount, 0
+	}
 	cycle := models.SubscriptionCycle{
 		ID:             uuid.New(),
 		SubscriptionID: sub.ID,
@@ -171,6 +181,13 @@ func newSubCycle(sub *models.StoreSubscription, number int, start, end, source s
 		Amount:         amount,
 		PaymentStatus:  subPaymentStatus(amount, 0),
 		Source:         source,
+		Complimentary:  comp,
+		WaivedAmount:   waived,
+		InvoiceDate:    start,
+	}
+	// Billed ahead of its start (paid in advance): invoice it today.
+	if today := storeToday(sub.StoreID); start > today {
+		cycle.InvoiceDate = today
 	}
 	if cycle.PaymentStatus == subPayPaid {
 		now := time.Now()
@@ -210,6 +227,11 @@ func rollSubscription(tx *gorm.DB, sub *models.StoreSubscription, today string) 
 		sub.CurrentCycle = next.CycleNumber
 		sub.CurrentPeriodStart = next.PeriodStart
 		sub.CurrentPeriodEnd = next.PeriodEnd
+		// A limited complimentary period is over once a paid cycle starts.
+		if sub.IsComplimentary && !cycleIsComplimentary(sub, sub.CurrentCycle) {
+			sub.IsComplimentary = false
+			sub.ComplimentaryUntilCycle = 0
+		}
 		changed = true
 	}
 	if changed {
@@ -254,6 +276,7 @@ func processSubscriptionRenewals() {
 // every 15 minutes.
 func StartSubscriptionRenewalScheduler() {
 	go func() {
+		backfillSubscriptionDocNumbers()
 		processSubscriptionRenewals()
 		ticker := time.NewTicker(15 * time.Minute)
 		defer ticker.Stop()
@@ -261,6 +284,37 @@ func StartSubscriptionRenewalScheduler() {
 			processSubscriptionRenewals()
 		}
 	}()
+}
+
+// backfillSubscriptionDocNumbers numbers cycles and payments recorded before
+// invoices and receipts existed, oldest first.
+func backfillSubscriptionDocNumbers() {
+	var cycles []models.SubscriptionCycle
+	utils.DB.Where("invoice_number = '' OR invoice_number IS NULL").Order("created_at ASC, cycle_number ASC").Find(&cycles)
+	for _, cy := range cycles {
+		if cy.InvoiceDate == "" {
+			cy.InvoiceDate = cy.PeriodStart
+		}
+		_ = utils.DB.Transaction(func(tx *gorm.DB) error {
+			n, err := models.NextSubscriptionDocNumber(tx, "invoice", cy.InvoiceDate)
+			if err != nil {
+				return err
+			}
+			return tx.Model(&models.SubscriptionCycle{}).Where("id = ?", cy.ID).
+				Updates(map[string]interface{}{"invoice_number": n, "invoice_date": cy.InvoiceDate}).Error
+		})
+	}
+	var payments []models.SubscriptionPayment
+	utils.DB.Where("receipt_number = '' OR receipt_number IS NULL").Order("created_at ASC").Find(&payments)
+	for _, p := range payments {
+		_ = utils.DB.Transaction(func(tx *gorm.DB) error {
+			n, err := models.NextSubscriptionDocNumber(tx, "receipt", p.PaymentDate)
+			if err != nil {
+				return err
+			}
+			return tx.Model(&models.SubscriptionPayment{}).Where("id = ?", p.ID).Update("receipt_number", n).Error
+		})
+	}
 }
 
 // recomputeCycle re-derives a cycle's paid amount and status from its payments.
@@ -293,19 +347,24 @@ func recomputeCycle(tx *gorm.DB, cycleID uuid.UUID) (models.SubscriptionCycle, e
 
 type subscriptionView struct {
 	models.StoreSubscription
-	FeatureList    []string                     `json:"feature_list"`
-	StoreName      string                       `json:"store_name"`
-	StoreCode      string                       `json:"store_code"`
-	PlanDesc       string                       `json:"plan_description"`
-	Today          string                       `json:"today"`
-	RemainingDays  int                          `json:"remaining_days"`
-	TotalDays      int                          `json:"total_days"`
-	CurrentPayment string                       `json:"current_payment_status"`
-	AmountDue      float64                      `json:"amount_due"`
-	NextCyclePaid  bool                         `json:"next_cycle_paid"`
-	TotalPaid      float64                      `json:"total_paid"`
-	Cycles         []models.SubscriptionCycle   `json:"cycles,omitempty"`
-	Payments       []models.SubscriptionPayment `json:"payments,omitempty"`
+	FeatureList    []string `json:"feature_list"`
+	StoreName      string   `json:"store_name"`
+	StoreCode      string   `json:"store_code"`
+	PlanDesc       string   `json:"plan_description"`
+	Today          string   `json:"today"`
+	RemainingDays  int      `json:"remaining_days"`
+	TotalDays      int      `json:"total_days"`
+	CurrentPayment string   `json:"current_payment_status"`
+	AmountDue      float64  `json:"amount_due"`
+	NextCyclePaid  bool     `json:"next_cycle_paid"`
+	TotalPaid      float64  `json:"total_paid"`
+	// CurrentComplimentary: the running cycle is free. ComplimentaryCyclesLeft
+	// counts free cycles from the current one (-1 = no end date).
+	CurrentComplimentary    bool                         `json:"current_complimentary"`
+	ComplimentaryCyclesLeft int                          `json:"complimentary_cycles_left"`
+	TotalWaived             float64                      `json:"total_waived"`
+	Cycles                  []models.SubscriptionCycle   `json:"cycles,omitempty"`
+	Payments                []models.SubscriptionPayment `json:"payments,omitempty"`
 }
 
 func buildSubscriptionView(sub models.StoreSubscription, withDetail bool) subscriptionView {
@@ -333,7 +392,9 @@ func buildSubscriptionView(sub models.StoreSubscription, withDetail bool) subscr
 	for _, c := range cycles {
 		if c.CycleNumber == sub.CurrentCycle {
 			v.CurrentPayment = c.PaymentStatus
+			v.CurrentComplimentary = c.Complimentary
 		}
+		v.TotalWaived += c.WaivedAmount
 		if c.CycleNumber == sub.CurrentCycle+1 && c.PaymentStatus == subPayPaid {
 			v.NextCyclePaid = true
 		}
@@ -345,6 +406,15 @@ func buildSubscriptionView(sub models.StoreSubscription, withDetail bool) subscr
 	}
 	v.AmountDue = roundMoney(v.AmountDue)
 	v.TotalPaid = roundMoney(v.TotalPaid)
+	v.TotalWaived = roundMoney(v.TotalWaived)
+	switch {
+	case !sub.IsComplimentary:
+		v.ComplimentaryCyclesLeft = 0
+	case sub.ComplimentaryUntilCycle <= 0:
+		v.ComplimentaryCyclesLeft = -1
+	default:
+		v.ComplimentaryCyclesLeft = max(sub.ComplimentaryUntilCycle-sub.CurrentCycle+1, 0)
+	}
 	if withDetail {
 		v.Cycles = cycles
 		var payments []models.SubscriptionPayment
@@ -518,10 +588,18 @@ func AdminSubscriptionOverview(c *gin.Context) {
 	var subs []models.StoreSubscription
 	utils.DB.Where("status = ?", subStatusActive).Find(&subs)
 
-	var mrr float64
-	renewingSoon, autoRenewOff := 0, 0
+	var mrr, compValue float64
+	renewingSoon, autoRenewOff, complimentary := 0, 0, 0
 	for _, s := range subs {
-		if s.BillingCycle == subCycleAnnual {
+		if cycleIsComplimentary(&s, s.CurrentCycle) {
+			// Free right now: not revenue, but track what is given away.
+			complimentary++
+			if s.BillingCycle == subCycleAnnual {
+				compValue += s.Price / 12
+			} else {
+				compValue += s.Price
+			}
+		} else if s.BillingCycle == subCycleAnnual {
 			mrr += s.Price / 12
 		} else {
 			mrr += s.Price
@@ -557,6 +635,8 @@ func AdminSubscriptionOverview(c *gin.Context) {
 		"mrr":                  roundMoney(mrr),
 		"renewing_in_7_days":   renewingSoon,
 		"auto_renew_off":       autoRenewOff,
+		"complimentary":        complimentary,
+		"complimentary_value":  roundMoney(compValue),
 		"outstanding":          roundMoney(outstanding.Sum),
 		"collected_this_month": roundMoney(collected.Sum),
 	})
@@ -674,6 +754,11 @@ type createSubscriptionInput struct {
 	Notes           string                    `json:"notes"`
 	ReplaceExisting bool                      `json:"replace_existing"`
 	InitialPayment  *subscriptionPaymentInput `json:"initial_payment"`
+	// Complimentary: free of charge for ComplimentaryCycles cycles (0 = no
+	// end). Price stays the regular price billed after the free period.
+	IsComplimentary     bool   `json:"is_complimentary"`
+	ComplimentaryCycles int    `json:"complimentary_cycles"`
+	ComplimentaryReason string `json:"complimentary_reason"`
 }
 
 // AdminCreateSubscription assigns a plan to a store. A store has at most one
@@ -725,6 +810,13 @@ func AdminCreateSubscription(c *gin.Context) {
 		}
 		price = roundMoney(*in.Price)
 	}
+	if in.ComplimentaryCycles < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Complimentary cycles cannot be negative"})
+		return
+	}
+	if in.IsComplimentary {
+		in.InitialPayment = nil // nothing to pay for a free cycle
+	}
 	if in.InitialPayment != nil {
 		if err := in.InitialPayment.validate(today); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -762,6 +854,11 @@ func AdminCreateSubscription(c *gin.Context) {
 		Notes:              strings.TrimSpace(in.Notes),
 		CreatedByID:        actor,
 	}
+	if in.IsComplimentary {
+		sub.IsComplimentary = true
+		sub.ComplimentaryUntilCycle = in.ComplimentaryCycles // cycle 1 is the first
+		sub.ComplimentaryReason = strings.TrimSpace(in.ComplimentaryReason)
+	}
 
 	err = utils.DB.Transaction(func(tx *gorm.DB) error {
 		if existErr == nil {
@@ -796,15 +893,61 @@ func AdminCreateSubscription(c *gin.Context) {
 	c.JSON(http.StatusCreated, buildSubscriptionView(sub, true))
 }
 
-// AdminUpdateSubscription toggles auto-renew and edits notes.
+// repriceCycles applies the subscription's complimentary terms to cycles that
+// have not been paid for: upcoming cycles always, and the current cycle when
+// waiveCurrent is set (making an active plan complimentary waives what is
+// still owed for the running period). Cycles that already started stay as
+// they are when complimentary is turned off.
+func repriceCycles(tx *gorm.DB, sub *models.StoreSubscription, waiveCurrent bool) error {
+	var cycles []models.SubscriptionCycle
+	if err := tx.Where("subscription_id = ? AND cycle_number >= ?", sub.ID, sub.CurrentCycle).Find(&cycles).Error; err != nil {
+		return err
+	}
+	for _, cy := range cycles {
+		comp := cycleIsComplimentary(sub, cy.CycleNumber)
+		switch {
+		case cy.CycleNumber == sub.CurrentCycle:
+			if !waiveCurrent || !comp || cy.Complimentary {
+				continue
+			}
+			// Waive the unpaid remainder of the running cycle.
+			cy.WaivedAmount = roundMoney(cy.Amount - cy.AmountPaid)
+			cy.Amount = cy.AmountPaid
+			cy.Complimentary = true
+		case cy.AmountPaid > 0.005:
+			continue // paid in advance: leave it
+		case comp:
+			cy.WaivedAmount, cy.Amount, cy.Complimentary = roundMoney(sub.Price), 0, true
+		default:
+			cy.WaivedAmount, cy.Amount, cy.Complimentary = 0, roundMoney(sub.Price), false
+		}
+		cy.PaymentStatus = subPaymentStatus(cy.Amount, cy.AmountPaid)
+		if cy.PaymentStatus == subPayPaid && cy.PaidAt == nil {
+			now := time.Now()
+			cy.PaidAt = &now
+		} else if cy.PaymentStatus != subPayPaid {
+			cy.PaidAt = nil
+		}
+		if err := tx.Save(&cy).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// AdminUpdateSubscription toggles auto-renew, edits notes and switches the
+// subscription to or from complimentary.
 func AdminUpdateSubscription(c *gin.Context) {
 	sub, ok := findSubscription(c)
 	if !ok {
 		return
 	}
 	var in struct {
-		AutoRenew *bool   `json:"auto_renew"`
-		Notes     *string `json:"notes"`
+		AutoRenew           *bool   `json:"auto_renew"`
+		Notes               *string `json:"notes"`
+		IsComplimentary     *bool   `json:"is_complimentary"`
+		ComplimentaryCycles *int    `json:"complimentary_cycles"`
+		ComplimentaryReason *string `json:"complimentary_reason"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -816,7 +959,52 @@ func AdminUpdateSubscription(c *gin.Context) {
 	if in.Notes != nil {
 		sub.Notes = strings.TrimSpace(*in.Notes)
 	}
-	if err := utils.DB.Save(&sub).Error; err != nil {
+	if in.ComplimentaryReason != nil {
+		sub.ComplimentaryReason = strings.TrimSpace(*in.ComplimentaryReason)
+	}
+	compChanged, waiveCurrent := false, false
+	if in.IsComplimentary != nil || in.ComplimentaryCycles != nil {
+		if sub.Status != subStatusActive {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Only an active subscription can be made complimentary"})
+			return
+		}
+		enable := sub.IsComplimentary
+		if in.IsComplimentary != nil {
+			enable = *in.IsComplimentary
+		}
+		if enable {
+			// complimentary_cycles counts from the current cycle (0 = no end).
+			n := 0
+			if in.ComplimentaryCycles != nil {
+				n = *in.ComplimentaryCycles
+			} else if sub.IsComplimentary && sub.ComplimentaryUntilCycle > 0 {
+				n = sub.ComplimentaryUntilCycle - sub.CurrentCycle + 1
+			}
+			if n < 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Complimentary cycles cannot be negative"})
+				return
+			}
+			waiveCurrent = !sub.IsComplimentary
+			sub.IsComplimentary = true
+			sub.ComplimentaryUntilCycle = 0
+			if n > 0 {
+				sub.ComplimentaryUntilCycle = sub.CurrentCycle + n - 1
+			}
+		} else {
+			sub.IsComplimentary = false
+			sub.ComplimentaryUntilCycle = 0
+		}
+		compChanged = true
+	}
+	if err := utils.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(&sub).Error; err != nil {
+			return err
+		}
+		if compChanged {
+			return repriceCycles(tx, &sub, waiveCurrent)
+		}
+		return nil
+	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update subscription"})
 		return
 	}
@@ -873,16 +1061,20 @@ func AdminCreateSubscriptionPayment(c *gin.Context) {
 		return
 	}
 	today := storeToday(sub.StoreID)
-	if err := in.validate(today); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
 	applyTo := strings.ToLower(strings.TrimSpace(in.ApplyTo))
 	if applyTo == "" {
 		if in.CycleID != "" {
 			applyTo = "cycle"
 		} else {
 			applyTo = "next"
+		}
+	}
+	// Reactivating a complimentary subscription needs no payment.
+	freeReactivation := applyTo == "reactivate" && sub.IsComplimentary
+	if !freeReactivation {
+		if err := in.validate(today); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
 		}
 	}
 	actor := actorUserID(c)
@@ -896,10 +1088,19 @@ func AdminCreateSubscriptionPayment(c *gin.Context) {
 			if err := tx.Where("id = ? AND subscription_id = ?", in.CycleID, sub.ID).First(&cycle).Error; err != nil {
 				return badRequest("Billing cycle not found")
 			}
+			if cycle.Amount-cycle.AmountPaid <= 0.005 {
+				if cycle.Complimentary {
+					return badRequest("This cycle is complimentary — no payment needed")
+				}
+				return badRequest("This cycle is already fully paid")
+			}
 			cycleID = cycle.ID
 		case "next":
 			if sub.Status != subStatusActive {
 				return badRequest("Subscription is cancelled — reactivate it instead")
+			}
+			if cycleIsComplimentary(&sub, sub.CurrentCycle+1) {
+				return badRequest("The next cycle is complimentary — no payment needed")
 			}
 			var next models.SubscriptionCycle
 			err := tx.Where("subscription_id = ? AND cycle_number = ?", sub.ID, sub.CurrentCycle+1).First(&next).Error
@@ -942,6 +1143,15 @@ func AdminCreateSubscriptionPayment(c *gin.Context) {
 				return err
 			}
 			cycleID = cycle.ID
+			if cycle.Complimentary {
+				return nil // free cycle: nothing to record
+			}
+			if freeReactivation {
+				// Past the complimentary window: this cycle is billable.
+				if err := in.validate(today); err != nil {
+					return badRequest(err.Error())
+				}
+			}
 		default:
 			return badRequest("apply_to must be cycle, next or reactivate")
 		}
@@ -959,7 +1169,11 @@ func AdminCreateSubscriptionPayment(c *gin.Context) {
 		return
 	}
 	utils.DB.First(&sub, "id = ?", sub.ID)
-	c.JSON(http.StatusCreated, gin.H{"payment": payment, "subscription": buildSubscriptionView(sub, true)})
+	resp := gin.H{"subscription": buildSubscriptionView(sub, true)}
+	if payment.ID != uuid.Nil {
+		resp["payment"] = payment
+	}
+	c.JSON(http.StatusCreated, resp)
 }
 
 // AdminDeleteSubscriptionPayment removes a mistaken payment. A not-yet-started

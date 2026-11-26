@@ -983,6 +983,8 @@ func SetupRoutes(r *gin.Engine) {
 	{
 		marketing.GET("/channels", controllers.GetMarketingChannels)
 		marketing.GET("/stats", controllers.GetMarketingStats)
+		marketing.GET("/occasions", controllers.GetMarketingOccasions)
+		marketing.GET("/calendar", controllers.GetMarketingCalendar)
 		marketing.POST("/audience/preview", controllers.PreviewMarketingAudience)
 		marketing.POST("/test", controllers.TestMarketingMessage)
 		marketing.GET("/campaigns", controllers.ListMarketingCampaigns)
@@ -1122,6 +1124,9 @@ func SetupRoutes(r *gin.Engine) {
 	adminSubscriptions.Use(middleware.AuthRequired(), middleware.SuperAdminRequired())
 	{
 		adminSubscriptions.GET("/overview", controllers.AdminSubscriptionOverview)
+		adminSubscriptions.GET("/billing-settings", controllers.AdminGetSubscriptionBillingSettings)
+		adminSubscriptions.PUT("/billing-settings", controllers.AdminUpdateSubscriptionBillingSettings)
+		adminSubscriptions.POST("/billing-settings/preview", controllers.AdminPreviewSubscriptionDocument)
 		adminSubscriptions.GET("/plans", controllers.AdminListSubscriptionPlans)
 		adminSubscriptions.POST("/plans", controllers.AdminCreateSubscriptionPlan)
 		adminSubscriptions.PUT("/plans/:id", controllers.AdminUpdateSubscriptionPlan)
@@ -1133,6 +1138,8 @@ func SetupRoutes(r *gin.Engine) {
 		adminSubscriptions.POST("/:id/cancel", controllers.AdminCancelSubscription)
 		adminSubscriptions.POST("/:id/payments", controllers.AdminCreateSubscriptionPayment)
 		adminSubscriptions.DELETE("/:id/payments/:paymentId", controllers.AdminDeleteSubscriptionPayment)
+		adminSubscriptions.GET("/:id/cycles/:cycleId/invoice", controllers.AdminSubscriptionInvoicePDF)
+		adminSubscriptions.GET("/:id/payments/:paymentId/receipt", controllers.AdminSubscriptionReceiptPDF)
 	}
 
 	// My Plan: the active store's subscription and history (any store user).
@@ -1141,6 +1148,8 @@ func SetupRoutes(r *gin.Engine) {
 	{
 		myPlan.GET("", controllers.GetMyPlan)
 		myPlan.GET("/history", controllers.GetMyPlanHistory)
+		myPlan.GET("/invoices/:cycleId", controllers.MyPlanInvoicePDF)
+		myPlan.GET("/receipts/:paymentId", controllers.MyPlanReceiptPDF)
 	}
 
 	// Announcement publishing (super admin backoffice): CRUD + image upload.

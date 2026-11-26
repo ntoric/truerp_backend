@@ -58,11 +58,32 @@ type MarketingCampaign struct {
 	// AudiencePartyIDs is a JSON array of party UUIDs (audience_type=specific).
 	AudiencePartyIDs string `json:"audience_party_ids" gorm:"type:text"`
 
-	// Status: draft, scheduled, sending, sent, partial, failed.
+	// Status: draft, scheduled, sending, sent, partial, failed; a recurring
+	// series that has run its last time is completed.
 	Status      string     `json:"status" gorm:"default:'draft';index"`
 	ScheduledAt *time.Time `json:"scheduled_at" gorm:"index"`
 	SentAt      *time.Time `json:"sent_at"`
 	LastError   string     `json:"last_error" gorm:"type:text"`
+
+	// Occasion (Marketing → Calendar) the campaign is for, e.g. "diwali".
+	// OccasionName fills the {{occasion}} placeholder. OccasionDate is the
+	// occasion's date (YYYY-MM-DD) for the current ScheduledAt; a campaign may
+	// be scheduled before or after it, and repeats keep that offset.
+	OccasionKey  string `json:"occasion_key"`
+	OccasionName string `json:"occasion_name"`
+	OccasionDate string `json:"occasion_date"`
+
+	// Recurrence: "" (one-time), yearly_occasion (every year on the
+	// occasion's date, which moves for lunar festivals), yearly, monthly,
+	// weekly. A recurring campaign is a series: each run is sent as its own
+	// child campaign (ParentID = series) and the series moves ScheduledAt to
+	// the next run. RecurrenceUntil (YYYY-MM-DD, inclusive) ends it; the series
+	// is then "completed".
+	Recurrence      string     `json:"recurrence"`
+	RecurrenceUntil string     `json:"recurrence_until"`
+	SeriesStart     *time.Time `json:"series_start"`
+	RunCount        int        `json:"run_count" gorm:"default:0"`
+	ParentID        *uuid.UUID `json:"parent_id,omitempty" gorm:"type:uuid;index"`
 
 	TotalRecipients int `json:"total_recipients" gorm:"default:0"`
 	SentCount       int `json:"sent_count" gorm:"default:0"`

@@ -80,6 +80,8 @@ var marketingAudienceTypes = map[string]bool{
 var (
 	marketingEmailSender = utils.SendEmailForUser
 	marketingSMSSender   = utils.SendStoreSMS
+	// marketingRunAsync starts a "send now" run in the background.
+	marketingRunAsync = func(id uuid.UUID) { go runMarketingCampaign(id) }
 )
 
 // ---------------------------------------------------------------------------
@@ -103,6 +105,7 @@ var marketingPlaceholders = []marketingPlaceholder{
 	{"link", "Link (shop / catalogue URL)"},
 	{"loyalty_points", "Customer loyalty points"},
 	{"loyalty_cash", "Customer loyalty cashback (₹)"},
+	{"occasion", "Occasion (e.g. Diwali)"},
 }
 
 var marketingPlaceholderRe = regexp.MustCompile(`\{\{\s*([a-z_]+)\s*\}\}`)
@@ -156,6 +159,7 @@ func marketingValues(camp *models.MarketingCampaign, party *models.Party, busine
 		"link":           strings.TrimSpace(camp.Link),
 		"loyalty_points": strconv.FormatInt(party.LoyaltyPoints, 10),
 		"loyalty_cash":   formatINRAmount(party.LoyaltyCash),
+		"occasion":       strings.TrimSpace(camp.OccasionName),
 	}
 }
 
@@ -286,6 +290,10 @@ type marketingCampaignInput struct {
 	AudienceCategory string      `json:"audience_category"`
 	AudiencePartyIDs []uuid.UUID `json:"audience_party_ids"`
 	ScheduledAt      *time.Time  `json:"scheduled_at"`
+	OccasionKey      string      `json:"occasion_key"`
+	OccasionDate     string      `json:"occasion_date"`
+	Recurrence       string      `json:"recurrence"`
+	RecurrenceUntil  string      `json:"recurrence_until"`
 }
 
 // apply validates the input's structure and copies it onto camp.
@@ -377,7 +385,11 @@ func (in marketingCampaignInput) apply(camp *models.MarketingCampaign) error {
 	camp.AudienceType = audience
 	camp.AudienceCategory = strings.TrimSpace(in.AudienceCategory)
 	camp.AudiencePartyIDs = string(idsJSON)
-	return nil
+	camp.OccasionKey = strings.TrimSpace(in.OccasionKey)
+	camp.OccasionDate = strings.TrimSpace(in.OccasionDate)
+	camp.Recurrence = strings.TrimSpace(in.Recurrence)
+	camp.RecurrenceUntil = strings.TrimSpace(in.RecurrenceUntil)
+	return validateMarketingRecurrence(camp)
 }
 
 func campaignChannels(camp *models.MarketingCampaign) []string {
@@ -868,7 +880,7 @@ func recoverInterruptedMarketingCampaigns() {
 
 func processDueMarketingCampaigns() {
 	var due []models.MarketingCampaign
-	if err := utils.DB.Select("id", "user_id", "store_id", "name").
+	if err := utils.DB.Select("id", "user_id", "store_id", "name", "recurrence").
 		Where("status = ? AND scheduled_at IS NOT NULL AND scheduled_at <= ?", mktStatusScheduled, time.Now()).
 		Find(&due).Error; err != nil {
 		log.Printf("[marketing] scheduler: %v", err)
@@ -885,6 +897,10 @@ func processDueMarketingCampaigns() {
 					"last_error": "Not sent: Campaigns was disabled for this store (Pages & Menus) at the scheduled time. Reschedule or send it now.",
 				})
 			log.Printf("[marketing] scheduler: campaign %s (%s) skipped, Campaigns page disabled", d.ID, d.Name)
+			continue
+		}
+		if d.Recurrence != mktRecurNone {
+			fireMarketingSeries(d.ID)
 			continue
 		}
 		if claimMarketingCampaign(d.ID, mktStatusScheduled) {
@@ -961,6 +977,9 @@ func ListMarketingCampaigns(c *gin.Context) {
 	}
 	if ch := c.Query("channel"); ch != "" {
 		q = q.Where("channels LIKE ?", "%"+ch+"%")
+	}
+	if p := c.Query("parent_id"); p != "" {
+		q = q.Where("parent_id = ?", p)
 	}
 	if s := strings.TrimSpace(c.Query("search")); s != "" {
 		q = q.Where("LOWER(name) LIKE ?", "%"+strings.ToLower(s)+"%")
@@ -1057,6 +1076,10 @@ func CreateMarketingCampaign(c *gin.Context) {
 		}
 		camp.ScheduledAt, camp.Status = at, mktStatusScheduled
 	}
+	if err := startMarketingSeries(&camp, at); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	if err := utils.DB.Create(&camp).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save campaign"})
 		return
@@ -1095,6 +1118,10 @@ func UpdateMarketingCampaign(c *gin.Context) {
 		camp.ScheduledAt, camp.Status = at, mktStatusScheduled
 	} else {
 		camp.ScheduledAt, camp.Status = nil, mktStatusDraft
+	}
+	if err := startMarketingSeries(&camp, at); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 	// Guard against the scheduler claiming it mid-edit.
 	res := utils.DB.Model(&models.MarketingCampaign{}).
@@ -1140,11 +1167,23 @@ func SendMarketingCampaign(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": strings.Join(errs, "; "), "errors": errs})
 		return
 	}
+	if camp.Recurrence != mktRecurNone {
+		// A repeating campaign stays on its schedule; "send now" sends one
+		// extra run as its own campaign.
+		run, err := spawnMarketingRun(&camp, time.Now(), camp.OccasionDate)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start sending"})
+			return
+		}
+		marketingRunAsync(run.ID)
+		c.JSON(http.StatusAccepted, run)
+		return
+	}
 	if !claimMarketingCampaign(camp.ID, mktStatusDraft, mktStatusScheduled) {
 		c.JSON(http.StatusConflict, gin.H{"error": "Campaign is already sending"})
 		return
 	}
-	go runMarketingCampaign(camp.ID)
+	marketingRunAsync(camp.ID)
 	camp.Status = mktStatusSending
 	c.JSON(http.StatusAccepted, camp)
 }
@@ -1157,7 +1196,7 @@ func CancelMarketingSchedule(c *gin.Context) {
 	}
 	res := utils.DB.Model(&models.MarketingCampaign{}).
 		Where("id = ? AND status = ?", camp.ID, mktStatusScheduled).
-		Updates(map[string]interface{}{"status": mktStatusDraft, "scheduled_at": nil})
+		Updates(map[string]interface{}{"status": mktStatusDraft, "scheduled_at": nil, "series_start": nil, "run_count": 0})
 	if res.RowsAffected == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Campaign is not scheduled"})
 		return
@@ -1177,6 +1216,7 @@ func DuplicateMarketingCampaign(c *gin.Context) {
 	cp.Name = camp.Name + " (copy)"
 	cp.Status = mktStatusDraft
 	cp.ScheduledAt, cp.SentAt = nil, nil
+	cp.SeriesStart, cp.RunCount, cp.ParentID = nil, 0, nil
 	cp.LastError = ""
 	cp.TotalRecipients, cp.SentCount, cp.FailedCount, cp.SkippedCount = 0, 0, 0, 0
 	cp.CreatedAt, cp.UpdatedAt = time.Time{}, time.Time{}
