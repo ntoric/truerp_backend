@@ -205,6 +205,13 @@ func CreateInvoice(c *gin.Context) {
 		return
 	}
 
+	for i, item := range input.Items {
+		if msg := invoiceItemQuantityError(i, item.Description, item.Quantity.Float64()); msg != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+			return
+		}
+	}
+
 	if input.ClientSaleID == nil || *input.ClientSaleID == uuid.Nil {
 		if headerID := parseOptionalUUID(c.GetHeader("Idempotency-Key")); headerID != uuid.Nil {
 			input.ClientSaleID = &headerID
@@ -603,6 +610,13 @@ func UpdateInvoice(c *gin.Context) {
 		fmt.Printf("[DEBUG] UpdateInvoice - JSON bind error: %v\n", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	for i, item := range input.Items {
+		if msg := invoiceItemQuantityError(i, item.Description, item.Quantity.Float64()); msg != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+			return
+		}
 	}
 
 	if msg := checkMaxInvoiceDiscount(c, input.InvoiceDiscount, invoice.InvoiceDiscount); msg != "" {
@@ -1175,4 +1189,19 @@ func DownloadInvoicesPDFZip(c *gin.Context) {
 		}
 	}
 	zw.Close()
+}
+
+// invoiceItemQuantityError rejects line items whose quantity is zero or
+// negative. Without this check a 0 qty line is totalled as 0 but persisted as
+// 1 (InvoiceItem.Quantity has a GORM default of 1, which replaces the zero
+// value on insert), so the PDF and stock deduction disagree with the total.
+func invoiceItemQuantityError(index int, description string, qty float64) string {
+	if qty > 0 {
+		return ""
+	}
+	name := strings.TrimSpace(description)
+	if name == "" {
+		name = fmt.Sprintf("item %d", index+1)
+	}
+	return fmt.Sprintf("Quantity for %q must be greater than 0", name)
 }
