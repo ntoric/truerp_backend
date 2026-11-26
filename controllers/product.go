@@ -115,6 +115,10 @@ func GetProducts(c *gin.Context) {
 		findQuery = findQuery.Order("LOWER(name) " + dir)
 	case "category":
 		findQuery = findQuery.Order("LOWER(category) " + dir)
+	case "plu":
+		// PLU is a string column of digits: order by length then value so
+		// "999" sorts before "1000"; products without a PLU go last.
+		findQuery = findQuery.Order("(plu = '')").Order("LENGTH(plu) " + dir).Order("plu " + dir)
 	case "sale_price":
 		findQuery = findQuery.Order("sale_price " + dir)
 	case "purchase_price":
@@ -129,6 +133,8 @@ func GetProducts(c *gin.Context) {
 	default:
 		findQuery = findQuery.Order("created_at DESC")
 	}
+	// Tie-breaker keeps page boundaries stable when sort keys repeat.
+	findQuery = findQuery.Order("id")
 	if paginated && perPage > 0 {
 		findQuery = findQuery.Limit(perPage).Offset((page - 1) * perPage)
 	}
