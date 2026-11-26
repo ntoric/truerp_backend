@@ -976,6 +976,26 @@ func SetupRoutes(r *gin.Engine) {
 		emailMarketing.POST("/:id/schedule", controllers.ScheduleEmailCampaign)
 	}
 
+	// Marketing campaigns (per store): multi-channel offers / promotions sent
+	// over the store's existing WhatsApp, Telegram, email and SMS connections.
+	marketing := r.Group("/api/v1/marketing")
+	marketing.Use(middleware.AuthRequired(), controllers.MarketingPageRequired())
+	{
+		marketing.GET("/channels", controllers.GetMarketingChannels)
+		marketing.GET("/stats", controllers.GetMarketingStats)
+		marketing.POST("/audience/preview", controllers.PreviewMarketingAudience)
+		marketing.POST("/test", controllers.TestMarketingMessage)
+		marketing.GET("/campaigns", controllers.ListMarketingCampaigns)
+		marketing.POST("/campaigns", controllers.CreateMarketingCampaign)
+		marketing.GET("/campaigns/:id", controllers.GetMarketingCampaign)
+		marketing.PUT("/campaigns/:id", controllers.UpdateMarketingCampaign)
+		marketing.DELETE("/campaigns/:id", controllers.DeleteMarketingCampaign)
+		marketing.POST("/campaigns/:id/send", controllers.SendMarketingCampaign)
+		marketing.POST("/campaigns/:id/cancel-schedule", controllers.CancelMarketingSchedule)
+		marketing.POST("/campaigns/:id/duplicate", controllers.DuplicateMarketingCampaign)
+		marketing.GET("/campaigns/:id/deliveries", controllers.GetMarketingDeliveries)
+	}
+
 	// WhatsApp Marketing routes
 	whatsappMarketing := r.Group("/api/v1/whatsapp-marketing")
 	whatsappMarketing.Use(middleware.AuthRequired())

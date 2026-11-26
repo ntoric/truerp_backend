@@ -52,6 +52,7 @@ func main() {
 	// Start the background scheduler that auto-sends email campaigns when
 	// their scheduled date/time arrives.
 	controllers.StartEmailCampaignScheduler()
+	controllers.StartMarketingCampaignScheduler()
 
 	// Start the background scheduler that auto-emails the daily/periodic
 	// report PDF to configured recipients at the configured time each day.

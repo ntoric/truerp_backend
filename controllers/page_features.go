@@ -52,6 +52,9 @@ var defaultPageFeatureKeys = []string{
 	"/payroll",
 	"/pos",
 	"/pos/sessions",
+	"/marketing",
+	"/marketing/whatsapp-templates",
+	"/marketing/channels",
 	"/sms-marketing",
 	"/email-marketing",
 	"/whatsapp-marketing",
@@ -177,4 +180,25 @@ func UpdatePageFeatures(c *gin.Context) {
 		"pages":    pages,
 		"store_id": settings.StoreID,
 	})
+}
+
+// pageFeatureEnabledForStore reports whether a page key is enabled for a
+// store: the store's own row, then the global (NULL store) row, then the
+// all-enabled default. Unknown keys are enabled.
+func pageFeatureEnabledForStore(storeID *uuid.UUID, key string) bool {
+	var settings models.PageFeatureSettings
+	found := false
+	if storeID != nil && *storeID != uuid.Nil {
+		found = utils.DB.Where("store_id = ?", *storeID).
+			Order("created_at asc").First(&settings).Error == nil
+	}
+	if !found {
+		found = utils.DB.Where("store_id IS NULL").
+			Order("created_at asc").First(&settings).Error == nil
+	}
+	if !found {
+		return true
+	}
+	enabled, ok := parsePagesJSON(settings.PagesJSON)[key]
+	return !ok || enabled
 }
