@@ -649,7 +649,7 @@ func partyStatementChannelReadyError(userID uuid.UUID, channel string) string {
 			return "Set the statement WhatsApp template in Settings → WhatsApp Invoice → Party Statement Messages"
 		}
 		if (st.WhatsAppAttachPDF || partyStatementMappingNeedsPDF(st.WhatsAppVariableMapping)) && whatsAppInvoicePublicBaseURL(wa) == "" {
-			return "Public API URL is required to attach the statement PDF (Settings → WhatsApp Invoice)"
+			return "Public API URL is required to attach the statement PDF: set it in the WhatsApp tab → Shared options, or turn off \"Attach statement PDF\""
 		}
 		return ""
 	case partyStatementChannelTelegram:
