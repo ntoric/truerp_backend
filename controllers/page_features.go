@@ -70,6 +70,7 @@ var defaultPageFeatureKeys = []string{
 	"/b2b-orders",
 	"/settings/reminders",
 	"/settings/ca-share",
+	"/my-plan",
 }
 
 func defaultPageFeatures() map[string]bool {

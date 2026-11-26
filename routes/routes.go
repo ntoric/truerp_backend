@@ -1117,6 +1117,32 @@ func SetupRoutes(r *gin.Engine) {
 		announcements.GET("/active", controllers.ListActiveAnnouncements)
 	}
 
+	// Subscription plans & store subscriptions (super admin backoffice).
+	adminSubscriptions := r.Group("/api/v1/admin/subscriptions")
+	adminSubscriptions.Use(middleware.AuthRequired(), middleware.SuperAdminRequired())
+	{
+		adminSubscriptions.GET("/overview", controllers.AdminSubscriptionOverview)
+		adminSubscriptions.GET("/plans", controllers.AdminListSubscriptionPlans)
+		adminSubscriptions.POST("/plans", controllers.AdminCreateSubscriptionPlan)
+		adminSubscriptions.PUT("/plans/:id", controllers.AdminUpdateSubscriptionPlan)
+		adminSubscriptions.DELETE("/plans/:id", controllers.AdminDeleteSubscriptionPlan)
+		adminSubscriptions.GET("", controllers.AdminListSubscriptions)
+		adminSubscriptions.POST("", controllers.AdminCreateSubscription)
+		adminSubscriptions.GET("/:id", controllers.AdminGetSubscription)
+		adminSubscriptions.PATCH("/:id", controllers.AdminUpdateSubscription)
+		adminSubscriptions.POST("/:id/cancel", controllers.AdminCancelSubscription)
+		adminSubscriptions.POST("/:id/payments", controllers.AdminCreateSubscriptionPayment)
+		adminSubscriptions.DELETE("/:id/payments/:paymentId", controllers.AdminDeleteSubscriptionPayment)
+	}
+
+	// My Plan: the active store's subscription and history (any store user).
+	myPlan := r.Group("/api/v1/my-plan")
+	myPlan.Use(middleware.AuthRequired(), controllers.MyPlanPageRequired())
+	{
+		myPlan.GET("", controllers.GetMyPlan)
+		myPlan.GET("/history", controllers.GetMyPlanHistory)
+	}
+
 	// Announcement publishing (super admin backoffice): CRUD + image upload.
 	adminAnnouncements := r.Group("/api/v1/admin/announcements")
 	adminAnnouncements.Use(middleware.AuthRequired(), middleware.SuperAdminRequired())
