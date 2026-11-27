@@ -271,6 +271,42 @@ func runRawMigrations(db *gorm.DB) {
 	backfillPartyOpeningBalances(db)
 	resetInvoicePartyBalanceToggle(db)
 	backfillWhatsAppGatewayFromDeveloperSettings(db)
+	reactivateEditedParties(db)
+}
+
+// reactivateEditedParties undoes a bug where editing a party on the web
+// cleared parties.is_active (the edit form never sent the field, so it was
+// saved as false). No screen lets a user deactivate a party, so every
+// inactive party came from that bug; inactive parties were silently left out
+// of marketing campaigns. Runs once, tracked in data_repairs.
+func reactivateEditedParties(db *gorm.DB) {
+	if !db.Migrator().HasTable(&models.Party{}) {
+		return
+	}
+	if err := db.Exec(`CREATE TABLE IF NOT EXISTS data_repairs (
+		name VARCHAR(200) PRIMARY KEY,
+		applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)`).Error; err != nil {
+		log.Printf("reactivateEditedParties: create marker table failed: %v", err)
+		return
+	}
+	const marker = "party_is_active_edit_bug_v1"
+	var applied int64
+	if err := db.Raw(`SELECT COUNT(*) FROM data_repairs WHERE name = ?`, marker).Scan(&applied).Error; err != nil {
+		log.Printf("reactivateEditedParties: marker check failed: %v", err)
+		return
+	}
+	if applied > 0 {
+		return
+	}
+	res := db.Exec(`UPDATE parties SET is_active = ? WHERE is_active = ? OR is_active IS NULL`, true, false)
+	if res.Error != nil {
+		log.Printf("reactivateEditedParties: update failed: %v", res.Error)
+		return
+	}
+	if res.RowsAffected > 0 {
+		log.Printf("reactivateEditedParties: reactivated %d parties", res.RowsAffected)
+	}
+	db.Exec(`INSERT INTO data_repairs (name) VALUES (?)`, marker)
 }
 
 // resetInvoicePartyBalanceToggle turns off theme_settings.show_party_balance

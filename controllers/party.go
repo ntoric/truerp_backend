@@ -9,6 +9,7 @@ import (
 	"truerp/utils"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -253,11 +254,18 @@ func UpdateParty(c *gin.Context) {
 	fmt.Printf("[DEBUG] UpdateParty - UserID: %s, ID: %s\n", userID, id)
 
 	var input models.Party
-	if err := c.ShouldBindJSON(&input); err != nil {
+	if err := c.ShouldBindBodyWith(&input, binding.JSON); err != nil {
 		fmt.Printf("[DEBUG] UpdateParty - JSON bind error: %v\n", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	// is_active is optional: the web edit form doesn't send it, and a missing
+	// field must not deactivate the party (inactive parties are left out of
+	// marketing campaigns and the B2B shop).
+	var flags struct {
+		IsActive *bool `json:"is_active"`
+	}
+	_ = c.ShouldBindBodyWith(&flags, binding.JSON)
 
 	var party models.Party
 	if err := utils.DB.Where("user_id = ? AND id = ?", userID, id).First(&party).Error; err != nil {
@@ -282,7 +290,9 @@ func UpdateParty(c *gin.Context) {
 		"tan":          input.TAN,
 		"pan":          input.PAN,
 		"notes":        input.Notes,
-		"is_active":    input.IsActive,
+	}
+	if flags.IsActive != nil {
+		updates["is_active"] = *flags.IsActive
 	}
 
 	// The opening balance is editable; keep balance consistent by shifting

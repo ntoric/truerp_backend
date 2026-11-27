@@ -484,3 +484,45 @@ func TestMarketingSchedulerSkipsDisabledStore(t *testing.T) {
 		t.Fatalf("sent %d, status %s, err %q", len(*sms), camp.Status, camp.LastError)
 	}
 }
+
+// Editing a party on the web (the form doesn't send is_active) used to save
+// is_active=false, which silently dropped the party from every campaign.
+func TestPartyEditKeepsItInCampaignAudience(t *testing.T) {
+	db := setupMarketingTestDB(t)
+	_ = db.AutoMigrate(&models.AuditLog{})
+	store := uuid.New()
+	p := models.Party{ID: uuid.New(), UserID: store, Name: "Rahana", PartyType: "customer", IsActive: true}
+	if err := db.Create(&p).Error; err != nil {
+		t.Fatal(err)
+	}
+	edit := map[string]interface{}{"name": "Rahana", "party_type": "customer", "phone": "8765656765", "email": "rahana@test.in"}
+	if code, out := callMarketing(t, UpdateParty, http.MethodPut, store, p.ID.String(), edit); code != http.StatusOK {
+		t.Fatalf("update = %d %v", code, out)
+	}
+	var got models.Party
+	db.First(&got, "id = ?", p.ID)
+	if !got.IsActive || got.Phone != "8765656765" {
+		t.Fatalf("after edit: active=%v phone=%q", got.IsActive, got.Phone)
+	}
+
+	camp := models.MarketingCampaign{UserID: store}
+	in := marketingCampaignInput{Name: "x", Channels: []string{"email"}, AudienceType: "specific", AudiencePartyIDs: []uuid.UUID{p.ID}}
+	if err := in.apply(&camp); err != nil {
+		t.Fatal(err)
+	}
+	parties, err := marketingAudience(&camp)
+	if err != nil || len(parties) != 1 {
+		t.Fatalf("audience = %d parties, err %v", len(parties), err)
+	}
+	if to, why := marketingRecipient(mktChannelEmail, &parties[0], "91"); to != "rahana@test.in" {
+		t.Fatalf("email recipient = %q (%s)", to, why)
+	}
+
+	// An explicit is_active is still honoured.
+	edit["is_active"] = false
+	callMarketing(t, UpdateParty, http.MethodPut, store, p.ID.String(), edit)
+	db.First(&got, "id = ?", p.ID)
+	if got.IsActive {
+		t.Fatal("explicit is_active=false was ignored")
+	}
+}
